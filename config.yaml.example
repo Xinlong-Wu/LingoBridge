@@ -1,0 +1,36 @@
+# WeChatBox configuration
+# Copy this file to ~/.wechatbox/config.yaml and fill in your values.
+#   cp config.yaml.example ~/.wechatbox/config.yaml
+
+llm:
+  # LLM provider: "openai" (OpenAI-compatible API) or "anthropic"
+  provider: "openai"
+
+  # API base URL
+  #   DeepSeek:   https://api.deepseek.com/v1
+  #   OpenAI:     https://api.openai.com/v1
+  #   Ollama:     http://localhost:11434/v1
+  #   vLLM:       http://localhost:8000/v1
+  base_url: "https://api.deepseek.com/v1"
+
+  # Your API key
+  api_key: "sk-your-api-key-here"
+
+  # Model name
+  #   DeepSeek:   deepseek-chat
+  #   OpenAI:     gpt-4o
+  #   Anthropic:  claude-sonnet-4-20250514
+  #   Ollama:     llama3
+  model: "deepseek-chat"
+
+  # OpenAI API endpoint: "chat" (default, /v1/chat/completions) or "responses" (/v1/responses).
+  # Default: "chat"
+  endpoint: "chat"
+
+  # System prompt sent to the LLM with every conversation.
+  # Defaults to "You are a helpful assistant." if empty or omitted.
+  system_prompt: "You are a helpful assistant. Reply concisely."
+
+  # Maximum historical messages to send per request. 0 = no limit (send all).
+  # Default: 0
+  max_history: 0

@@ -1,1 +1,11 @@
 .qwen
+# Go build artifacts
+/wechatbox
+*.exe
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
