@@ -103,6 +103,9 @@ func Load() (Config, error) {
 	if cfg.LLM.MaxHistory < 0 {
 		cfg.LLM.MaxHistory = 0
 	}
+	if cfg.LLM.Endpoint == "" {
+		cfg.LLM.Endpoint = "chat"
+	}
 
 	return cfg, nil
 }
