@@ -10,59 +10,89 @@ import (
 	"wechatbox/internal/session"
 	"wechatbox/internal/store"
 	"wechatbox/internal/wechat/api"
-	"wechatbox/internal/wechat/cdn"
 	"wechatbox/internal/wechat/commands"
 	"wechatbox/internal/wechat/markdown"
 	"wechatbox/internal/wechat/message"
 )
 
 const (
-	// Coalescing config for streaming
-	minCharsCoalesce = 200
-	idleMsCoalesce   = 3000 * time.Millisecond
-
-	// Session expiry pause
-	sessionExpiryPause = 1 * time.Hour
-
-	// Backoff config
+	sessionExpiryPause  = 1 * time.Hour
 	maxConsecutiveFails = 3
 	backoffBase         = 5 * time.Second
-	longPollTimeout     = 35 * time.Second
 )
+
+type cursorStore interface {
+	GetSyncBuf(accountID string) (string, error)
+	SaveSyncBuf(accountID, buf string) error
+}
+
+type wechatClient interface {
+	GetUpdates(buf string) (*api.GetUpdatesResp, error)
+	SendMessage(msg *api.WeixinMessage) error
+	GetConfig(ilinkUserID, contextToken string) (*api.GetConfigResp, error)
+	SendTyping(ilinkUserID, typingTicket string, status int) error
+	NotifyStart() error
+	NotifyStop() error
+}
+
+type conversationManager interface {
+	commands.SessionManager
+	GetOrCreateActiveSession(userID string) (*store.Session, error)
+	LoadHistory(userID, sessionID string) (*store.Conversation, error)
+	SaveHistory(userID, sessionID string, conv *store.Conversation) error
+}
+
+type bot struct {
+	client    wechatClient
+	cursors   cursorStore
+	sessions  conversationManager
+	llmClient llm.Client
+	cfg       config.LLMConfig
+}
 
 // Run starts the single-threaded monitor loop for an account.
 func Run(st *store.Store, sm *session.Manager, llmClient llm.Client, cfg config.LLMConfig, acc store.Account) error {
 	client := api.NewClient(acc.BaseURL, acc.Token)
 	client.Debug = false
 
+	b := &bot{
+		client:    client,
+		cursors:   st,
+		sessions:  sm,
+		llmClient: llmClient,
+		cfg:       cfg,
+	}
+	return b.runAccount(acc)
+}
+
+func (b *bot) runAccount(acc store.Account) error {
 	log.Printf("[monitor] Starting for account %s (%s)", acc.Name, acc.ID)
 
-	// Notify server of startup
-	if err := client.NotifyStart(); err != nil {
+	if err := b.client.NotifyStart(); err != nil {
 		log.Printf("[monitor] notifyStart failed: %v", err)
 	}
 	defer func() {
-		if err := client.NotifyStop(); err != nil {
+		if err := b.client.NotifyStop(); err != nil {
 			log.Printf("[monitor] notifyStop failed: %v", err)
 		}
 	}()
 
-	// Load sync cursor
-	buf, _ := st.GetSyncBuf(acc.ID)
+	buf, err := b.cursors.GetSyncBuf(acc.ID)
+	if err != nil {
+		log.Printf("[monitor] load sync buf: %v", err)
+	}
 
 	consecutiveFails := 0
 	sessionPausedUntil := time.Time{}
 
 	for {
-		// Check session pause
 		if time.Now().Before(sessionPausedUntil) {
 			wait := time.Until(sessionPausedUntil)
 			log.Printf("[monitor] Session paused for %v", wait.Round(time.Second))
 			time.Sleep(wait)
 		}
 
-		// Get updates
-		resp, err := client.GetUpdates(buf)
+		resp, err := b.client.GetUpdates(buf)
 		if err != nil {
 			consecutiveFails++
 			log.Printf("[monitor] getUpdates failed: %v (fail %d/%d)", err, consecutiveFails, maxConsecutiveFails)
@@ -74,158 +104,147 @@ func Run(st *store.Store, sm *session.Manager, llmClient llm.Client, cfg config.
 
 		consecutiveFails = 0
 
-		// Check for session expiry
 		if resp.Errcode == -14 {
 			log.Printf("[monitor] Session expired, pausing for %v", sessionExpiryPause)
 			sessionPausedUntil = time.Now().Add(sessionExpiryPause)
 			continue
 		}
 
-		// Update sync cursor
 		if resp.GetUpdatesBuf != "" {
 			buf = resp.GetUpdatesBuf
-			if err := st.SaveSyncBuf(acc.ID, buf); err != nil {
+			if err := b.cursors.SaveSyncBuf(acc.ID, buf); err != nil {
 				log.Printf("[monitor] save sync buf: %v", err)
 			}
 		}
 
-		// Process messages sequentially
 		for _, msg := range resp.Msgs {
-			if err := processOne(client, st, sm, llmClient, cfg, msg); err != nil {
+			if err := b.processOne(msg); err != nil {
 				log.Printf("[monitor] process message: %v", err)
 			}
 		}
 	}
 }
 
-func processOne(client *api.Client, st *store.Store, sm *session.Manager, llmClient llm.Client, cfg config.LLMConfig, msg *api.WeixinMessage) error {
-	fromUserID := msg.FromUserID
-	if fromUserID == "" {
+func (b *bot) processOne(msg *api.WeixinMessage) error {
+	if msg == nil || msg.FromUserID == "" {
 		return nil
 	}
 
-	text := message.ExtractText(msg)
+	fromUserID := msg.FromUserID
 	contextToken := msg.ContextToken
+	text := message.ExtractText(msg)
 	log.Printf("[monitor] msg from=%s len=%d", fromUserID, len(text))
 
-	// --- Handle slash commands ---
-	if resp, handled, err := commands.Handle(text, fromUserID, sm); handled {
+	if resp, handled, err := commands.Handle(text, fromUserID, b.sessions); handled {
 		if err != nil {
 			log.Printf("[monitor] command error: %v", err)
-			sendText(client, fromUserID, fmt.Sprintf("❌ 错误：%v", err), contextToken)
+			b.sendText(fromUserID, fmt.Sprintf("❌ 错误：%v", err), contextToken)
 			return nil
 		}
-		sendText(client, fromUserID, resp, contextToken)
+		b.sendText(fromUserID, resp, contextToken)
 		return nil
 	}
 
-	// --- Handle media ---
-	if message.HasMedia(msg) {
-		for _, item := range msg.ItemList {
-			switch item.Type {
-			case api.ItemTypeImage:
-				if item.ImageItem != nil && item.ImageItem.Media != nil {
-					log.Printf("[monitor] image from=%s", fromUserID)
-				}
-			case api.ItemTypeVoice:
-				if item.VoiceItem != nil && item.VoiceItem.Text != "" {
-					// Use pre-transcribed voice text
-					text = item.VoiceItem.Text
-				} else if item.VoiceItem != nil && item.VoiceItem.Media != nil {
-					log.Printf("[monitor] voice from=%s (no transcription)", fromUserID)
-					sendText(client, fromUserID, "🎤 语音消息暂不支持自动识别，请发送文字。", contextToken)
-					return nil
-				}
-			case api.ItemTypeVideo:
-				log.Printf("[monitor] video from=%s", fromUserID)
-				sendText(client, fromUserID, "🎬 视频消息已收到，暂不支持视频理解。", contextToken)
-				return nil
-			case api.ItemTypeFile:
-				log.Printf("[monitor] file from=%s", fromUserID)
-				sendText(client, fromUserID, "📎 文件消息已收到，暂不支持文件处理。", contextToken)
-				return nil
+	var stop bool
+	text, stop = b.applyMedia(msg, fromUserID, contextToken, text)
+	if stop || text == "" {
+		return nil
+	}
+
+	return b.replyWithLLM(fromUserID, contextToken, text)
+}
+
+func (b *bot) applyMedia(msg *api.WeixinMessage, fromUserID, contextToken, text string) (string, bool) {
+	if !message.HasMedia(msg) {
+		return text, false
+	}
+
+	for _, item := range msg.ItemList {
+		if item == nil {
+			continue
+		}
+		switch item.Type {
+		case api.ItemTypeImage:
+			if item.ImageItem != nil && item.ImageItem.Media != nil {
+				log.Printf("[monitor] image from=%s", fromUserID)
 			}
+		case api.ItemTypeVoice:
+			if item.VoiceItem != nil && item.VoiceItem.Text != "" {
+				text = item.VoiceItem.Text
+			} else if item.VoiceItem != nil && item.VoiceItem.Media != nil {
+				log.Printf("[monitor] voice from=%s (no transcription)", fromUserID)
+				b.sendText(fromUserID, "🎤 语音消息暂不支持自动识别，请发送文字。", contextToken)
+				return text, true
+			}
+		case api.ItemTypeVideo:
+			log.Printf("[monitor] video from=%s", fromUserID)
+			b.sendText(fromUserID, "🎬 视频消息已收到，暂不支持视频理解。", contextToken)
+			return text, true
+		case api.ItemTypeFile:
+			log.Printf("[monitor] file from=%s", fromUserID)
+			b.sendText(fromUserID, "📎 文件消息已收到，暂不支持文件处理。", contextToken)
+			return text, true
 		}
 	}
 
-	if text == "" {
-		return nil
-	}
+	return text, false
+}
 
-	// --- Load session and history ---
-	sess, err := sm.GetOrCreateActiveSession(fromUserID)
+func (b *bot) replyWithLLM(fromUserID, contextToken, text string) error {
+	sess, err := b.sessions.GetOrCreateActiveSession(fromUserID)
 	if err != nil {
 		log.Printf("[monitor] get session: %v", err)
-		sendText(client, fromUserID, "❌ 会话加载失败，请重试。", contextToken)
+		b.sendText(fromUserID, "❌ 会话加载失败，请重试。", contextToken)
 		return err
 	}
 
-	conv, err := sm.LoadHistory(fromUserID, sess.ID)
+	conv, err := b.sessions.LoadHistory(fromUserID, sess.ID)
 	if err != nil {
 		log.Printf("[monitor] load history: %v", err)
 		conv = &store.Conversation{}
 	}
 
-	// --- Call LLM ---
-	msgs := message.ToLLMMessages(cfg.SystemPrompt, conv, text, cfg.MaxHistory)
+	msgs := message.ToLLMMessages(b.cfg.SystemPrompt, conv, text, b.cfg.MaxHistory)
 
-	// Send typing indicator
-	sendTyping(client, fromUserID, contextToken, api.TypingStatusTyping)
-
-	// Stream response with coalescing
-	fullResponse, err := streamWithCoalesce(llmClient, cfg.SystemPrompt, msgs, func(chunk string) error {
-		// We don't send partial chunks to WeChat; we coalesce and send once.
-		return nil
-	})
-
-	// Cancel typing
-	sendTyping(client, fromUserID, contextToken, api.TypingStatusCancel)
+	b.sendTyping(fromUserID, contextToken, api.TypingStatusTyping)
+	fullResponse, err := b.llmClient.ChatStream(b.cfg.SystemPrompt, msgs, nil)
+	b.sendTyping(fromUserID, contextToken, api.TypingStatusCancel)
 
 	if err != nil {
 		log.Printf("[monitor] LLM error: %v", err)
-		sendText(client, fromUserID, "❌ AI 响应失败，请重试。", contextToken)
+		b.sendText(fromUserID, "❌ AI 响应失败，请重试。", contextToken)
 		return err
 	}
 
-	// --- Save conversation ---
 	conv.Messages = append(conv.Messages,
 		store.Message{Role: "user", Content: text},
 		store.Message{Role: "assistant", Content: fullResponse},
 	)
 
-	if err := sm.SaveHistory(fromUserID, sess.ID, conv); err != nil {
+	if err := b.sessions.SaveHistory(fromUserID, sess.ID, conv); err != nil {
 		log.Printf("[monitor] save history: %v", err)
 	}
 
-	// --- Send response ---
 	filtered := markdown.FilterText(fullResponse)
-	sendText(client, fromUserID, filtered, contextToken)
+	b.sendText(fromUserID, filtered, contextToken)
 
 	log.Printf("[monitor] reply to=%s len=%d", fromUserID, len(fullResponse))
 	return nil
 }
 
-func streamWithCoalesce(llmClient llm.Client, systemPrompt string, msgs []store.Message, onChunk func(chunk string) error) (string, error) {
-	return llmClient.ChatStream(systemPrompt, msgs, onChunk)
-}
-
-func sendText(client *api.Client, toUserID, text, contextToken string) {
+func (b *bot) sendText(toUserID, text, contextToken string) {
 	msg := message.BuildTextMessage(toUserID, text, contextToken)
-	if err := client.SendMessage(msg); err != nil {
+	if err := b.client.SendMessage(msg); err != nil {
 		log.Printf("[monitor] sendMessage failed: %v", err)
 	}
 }
 
-func sendTyping(client *api.Client, toUserID, contextToken string, status int) {
-	// Get typing ticket from config
-	resp, err := client.GetConfig(toUserID, contextToken)
+func (b *bot) sendTyping(toUserID, contextToken string, status int) {
+	resp, err := b.client.GetConfig(toUserID, contextToken)
 	if err != nil {
-		return // Non-critical, ignore
+		return
 	}
-	if err := client.SendTyping(toUserID, resp.TypingTicket, status); err != nil {
+	if err := b.client.SendTyping(toUserID, resp.TypingTicket, status); err != nil {
 		log.Printf("[monitor] sendTyping failed: %v", err)
 	}
 }
-
-// Ensure unused imports for future use
-var _ = cdn.DownloadAndDecrypt

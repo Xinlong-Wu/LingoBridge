@@ -3,7 +3,9 @@ package message
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"strconv"
 	"strings"
+	"time"
 
 	"wechatbox/internal/store"
 	"wechatbox/internal/wechat/api"
@@ -11,7 +13,9 @@ import (
 
 func generateClientID() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return "wechatbox-" + strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
 	return "wechatbox-" + hex.EncodeToString(b)
 }
 

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -18,6 +21,8 @@ import (
 	"wechatbox/internal/wechat/login"
 	"wechatbox/internal/wechat/monitor"
 )
+
+var errUsage = errors.New("usage")
 
 func logBuildInfo() {
 	info, ok := debug.ReadBuildInfo()
@@ -63,35 +68,47 @@ func logBuildInfo() {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
+	if err := run(os.Args[1:]); err != nil {
+		if !errors.Is(err, errUsage) {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
+}
 
-	cmd := os.Args[1]
+func run(args []string) error {
+	if len(args) < 1 {
+		printUsage()
+		return errUsage
+	}
 
-	switch cmd {
+	switch args[0] {
 	case "run":
-		cmdRun()
+		return cmdRun(args[1:])
 	case "account":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: wechatbox account <new|list|delete> [--name <name>]")
-			os.Exit(1)
-		}
-		switch os.Args[2] {
-		case "new":
-			cmdAccountNew()
-		case "list":
-			cmdAccountList()
-		case "delete":
-			cmdAccountDelete()
-		default:
-			fmt.Println("Usage: wechatbox account <new|list|delete> [--name <name>]")
-			os.Exit(1)
-		}
+		return cmdAccount(args[1:])
 	default:
 		printUsage()
-		os.Exit(1)
+		return errUsage
+	}
+}
+
+func cmdAccount(args []string) error {
+	if len(args) < 1 {
+		printAccountUsage()
+		return errUsage
+	}
+
+	switch args[0] {
+	case "new":
+		return cmdAccountNew(args[1:])
+	case "list":
+		return cmdAccountList(args[1:])
+	case "delete":
+		return cmdAccountDelete(args[1:])
+	default:
+		printAccountUsage()
+		return errUsage
 	}
 }
 
@@ -105,33 +122,44 @@ func printUsage() {
 	fmt.Println("  wechatbox run [--account <name>]         Start the bot loop")
 }
 
-func cmdAccountNew() {
-	// Parse optional --name flag.
-	accountName := ""
-	args := os.Args
-	argStart := 3 // skip program + "account" + "new"
+func printAccountUsage() {
+	fmt.Println("Usage: wechatbox account <new|list|delete> [--name <name>]")
+}
 
-	for i := argStart; i < len(args); i++ {
-		if args[i] == "--name" && i+1 < len(args) {
-			accountName = args[i+1]
-			i++
-		}
-	}
+func newFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	return fs
+}
 
-	if accountName == "" {
-		accountName = "default"
-	}
-
+func openStore() (*store.Store, error) {
 	st, err := store.Open()
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return nil, fmt.Errorf("open store: %w", err)
+	}
+	return st, nil
+}
+
+func cmdAccountNew(args []string) error {
+	fs := newFlagSet("account new")
+	accountName := fs.String("name", "default", "account name")
+	if err := fs.Parse(args); err != nil {
+		fmt.Println("Usage: wechatbox account new [--name <name>]")
+		return errUsage
+	}
+	if *accountName == "" {
+		*accountName = "default"
+	}
+
+	st, err := openStore()
+	if err != nil {
+		return err
 	}
 	defer st.Close()
 
-	// Auto-suffix if name already exists
 	accounts, err := st.ListAccounts()
 	if err != nil {
-		log.Fatalf("list accounts: %v", err)
+		return fmt.Errorf("list accounts: %w", err)
 	}
 	exists := func(name string) bool {
 		for _, a := range accounts {
@@ -142,50 +170,46 @@ func cmdAccountNew() {
 		return false
 	}
 
-	originalName := accountName
+	originalName := *accountName
 	suffix := 2
-	for exists(accountName) {
-		accountName = fmt.Sprintf("%s-%d", originalName, suffix)
+	for exists(*accountName) {
+		*accountName = fmt.Sprintf("%s-%d", originalName, suffix)
 		suffix++
 	}
-	if accountName != originalName {
-		fmt.Printf("Name %q already exists, using %q instead.\n", originalName, accountName)
+	if *accountName != originalName {
+		fmt.Printf("Name %q already exists, using %q instead.\n", originalName, *accountName)
 	}
 
-	if err := login.Login(st, accountName); err != nil {
-		log.Fatalf("login failed: %v", err)
+	if err := login.Login(st, *accountName); err != nil {
+		return fmt.Errorf("login failed: %w", err)
 	}
+	return nil
 }
 
-func cmdRun() {
-	// Parse optional --account flag
-	targetAccount := ""
-	for i := 2; i < len(os.Args); i++ {
-		if os.Args[i] == "--account" && i+1 < len(os.Args) {
-			targetAccount = os.Args[i+1]
-			i++
-		}
+func cmdRun(args []string) error {
+	fs := newFlagSet("run")
+	targetAccount := fs.String("account", "", "account name")
+	if err := fs.Parse(args); err != nil {
+		fmt.Println("Usage: wechatbox run [--account <name>]")
+		return errUsage
 	}
 
-	// Load config
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		return fmt.Errorf("load config: %w", err)
 	}
 
 	logBuildInfo()
 
-	// Open store
-	st, err := store.Open()
+	st, err := openStore()
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return err
 	}
 	defer st.Close()
 
-	// List accounts
 	accounts, err := st.ListAccounts()
 	if err != nil {
-		log.Fatalf("list accounts: %v", err)
+		return fmt.Errorf("list accounts: %w", err)
 	}
 
 	enabledAccounts := make([]store.Account, 0)
@@ -196,24 +220,22 @@ func cmdRun() {
 	}
 
 	if len(enabledAccounts) == 0 {
-		log.Fatal("No enabled accounts. Run 'wechatbox account new' first.")
+		return fmt.Errorf("no enabled accounts. Run 'wechatbox account new' first")
 	}
 
-	// Filter by --account if specified
-	if targetAccount != "" {
+	if *targetAccount != "" {
 		filtered := make([]store.Account, 0)
 		for _, a := range enabledAccounts {
-			if a.Name == targetAccount {
+			if a.Name == *targetAccount {
 				filtered = append(filtered, a)
 			}
 		}
 		if len(filtered) == 0 {
-			log.Fatalf("Account %q not found. Use 'wechatbox account list' to see available accounts.", targetAccount)
+			return fmt.Errorf("account %q not found. Use 'wechatbox account list' to see available accounts", *targetAccount)
 		}
 		enabledAccounts = filtered
 	}
 
-	// Create LLM client
 	llmClient := llm.NewClient(llm.Config{
 		Provider: cfg.LLM.Provider,
 		BaseURL:  cfg.LLM.BaseURL,
@@ -222,7 +244,6 @@ func cmdRun() {
 		Endpoint: cfg.LLM.Endpoint,
 	})
 
-	// Create session manager
 	sm := session.NewManager(st)
 
 	log.Printf("LLM provider: %s", cfg.LLM.Provider)
@@ -232,7 +253,6 @@ func cmdRun() {
 	log.Printf("LLM system_prompt: %s", cfg.LLM.SystemPrompt)
 	log.Printf("LLM endpoint: %s", cfg.LLM.Endpoint)
 
-	// Run all enabled accounts concurrently
 	var wg sync.WaitGroup
 	for _, acc := range enabledAccounts {
 		wg.Add(1)
@@ -245,7 +265,6 @@ func cmdRun() {
 		}(acc)
 	}
 
-	// Handle signals for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -257,23 +276,24 @@ func cmdRun() {
 
 	log.Printf("Listening on %d account(s)...", len(enabledAccounts))
 	wg.Wait()
+	return nil
 }
 
-func cmdAccountList() {
-	st, err := store.Open()
+func cmdAccountList(args []string) error {
+	st, err := openStore()
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return err
 	}
 	defer st.Close()
 
 	accounts, err := st.ListAccounts()
 	if err != nil {
-		log.Fatalf("list accounts: %v", err)
+		return fmt.Errorf("list accounts: %w", err)
 	}
 
 	if len(accounts) == 0 {
 		fmt.Println("No accounts. Run 'wechatbox account new' to add one.")
-		return
+		return nil
 	}
 
 	fmt.Println("Accounts:")
@@ -284,25 +304,25 @@ func cmdAccountList() {
 		}
 		fmt.Printf("  %s %s (id: %s)\n", status, a.Name, a.ID)
 	}
+	return nil
 }
 
-func cmdAccountDelete() {
-	if len(os.Args) < 4 {
+func cmdAccountDelete(args []string) error {
+	if len(args) < 1 {
 		fmt.Println("Usage: wechatbox account delete <name>")
-		os.Exit(1)
+		return errUsage
 	}
-	name := strings.Join(os.Args[3:], " ")
+	name := strings.Join(args, " ")
 
-	st, err := store.Open()
+	st, err := openStore()
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return err
 	}
 	defer st.Close()
 
-	// Find account by name
 	accounts, err := st.ListAccounts()
 	if err != nil {
-		log.Fatalf("list accounts: %v", err)
+		return fmt.Errorf("list accounts: %w", err)
 	}
 
 	var targetID string
@@ -313,12 +333,13 @@ func cmdAccountDelete() {
 		}
 	}
 	if targetID == "" {
-		log.Fatalf("Account %q not found.", name)
+		return fmt.Errorf("account %q not found", name)
 	}
 
 	if err := st.DeleteAccount(targetID); err != nil {
-		log.Fatalf("delete account: %v", err)
+		return fmt.Errorf("delete account: %w", err)
 	}
 
 	fmt.Printf("Deleted account: %s\n", name)
+	return nil
 }

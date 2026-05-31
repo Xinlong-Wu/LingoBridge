@@ -74,6 +74,7 @@ Send these as WeChat messages to the bot:
 | `llm.base_url` | `https://api.deepseek.com/v1` | LLM API base URL |
 | `llm.api_key` | — | Your API key (required) |
 | `llm.model` | `deepseek-chat` | Model name |
+| `llm.endpoint` | `chat` | OpenAI-compatible endpoint: `chat` for `/v1/chat/completions`, `responses` for `/v1/responses` |
 | `llm.system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `llm.max_history` | `0` | Max historical messages per request. `0` = no limit |
 
@@ -89,4 +90,4 @@ Send these as WeChat messages to the bot:
 
 ## Tech Stack
 
-Go 1.22+, SQLite, YAML. Single binary, minimal dependencies.
+Go 1.25.1, SQLite, YAML. Single binary, minimal dependencies.

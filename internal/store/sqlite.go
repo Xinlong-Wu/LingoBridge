@@ -1,9 +1,11 @@
 package store
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
+	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 
@@ -12,10 +14,17 @@ import (
 	"wechatbox/internal/config"
 )
 
+var (
+	// ErrSessionExists is returned when a user already has a session with the requested name.
+	ErrSessionExists = errors.New("session already exists")
+	// ErrSessionNotFound is returned when a named session cannot be found for a user.
+	ErrSessionNotFound = errors.New("session not found")
+)
+
 // Store provides SQLite-backed metadata storage.
 type Store struct {
-	db  *sql.DB
-	mu  sync.Mutex // serializes writes across goroutines
+	db *sql.DB
+	mu sync.Mutex // serializes writes across goroutines
 }
 
 // Account represents a WeChat bot account saved during login.
@@ -196,29 +205,33 @@ func (s *Store) CreateSession(userID, name string) (*Session, error) {
 		name = "default"
 	}
 
-	// Check for duplicate name
-	var count int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM sessions WHERE user_id=? AND name=?`, userID, name,
-	).Scan(&count); err != nil {
+	id, err := generateID()
+	if err != nil {
 		return nil, err
 	}
-	if count > 0 {
-		return nil, fmt.Errorf("session %q already exists for user %s", name, userID)
-	}
-
-	id := generateID()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Deactivate all other sessions for this user, then insert the new active one
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
+	// Check for duplicate name while holding the write lock so concurrent
+	// session creation cannot race past the read.
+	var count int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM sessions WHERE user_id=? AND name=?`, userID, name,
+	).Scan(&count); err != nil {
+		return nil, err
+	}
+	if count > 0 {
+		return nil, fmt.Errorf("%w: %q for user %s", ErrSessionExists, name, userID)
+	}
+
+	// Deactivate all other sessions for this user, then insert the new active one
 	if _, err := tx.Exec(`UPDATE sessions SET active=0 WHERE user_id=?`, userID); err != nil {
 		return nil, err
 	}
@@ -300,7 +313,7 @@ func (s *Store) SwitchSession(userID, sessionName string) (*Session, error) {
 
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		return nil, fmt.Errorf("session %q not found for user %s", sessionName, userID)
+		return nil, fmt.Errorf("%w: %q for user %s", ErrSessionNotFound, sessionName, userID)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -330,12 +343,10 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-func generateID() string {
+func generateID() (string, error) {
 	b := make([]byte, 16)
-	if f, err := os.Open("/dev/urandom"); err == nil {
-		f.Read(b)
-		f.Close()
-		return fmt.Sprintf("%x", b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate id: %w", err)
 	}
-	return fmt.Sprintf("%x", b)
+	return hex.EncodeToString(b), nil
 }

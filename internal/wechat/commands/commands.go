@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -8,9 +9,17 @@ import (
 	"wechatbox/internal/store"
 )
 
+// SessionManager is the session behavior needed by in-chat commands.
+type SessionManager interface {
+	CreateSession(userID, name string) (*store.Session, error)
+	ListSessions(userID string) ([]store.Session, error)
+	SwitchSession(userID, sessionName string) (*store.Session, error)
+	ClearSession(userID string) (*store.Session, error)
+}
+
 // Handle processes a slash command and returns the response text.
 // Returns (response, handled, error).
-func Handle(text string, userID string, sm *session.Manager) (string, bool, error) {
+func Handle(text string, userID string, sm SessionManager) (string, bool, error) {
 	text = strings.TrimSpace(text)
 
 	if !strings.HasPrefix(text, "/") {
@@ -39,7 +48,7 @@ func Handle(text string, userID string, sm *session.Manager) (string, bool, erro
 	}
 }
 
-func handleNew(userID string, args []string, sm *session.Manager) (string, bool, error) {
+func handleNew(userID string, args []string, sm SessionManager) (string, bool, error) {
 	name := ""
 	if len(args) > 0 {
 		name = args[0]
@@ -47,7 +56,7 @@ func handleNew(userID string, args []string, sm *session.Manager) (string, bool,
 
 	sess, err := sm.CreateSession(userID, name)
 	if err != nil {
-		if strings.Contains(err.Error(), "already exists") {
+		if errors.Is(err, store.ErrSessionExists) {
 			return fmt.Sprintf("❌ 会话 %q 已存在", name), true, nil
 		}
 		return "", true, fmt.Errorf("create session: %w", err)
@@ -56,7 +65,7 @@ func handleNew(userID string, args []string, sm *session.Manager) (string, bool,
 	return fmt.Sprintf("✅ 已创建新会话：%s", sess.Name), true, nil
 }
 
-func handleList(userID string, sm *session.Manager) (string, bool, error) {
+func handleList(userID string, sm SessionManager) (string, bool, error) {
 	sessions, err := sm.ListSessions(userID)
 	if err != nil {
 		return "", true, fmt.Errorf("list sessions: %w", err)
@@ -69,7 +78,7 @@ func handleList(userID string, sm *session.Manager) (string, bool, error) {
 	return session.FormatSessionList(sessions), true, nil
 }
 
-func handleSwitch(userID string, args []string, sm *session.Manager) (string, bool, error) {
+func handleSwitch(userID string, args []string, sm SessionManager) (string, bool, error) {
 	if len(args) == 0 {
 		return "用法：/switch <会话名称>", true, nil
 	}
@@ -77,7 +86,7 @@ func handleSwitch(userID string, args []string, sm *session.Manager) (string, bo
 	name := args[0]
 	sess, err := sm.SwitchSession(userID, name)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, store.ErrSessionNotFound) {
 			return fmt.Sprintf("❌ 会话 %q 不存在。使用 /list 查看所有会话。", name), true, nil
 		}
 		return "", true, fmt.Errorf("switch session: %w", err)
@@ -86,7 +95,7 @@ func handleSwitch(userID string, args []string, sm *session.Manager) (string, bo
 	return fmt.Sprintf("✅ 已切换到会话：%s", sess.Name), true, nil
 }
 
-func handleClear(userID string, sm *session.Manager) (string, bool, error) {
+func handleClear(userID string, sm SessionManager) (string, bool, error) {
 	sess, err := sm.ClearSession(userID)
 	if err != nil {
 		return "", true, fmt.Errorf("clear session: %w", err)
@@ -94,6 +103,3 @@ func handleClear(userID string, sm *session.Manager) (string, bool, error) {
 
 	return fmt.Sprintf("✅ 已清空当前会话，新会话：%s", sess.Name), true, nil
 }
-
-// Ensure store import is used for future extensions
-var _ = store.Store{}

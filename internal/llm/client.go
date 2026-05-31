@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"wechatbox/internal/store"
 )
@@ -35,40 +34,126 @@ type Config struct {
 func NewClient(cfg Config) Client {
 	switch cfg.Provider {
 	case "anthropic":
-		return &anthropicClient{cfg: cfg}
+		return &anthropicClient{cfg: cfg, httpClient: http.DefaultClient}
 	default:
-		return &openaiClient{cfg: cfg}
+		return &openaiClient{cfg: cfg, httpClient: http.DefaultClient}
 	}
+}
+
+type streamParser func(data string) string
+
+func postJSON(client *http.Client, reqURL string, headers http.Header, reqBody any, label string) ([]byte, error) {
+	resp, err := sendJSON(client, reqURL, headers, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("%s request: %w", label, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("%s read response: %w", label, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s HTTP %d: %s", label, resp.StatusCode, truncateStr(string(body), 500))
+	}
+	return body, nil
+}
+
+func postStream(client *http.Client, reqURL string, headers http.Header, reqBody any, label string, parser streamParser, onChunk func(chunk string) error) (string, error) {
+	resp, err := sendJSON(client, reqURL, headers, reqBody)
+	if err != nil {
+		return "", fmt.Errorf("%s stream request: %w", label, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("%s stream HTTP %d: %s", label, resp.StatusCode, truncateStr(string(body), 500))
+	}
+
+	return parseSSE(resp.Body, parser, onChunk)
+}
+
+func sendJSON(client *http.Client, reqURL string, headers http.Header, reqBody any) (*http.Response, error) {
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", reqURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header = headers.Clone()
+	req.Header.Set("Content-Type", "application/json")
+
+	if client == nil {
+		client = http.DefaultClient
+	}
+	return client.Do(req)
+}
+
+func parseSSE(body io.Reader, parser streamParser, onChunk func(chunk string) error) (string, error) {
+	var fullText strings.Builder
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		chunk := parser(data)
+		if chunk == "" {
+			continue
+		}
+
+		fullText.WriteString(chunk)
+		if onChunk != nil {
+			if err := onChunk(chunk); err != nil {
+				return fullText.String(), err
+			}
+		}
+	}
+
+	return fullText.String(), scanner.Err()
+}
+
+func bearerHeaders(apiKey string) http.Header {
+	h := http.Header{}
+	if apiKey != "" {
+		h.Set("Authorization", "Bearer "+apiKey)
+	}
+	return h
 }
 
 // --- OpenAI-compatible client ---
 
 type openaiClient struct {
-	cfg     Config
-	reqURL  string // cached request URL
-	useResp bool   // use /v1/responses instead of /v1/chat/completions
+	cfg        Config
+	httpClient *http.Client
 }
 
-func (c *openaiClient) initURL() {
-	if c.reqURL != "" {
-		return
-	}
+func (c *openaiClient) requestURL() (string, bool) {
 	base := strings.TrimRight(c.cfg.BaseURL, "/")
 
 	if c.cfg.Endpoint == "responses" {
-		c.useResp = true
 		if strings.HasSuffix(base, "/v1") {
-			c.reqURL = base + "/responses"
-		} else {
-			c.reqURL = base + "/v1/responses"
+			return base + "/responses", true
 		}
-	} else {
-		if strings.HasSuffix(base, "/v1") {
-			c.reqURL = base + "/chat/completions"
-		} else {
-			c.reqURL = base + "/v1/chat/completions"
-		}
+		return base + "/v1/responses", true
 	}
+
+	if strings.HasSuffix(base, "/v1") {
+		return base + "/chat/completions", false
+	}
+	return base + "/v1/chat/completions", false
 }
 
 type openaiChatRequest struct {
@@ -118,10 +203,9 @@ type responsesStreamEvent struct {
 }
 
 func (c *openaiClient) Chat(systemPrompt string, messages []store.Message) (string, error) {
-	c.initURL()
-
-	if c.useResp {
-		return c.chatResponses(messages, false, nil)
+	reqURL, useResponses := c.requestURL()
+	if useResponses {
+		return c.chatResponses(reqURL, messages, false, nil)
 	}
 
 	reqBody := openaiChatRequest{
@@ -130,24 +214,9 @@ func (c *openaiClient) Chat(systemPrompt string, messages []store.Message) (stri
 		Stream:   false,
 	}
 
-	bodyBytes, _ := json.Marshal(reqBody)
-
-	req, err := http.NewRequest("POST", c.reqURL, bytes.NewReader(bodyBytes))
+	body, err := postJSON(c.httpClient, reqURL, bearerHeaders(c.cfg.APIKey), reqBody, "openai")
 	if err != nil {
 		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("openai request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("openai HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
 	}
 
 	var chatResp openaiChatResponse
@@ -162,10 +231,9 @@ func (c *openaiClient) Chat(systemPrompt string, messages []store.Message) (stri
 }
 
 func (c *openaiClient) ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (string, error) {
-	c.initURL()
-
-	if c.useResp {
-		return c.chatResponses(messages, true, onChunk)
+	reqURL, useResponses := c.requestURL()
+	if useResponses {
+		return c.chatResponses(reqURL, messages, true, onChunk)
 	}
 
 	reqBody := openaiChatRequest{
@@ -174,68 +242,11 @@ func (c *openaiClient) ChatStream(systemPrompt string, messages []store.Message,
 		Stream:   true,
 	}
 
-	bodyBytes, _ := json.Marshal(reqBody)
-
-	req, err := http.NewRequest("POST", c.reqURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("openai stream request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("openai stream HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
-	}
-
-	return c.parseStream(resp.Body, onChunk)
+	return postStream(c.httpClient, reqURL, bearerHeaders(c.cfg.APIKey), reqBody, "openai", parseOpenAIStreamEvent, onChunk)
 }
 
-func (c *openaiClient) parseStream(body io.Reader, onChunk func(chunk string) error) (string, error) {
-	var fullText strings.Builder
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			break
-		}
-
-		var chunk openaiStreamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
-		}
-
-		if len(chunk.Choices) > 0 {
-			content := chunk.Choices[0].Delta.Content
-			if content != "" {
-				fullText.WriteString(content)
-				if onChunk != nil {
-					if err := onChunk(content); err != nil {
-						return fullText.String(), err
-					}
-				}
-			}
-		}
-	}
-
-	return fullText.String(), scanner.Err()
-}
-
-func (c *openaiClient) chatResponses(messages []store.Message, stream bool, onChunk func(chunk string) error) (string, error) {
-	// Filter out system messages and build input
-	var input []store.Message
+func (c *openaiClient) chatResponses(reqURL string, messages []store.Message, stream bool, onChunk func(chunk string) error) (string, error) {
+	input := make([]store.Message, 0, len(messages))
 	for _, m := range messages {
 		if m.Role != "system" {
 			input = append(input, m)
@@ -248,81 +259,58 @@ func (c *openaiClient) chatResponses(messages []store.Message, stream bool, onCh
 		Stream: stream,
 	}
 
-	bodyBytes, _ := json.Marshal(reqBody)
+	if stream {
+		return postStream(c.httpClient, reqURL, bearerHeaders(c.cfg.APIKey), reqBody, "responses", parseResponsesStreamEvent, onChunk)
+	}
 
-	req, err := http.NewRequest("POST", c.reqURL, bytes.NewReader(bodyBytes))
+	body, err := postJSON(c.httpClient, reqURL, bearerHeaders(c.cfg.APIKey), reqBody, "responses")
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("responses request: %w", err)
+	var out responsesOutput
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", fmt.Errorf("unmarshal responses: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("responses HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
-	}
-
-	if !stream {
-		body, _ := io.ReadAll(resp.Body)
-		var out responsesOutput
-		if err := json.Unmarshal(body, &out); err != nil {
-			return "", fmt.Errorf("unmarshal responses: %w", err)
-		}
-		for _, o := range out.Output {
-			if o.Type == "message" {
-				for _, c := range o.Content {
-					if c.Type == "output_text" {
-						return c.Text, nil
-					}
-				}
-			}
-		}
-		return "", fmt.Errorf("no output_text in responses")
-	}
-
-	// Streaming
-	var fullText strings.Builder
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			break
-		}
-
-		var event responsesStreamEvent
-		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			continue
-		}
-
-		if event.Type == "response.output_text.delta" && event.Delta != "" {
-			fullText.WriteString(event.Delta)
-			if onChunk != nil {
-				if err := onChunk(event.Delta); err != nil {
-					return fullText.String(), err
+	for _, o := range out.Output {
+		if o.Type == "message" {
+			for _, c := range o.Content {
+				if c.Type == "output_text" {
+					return c.Text, nil
 				}
 			}
 		}
 	}
+	return "", fmt.Errorf("no output_text in responses")
+}
 
-	return fullText.String(), scanner.Err()
+func parseOpenAIStreamEvent(data string) string {
+	var chunk openaiStreamChunk
+	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+		return ""
+	}
+	if len(chunk.Choices) == 0 {
+		return ""
+	}
+	return chunk.Choices[0].Delta.Content
+}
+
+func parseResponsesStreamEvent(data string) string {
+	var event responsesStreamEvent
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
+		return ""
+	}
+	if event.Type != "response.output_text.delta" {
+		return ""
+	}
+	return event.Delta
 }
 
 // --- Anthropic client ---
 
 type anthropicClient struct {
-	cfg Config
+	cfg        Config
+	httpClient *http.Client
 }
 
 type anthropicContent struct {
@@ -331,17 +319,17 @@ type anthropicContent struct {
 }
 
 type anthropicMessage struct {
-	Role    string              `json:"role"`
-	Content []anthropicContent  `json:"content,omitempty"`
-	Text    string              `json:"text,omitempty"` // for user messages in older format
+	Role    string             `json:"role"`
+	Content []anthropicContent `json:"content,omitempty"`
+	Text    string             `json:"text,omitempty"` // for user messages in older format
 }
 
 type anthropicRequest struct {
-	Model     string              `json:"model"`
-	MaxTokens int                 `json:"max_tokens"`
-	Messages  []anthropicMessage  `json:"messages"`
-	System    string              `json:"system,omitempty"`
-	Stream    bool                `json:"stream"`
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	Messages  []anthropicMessage `json:"messages"`
+	System    string             `json:"system,omitempty"`
+	Stream    bool               `json:"stream"`
 }
 
 type anthropicResponse struct {
@@ -374,13 +362,10 @@ func convertToAnthropicMessages(messages []store.Message, systemPrompt string) (
 			system = m.Content
 			continue
 		}
-		msg := anthropicMessage{Role: m.Role}
-		if m.Role == "user" {
-			msg.Content = []anthropicContent{{Type: "text", Text: m.Content}}
-		} else {
-			msg.Content = []anthropicContent{{Type: "text", Text: m.Content}}
-		}
-		msgs = append(msgs, msg)
+		msgs = append(msgs, anthropicMessage{
+			Role:    m.Role,
+			Content: []anthropicContent{{Type: "text", Text: m.Content}},
+		})
 	}
 	return msgs, system
 }
@@ -396,26 +381,10 @@ func (c *anthropicClient) Chat(systemPrompt string, messages []store.Message) (s
 		Stream:    false,
 	}
 
-	bodyBytes, _ := json.Marshal(reqBody)
-	baseURL := strings.TrimRight(c.cfg.BaseURL, "/")
-
-	req, err := http.NewRequest("POST", baseURL+"/v1/messages", bytes.NewReader(bodyBytes))
+	reqURL := strings.TrimRight(c.cfg.BaseURL, "/") + "/v1/messages"
+	body, err := postJSON(c.httpClient, reqURL, anthropicHeaders(c.cfg.APIKey), reqBody, "anthropic")
 	if err != nil {
 		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.cfg.APIKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("anthropic request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("anthropic HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
 	}
 
 	var chatResp anthropicResponse
@@ -440,65 +409,33 @@ func (c *anthropicClient) ChatStream(systemPrompt string, messages []store.Messa
 		Stream:    true,
 	}
 
-	bodyBytes, _ := json.Marshal(reqBody)
-	baseURL := strings.TrimRight(c.cfg.BaseURL, "/")
+	reqURL := strings.TrimRight(c.cfg.BaseURL, "/") + "/v1/messages"
+	return postStream(c.httpClient, reqURL, anthropicHeaders(c.cfg.APIKey), reqBody, "anthropic", parseAnthropicStreamEvent, onChunk)
+}
 
-	req, err := http.NewRequest("POST", baseURL+"/v1/messages", bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", err
+func anthropicHeaders(apiKey string) http.Header {
+	h := http.Header{}
+	if apiKey != "" {
+		h.Set("x-api-key", apiKey)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.cfg.APIKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
+	h.Set("anthropic-version", "2023-06-01")
+	return h
+}
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("anthropic stream request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("anthropic stream HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
+func parseAnthropicStreamEvent(data string) string {
+	var event anthropicStreamEvent
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
+		return ""
 	}
 
-	var fullText strings.Builder
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
-
-		var event anthropicStreamEvent
-		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			continue
-		}
-
-		var text string
-		switch event.Type {
-		case "content_block_delta":
-			text = event.Delta.Text
-		case "content_block_start":
-			if event.ContentBlock.Text != "" {
-				text = event.ContentBlock.Text
-			}
-		}
-
-		if text != "" {
-			fullText.WriteString(text)
-			if onChunk != nil {
-				if err := onChunk(text); err != nil {
-					return fullText.String(), err
-				}
-			}
-		}
+	switch event.Type {
+	case "content_block_delta":
+		return event.Delta.Text
+	case "content_block_start":
+		return event.ContentBlock.Text
+	default:
+		return ""
 	}
-
-	return fullText.String(), scanner.Err()
 }
 
 func truncateStr(s string, maxLen int) string {
@@ -507,6 +444,3 @@ func truncateStr(s string, maxLen int) string {
 	}
 	return s[:maxLen] + "..."
 }
-
-// Ensure time is used (for potential future timeout configs)
-var _ = time.Now

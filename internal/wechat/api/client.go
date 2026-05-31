@@ -2,13 +2,16 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -22,6 +25,9 @@ const (
 	defaultConfigTimeout   = 10 * time.Second
 )
 
+// ErrTimeout marks API calls that timed out.
+var ErrTimeout = errors.New("wechat api timeout")
+
 // Client is the HTTP client for the WeChat Bot API.
 type Client struct {
 	BaseURL    string
@@ -33,20 +39,20 @@ type Client struct {
 // NewClient creates a new WeChat API client.
 func NewClient(baseURL, token string) *Client {
 	return &Client{
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		Token:   token,
-		HTTPClient: &http.Client{
-			Timeout: defaultAPITimeout,
-		},
+		BaseURL:    strings.TrimRight(baseURL, "/"),
+		Token:      token,
+		HTTPClient: &http.Client{},
 	}
 }
 
 // randomWechatUin generates a random X-WECHAT-UIN header value.
-func randomWechatUin() string {
+func randomWechatUin() (string, error) {
 	b := make([]byte, 4)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
 	uin := binary.BigEndian.Uint32(b)
-	return base64.StdEncoding.EncodeToString([]byte(strconv.FormatUint(uint64(uin), 10)))
+	return base64.StdEncoding.EncodeToString([]byte(strconv.FormatUint(uint64(uin), 10))), nil
 }
 
 // buildHeaders returns the common headers for API requests.
@@ -54,7 +60,9 @@ func (c *Client) buildHeaders() http.Header {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	h.Set("AuthorizationType", "ilink_bot_token")
-	h.Set("X-WECHAT-UIN", randomWechatUin())
+	if uin, err := randomWechatUin(); err == nil {
+		h.Set("X-WECHAT-UIN", uin)
+	}
 	if c.Token != "" {
 		h.Set("Authorization", "Bearer "+c.Token)
 	}
@@ -71,29 +79,59 @@ func getBaseInfo() *BaseInfo {
 
 // doPost sends a POST request and returns the response body.
 func (c *Client) doPost(endpoint string, body interface{}, timeout time.Duration) ([]byte, error) {
+	return c.doRequest(http.MethodPost, endpoint, body, timeout, c.buildHeaders())
+}
+
+// doGet sends a GET request and returns the response body.
+func (c *Client) doGet(endpoint string, timeout time.Duration) ([]byte, error) {
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	return c.doRequest(http.MethodGet, endpoint, nil, timeout, h)
+}
+
+func (c *Client) doRequest(method, endpoint string, body interface{}, timeout time.Duration, headers http.Header) ([]byte, error) {
+	var reqBody io.Reader
+	var bodyBytes []byte
 	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("marshal body: %w", err)
+	if method == http.MethodPost {
+		if err != nil {
+			return nil, fmt.Errorf("marshal body: %w", err)
+		}
+		reqBody = bytes.NewReader(bodyBytes)
 	}
 
 	reqURL := c.BaseURL + "/" + strings.TrimLeft(endpoint, "/")
-	req, err := http.NewRequest("POST", reqURL, bytes.NewReader(bodyBytes))
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	req.Header = c.buildHeaders()
+	req.Header = headers.Clone()
 
 	client := c.HTTPClient
-	if timeout > 0 {
-		client = &http.Client{Timeout: timeout}
+	if client == nil {
+		client = http.DefaultClient
 	}
 
 	if c.Debug {
-		log.Printf("[wechat-api] POST %s body=%s", reqURL, truncate(string(bodyBytes), 500))
+		if method == http.MethodPost {
+			log.Printf("[wechat-api] %s %s body=%s", method, reqURL, truncate(string(bodyBytes), 500))
+		} else {
+			log.Printf("[wechat-api] %s %s", method, reqURL)
+		}
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
+		if isTimeoutError(ctx, err) {
+			return nil, fmt.Errorf("%w: %v", ErrTimeout, err)
+		}
 		return nil, fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -104,7 +142,7 @@ func (c *Client) doPost(endpoint string, body interface{}, timeout time.Duration
 	}
 
 	if c.Debug {
-		log.Printf("[wechat-api] POST %s status=%d body=%s", reqURL, resp.StatusCode, truncate(string(respBody), 500))
+		log.Printf("[wechat-api] %s %s status=%d body=%s", method, reqURL, resp.StatusCode, truncate(string(respBody), 500))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -114,45 +152,12 @@ func (c *Client) doPost(endpoint string, body interface{}, timeout time.Duration
 	return respBody, nil
 }
 
-// doGet sends a GET request and returns the response body.
-func (c *Client) doGet(endpoint string, timeout time.Duration) ([]byte, error) {
-	reqURL := c.BaseURL + "/" + strings.TrimLeft(endpoint, "/")
-	req, err := http.NewRequest("GET", reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+func isTimeoutError(ctx context.Context, err error) bool {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return true
 	}
-	// GET uses common headers (without Authorization)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := c.HTTPClient
-	if timeout > 0 {
-		client = &http.Client{Timeout: timeout}
-	}
-
-	if c.Debug {
-		log.Printf("[wechat-api] GET %s", reqURL)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("do request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
-	}
-
-	if c.Debug {
-		log.Printf("[wechat-api] GET %s status=%d body=%s", reqURL, resp.StatusCode, truncate(string(respBody), 500))
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 500))
-	}
-
-	return respBody, nil
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // GetUpdates long-polls for new messages.
@@ -165,7 +170,7 @@ func (c *Client) GetUpdates(buf string) (*GetUpdatesResp, error) {
 	respBody, err := c.doPost("ilink/bot/getupdates", req, defaultLongPollTimeout)
 	if err != nil {
 		// Return empty response on timeout (normal long-poll behavior)
-		if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline") {
+		if errors.Is(err, ErrTimeout) {
 			return &GetUpdatesResp{
 				Ret:           0,
 				Msgs:          []*WeixinMessage{},
@@ -299,7 +304,7 @@ func (c *Client) PollQRStatus(qrcode, verifyCode string) (*QRStatusResponse, err
 	respBody, err := c.doGet(endpoint, defaultLongPollTimeout)
 	if err != nil {
 		// Return wait on timeout
-		if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline") {
+		if errors.Is(err, ErrTimeout) {
 			return &QRStatusResponse{Status: "wait"}, nil
 		}
 		return &QRStatusResponse{Status: "wait"}, nil

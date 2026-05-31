@@ -15,12 +15,11 @@ import (
 )
 
 const (
-	fixedBaseURL        = "https://ilinkai.weixin.qq.com"
-	defaultBotType      = "3"
-	maxQRRefreshCount   = 3
-	loginTimeout        = 5 * time.Minute
-	qrPollInterval      = 1 * time.Second
-	qrLongPollTimeoutMs = 35000
+	fixedBaseURL      = "https://ilinkai.weixin.qq.com"
+	defaultBotType    = "3"
+	maxQRRefreshCount = 3
+	loginTimeout      = 5 * time.Minute
+	qrPollInterval    = 1 * time.Second
 )
 
 // Login performs the QR code login flow and saves the account.
