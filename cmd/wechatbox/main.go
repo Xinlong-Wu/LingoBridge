@@ -17,7 +17,6 @@ import (
 
 	"wechatbox/internal/config"
 	"wechatbox/internal/control"
-	"wechatbox/internal/llm"
 	"wechatbox/internal/runner"
 	"wechatbox/internal/session"
 	"wechatbox/internal/store"
@@ -202,6 +201,9 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	if err := cfg.LLM.Validate(); err != nil {
+		return fmt.Errorf("validate llm config: %w", err)
+	}
 
 	logBuildInfo()
 
@@ -211,28 +213,26 @@ func cmdRun(args []string) error {
 	}
 	defer st.Close()
 
-	llmClient := llm.NewClient(llm.Config{
-		Provider: cfg.LLM.Provider,
-		BaseURL:  cfg.LLM.BaseURL,
-		APIKey:   cfg.LLM.APIKey,
-		Model:    cfg.LLM.Model,
-		Endpoint: cfg.LLM.Endpoint,
-	})
+	resetCount, err := st.ResetUnavailableUserModels(cfg.LLM.DefaultModel, cfg.LLM.ModelNames())
+	if err != nil {
+		return fmt.Errorf("reset unavailable user models: %w", err)
+	}
+	if resetCount > 0 {
+		log.Printf("Reset %d user model preference(s) to default model %q", resetCount, cfg.LLM.DefaultModel)
+	}
 
-	sm := session.NewManager(st)
+	sm := session.NewManager(st, cfg.LLM)
 
-	log.Printf("LLM provider: %s", cfg.LLM.Provider)
-	log.Printf("LLM base_url: %s", cfg.LLM.BaseURL)
-	log.Printf("LLM model: %s", cfg.LLM.Model)
+	log.Printf("LLM default_model: %s", cfg.LLM.DefaultModel)
+	log.Printf("LLM models: %s", strings.Join(cfg.LLM.ModelNames(), ", "))
 	log.Printf("LLM max_history: %d", cfg.LLM.MaxHistory)
 	log.Printf("LLM system_prompt: %s", cfg.LLM.SystemPrompt)
-	log.Printf("LLM endpoint: %s", cfg.LLM.Endpoint)
 
 	runCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
 	supervisor := runner.NewSupervisor(st, func(ctx context.Context, acc store.Account) error {
-		return monitor.RunContext(ctx, st, sm, llmClient, cfg.LLM, acc)
+		return monitor.RunContext(ctx, st, sm, cfg.LLM, acc)
 	}, *targetAccount)
 
 	controlServer, err := control.StartServer(runCtx, func(context.Context) error {

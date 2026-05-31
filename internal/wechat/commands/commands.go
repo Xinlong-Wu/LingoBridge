@@ -11,10 +11,17 @@ import (
 
 // SessionManager is the session behavior needed by in-chat commands.
 type SessionManager interface {
+	CurrentSession(userID string) (*store.Session, error)
 	CreateSession(userID, name string) (*store.Session, error)
 	ListSessions(userID string) ([]store.Session, error)
 	SwitchSession(userID, sessionName string) (*store.Session, error)
+	RenameCurrentSession(userID, newName string) (*store.Session, error)
+	ArchiveSession(userID, sessionName string) (*store.ArchiveResult, error)
 	ClearSession(userID string) (*store.Session, error)
+	CurrentModel(userID string) (string, error)
+	SetModel(userID, modelName string) error
+	DefaultModelName() string
+	ListModels() []string
 }
 
 // Handle processes a slash command and returns the response text.
@@ -37,14 +44,22 @@ func Handle(text string, userID string, sm SessionManager) (string, bool, error)
 	switch cmd {
 	case "/help":
 		return handleHelp()
+	case "/current":
+		return handleCurrent(userID, sm)
 	case "/new":
 		return handleNew(userID, args, sm)
 	case "/list":
 		return handleList(userID, sm)
 	case "/switch":
 		return handleSwitch(userID, args, sm)
+	case "/rename":
+		return handleRename(userID, args, sm)
+	case "/archive":
+		return handleArchive(userID, args, sm)
 	case "/clear":
 		return handleClear(userID, sm)
+	case "/model":
+		return handleModel(userID, args, sm)
 	default:
 		return "", false, nil // Not a recognized slash command
 	}
@@ -54,11 +69,27 @@ func handleHelp() (string, bool, error) {
 	return strings.Join([]string{
 		"可用命令：",
 		"/help - 查看命令帮助",
+		"/current - 查看当前会话和模型",
 		"/new [名称] - 创建新会话",
 		"/list - 查看会话列表",
 		"/switch <名称> - 切换会话",
+		"/rename <名称> - 重命名当前会话",
+		"/archive [名称] - 归档会话",
 		"/clear - 清空当前会话并开始新会话",
+		"/model [名称] - 查看或切换模型",
 	}, "\n"), true, nil
+}
+
+func handleCurrent(userID string, sm SessionManager) (string, bool, error) {
+	sess, err := sm.CurrentSession(userID)
+	if err != nil {
+		return "", true, fmt.Errorf("current session: %w", err)
+	}
+	modelName, err := sm.CurrentModel(userID)
+	if err != nil {
+		return "", true, fmt.Errorf("current model: %w", err)
+	}
+	return fmt.Sprintf("当前会话：%s\n当前模型：%s", sess.Name, modelName), true, nil
 }
 
 func handleNew(userID string, args []string, sm SessionManager) (string, bool, error) {
@@ -108,6 +139,45 @@ func handleSwitch(userID string, args []string, sm SessionManager) (string, bool
 	return fmt.Sprintf("✅ 已切换到会话：%s", sess.Name), true, nil
 }
 
+func handleRename(userID string, args []string, sm SessionManager) (string, bool, error) {
+	if len(args) == 0 {
+		return "用法：/rename <新名称>", true, nil
+	}
+
+	name := args[0]
+	sess, err := sm.RenameCurrentSession(userID, name)
+	if err != nil {
+		if errors.Is(err, store.ErrSessionExists) {
+			return fmt.Sprintf("❌ 会话 %q 已存在", name), true, nil
+		}
+		return "", true, fmt.Errorf("rename session: %w", err)
+	}
+	return fmt.Sprintf("✅ 当前会话已重命名为：%s", sess.Name), true, nil
+}
+
+func handleArchive(userID string, args []string, sm SessionManager) (string, bool, error) {
+	name := ""
+	if len(args) > 0 {
+		name = args[0]
+	}
+
+	result, err := sm.ArchiveSession(userID, name)
+	if err != nil {
+		if errors.Is(err, store.ErrSessionNotFound) {
+			target := name
+			if target == "" {
+				target = "当前会话"
+			}
+			return fmt.Sprintf("❌ 会话 %q 不存在。使用 /list 查看所有会话。", target), true, nil
+		}
+		return "", true, fmt.Errorf("archive session: %w", err)
+	}
+	if result.CurrentChanged && result.Current != nil {
+		return fmt.Sprintf("✅ 已归档会话：%s\n当前会话：%s", result.Archived.Name, result.Current.Name), true, nil
+	}
+	return fmt.Sprintf("✅ 已归档会话：%s", result.Archived.Name), true, nil
+}
+
 func handleClear(userID string, sm SessionManager) (string, bool, error) {
 	sess, err := sm.ClearSession(userID)
 	if err != nil {
@@ -115,4 +185,23 @@ func handleClear(userID string, sm SessionManager) (string, bool, error) {
 	}
 
 	return fmt.Sprintf("✅ 已清空当前会话，新会话：%s", sess.Name), true, nil
+}
+
+func handleModel(userID string, args []string, sm SessionManager) (string, bool, error) {
+	if len(args) == 0 {
+		current, err := sm.CurrentModel(userID)
+		if err != nil {
+			return "", true, fmt.Errorf("current model: %w", err)
+		}
+		return fmt.Sprintf("当前模型：%s\n默认模型：%s\n可用模型：%s", current, sm.DefaultModelName(), strings.Join(sm.ListModels(), ", ")), true, nil
+	}
+
+	modelName := args[0]
+	if err := sm.SetModel(userID, modelName); err != nil {
+		if errors.Is(err, session.ErrModelNotFound) {
+			return fmt.Sprintf("❌ 模型 %q 不存在。可用模型：%s", modelName, strings.Join(sm.ListModels(), ", ")), true, nil
+		}
+		return "", true, fmt.Errorf("set model: %w", err)
+	}
+	return fmt.Sprintf("✅ 已切换模型：%s", modelName), true, nil
 }

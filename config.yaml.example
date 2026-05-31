@@ -3,29 +3,31 @@
 #   cp config.yaml.example ~/.wechatbox/config.yaml
 
 llm:
-  # LLM provider: "openai" (OpenAI-compatible API) or "anthropic"
-  provider: "openai"
+  # Default model profile used for users without a model preference.
+  default_model: "deepseek"
 
-  # API base URL
-  #   DeepSeek:   https://api.deepseek.com/v1
-  #   OpenAI:     https://api.openai.com/v1
-  #   Ollama:     http://localhost:11434/v1
-  #   vLLM:       http://localhost:8000/v1
-  base_url: "https://api.deepseek.com/v1"
+  # Named model profiles. Each profile is independent.
+  # endpoint is optional and defaults to "chat".
+  models:
+    deepseek:
+      provider: "openai"
+      base_url: "https://api.deepseek.com/v1"
+      api_key: "sk-your-api-key-here"
+      id: "deepseek-chat"
 
-  # Your API key
-  api_key: "sk-your-api-key-here"
+    gpt4o:
+      provider: "openai"
+      base_url: "https://api.openai.com/v1"
+      api_key: "sk-your-openai-key-here"
+      id: "gpt-4o"
+      endpoint: "responses"
 
-  # Model name
-  #   DeepSeek:   deepseek-chat
-  #   OpenAI:     gpt-4o
-  #   Anthropic:  claude-sonnet-4-20250514
-  #   Ollama:     llama3
-  model: "deepseek-chat"
-
-  # OpenAI API endpoint: "chat" (default, /v1/chat/completions) or "responses" (/v1/responses).
-  # Default: "chat"
-  endpoint: "chat"
+    claude:
+      provider: "anthropic"
+      base_url: "https://api.anthropic.com"
+      api_key: "sk-ant-your-key-here"
+      id: "claude-sonnet-4-20250514"
+      endpoint: "messages"
 
   # System prompt sent to the LLM with every conversation.
   # Defaults to "You are a helpful assistant." if empty or omitted.

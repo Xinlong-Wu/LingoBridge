@@ -381,7 +381,7 @@ func (c *anthropicClient) Chat(systemPrompt string, messages []store.Message) (s
 		Stream:    false,
 	}
 
-	reqURL := strings.TrimRight(c.cfg.BaseURL, "/") + "/v1/messages"
+	reqURL := c.requestURL()
 	body, err := postJSON(c.httpClient, reqURL, anthropicHeaders(c.cfg.APIKey), reqBody, "anthropic")
 	if err != nil {
 		return "", err
@@ -409,8 +409,20 @@ func (c *anthropicClient) ChatStream(systemPrompt string, messages []store.Messa
 		Stream:    true,
 	}
 
-	reqURL := strings.TrimRight(c.cfg.BaseURL, "/") + "/v1/messages"
+	reqURL := c.requestURL()
 	return postStream(c.httpClient, reqURL, anthropicHeaders(c.cfg.APIKey), reqBody, "anthropic", parseAnthropicStreamEvent, onChunk)
+}
+
+func (c *anthropicClient) requestURL() string {
+	base := strings.TrimRight(c.cfg.BaseURL, "/")
+	endpoint := c.cfg.Endpoint
+	if endpoint == "" || endpoint == "messages" {
+		return base + "/v1/messages"
+	}
+	if strings.HasPrefix(endpoint, "/") {
+		return base + endpoint
+	}
+	return base + "/v1/" + endpoint
 }
 
 func anthropicHeaders(apiKey string) http.Header {

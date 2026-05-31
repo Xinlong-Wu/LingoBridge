@@ -38,37 +38,51 @@ type wechatClient interface {
 
 type conversationManager interface {
 	commands.SessionManager
-	GetOrCreateActiveSession(userID string) (*store.Session, error)
+	GetOrCreateCurrentSession(userID string) (*store.Session, error)
 	LoadHistory(userID, sessionID string) (*store.Conversation, error)
 	SaveHistory(userID, sessionID string, conv *store.Conversation) error
 }
 
+type llmFactory func(config.ResolvedModel) llm.Client
+
 type bot struct {
-	client    wechatClient
-	cursors   cursorStore
-	sessions  conversationManager
-	llmClient llm.Client
-	cfg       config.LLMConfig
+	client     wechatClient
+	cursors    cursorStore
+	sessions   conversationManager
+	cfg        config.LLMConfig
+	llmClients map[string]llm.Client
+	newLLM     llmFactory
 }
 
 // Run starts the single-threaded monitor loop for an account.
-func Run(st *store.Store, sm *session.Manager, llmClient llm.Client, cfg config.LLMConfig, acc store.Account) error {
-	return RunContext(context.Background(), st, sm, llmClient, cfg, acc)
+func Run(st *store.Store, sm *session.Manager, cfg config.LLMConfig, acc store.Account) error {
+	return RunContext(context.Background(), st, sm, cfg, acc)
 }
 
 // RunContext starts the monitor loop for an account until ctx is canceled.
-func RunContext(ctx context.Context, st *store.Store, sm *session.Manager, llmClient llm.Client, cfg config.LLMConfig, acc store.Account) error {
+func RunContext(ctx context.Context, st *store.Store, sm *session.Manager, cfg config.LLMConfig, acc store.Account) error {
 	client := api.NewClient(acc.BaseURL, acc.Token)
 	client.Debug = false
 
 	b := &bot{
-		client:    client,
-		cursors:   st,
-		sessions:  sm,
-		llmClient: llmClient,
-		cfg:       cfg,
+		client:     client,
+		cursors:    st,
+		sessions:   sm,
+		cfg:        cfg,
+		llmClients: map[string]llm.Client{},
+		newLLM:     defaultLLMFactory,
 	}
 	return b.runAccount(ctx, acc)
+}
+
+func defaultLLMFactory(model config.ResolvedModel) llm.Client {
+	return llm.NewClient(llm.Config{
+		Provider: model.Provider,
+		BaseURL:  model.BaseURL,
+		APIKey:   model.APIKey,
+		Model:    model.ID,
+		Endpoint: model.Endpoint,
+	})
 }
 
 func (b *bot) runAccount(ctx context.Context, acc store.Account) error {
@@ -220,7 +234,7 @@ func (b *bot) applyMedia(msg *api.WeixinMessage, fromUserID, contextToken, text 
 }
 
 func (b *bot) replyWithLLM(fromUserID, contextToken, text string) error {
-	sess, err := b.sessions.GetOrCreateActiveSession(fromUserID)
+	sess, err := b.sessions.GetOrCreateCurrentSession(fromUserID)
 	if err != nil {
 		log.Printf("[monitor] get session: %v", err)
 		b.sendText(fromUserID, "❌ 会话加载失败，请重试。", contextToken)
@@ -234,13 +248,19 @@ func (b *bot) replyWithLLM(fromUserID, contextToken, text string) error {
 	}
 
 	msgs := message.ToLLMMessages(b.cfg.SystemPrompt, conv, text, b.cfg.MaxHistory)
+	modelName, llmClient, err := b.llmForUser(fromUserID)
+	if err != nil {
+		log.Printf("[monitor] resolve LLM: %v", err)
+		b.sendText(fromUserID, "❌ 模型配置不可用，请检查配置。", contextToken)
+		return err
+	}
 
 	b.sendTyping(fromUserID, contextToken, api.TypingStatusTyping)
-	fullResponse, err := b.llmClient.ChatStream(b.cfg.SystemPrompt, msgs, nil)
+	fullResponse, err := llmClient.ChatStream(b.cfg.SystemPrompt, msgs, nil)
 	b.sendTyping(fromUserID, contextToken, api.TypingStatusCancel)
 
 	if err != nil {
-		log.Printf("[monitor] LLM error: %v", err)
+		log.Printf("[monitor] LLM error model=%s: %v", modelName, err)
 		b.sendText(fromUserID, "❌ AI 响应失败，请重试。", contextToken)
 		return err
 	}
@@ -257,8 +277,34 @@ func (b *bot) replyWithLLM(fromUserID, contextToken, text string) error {
 	filtered := markdown.FilterText(fullResponse)
 	b.sendText(fromUserID, filtered, contextToken)
 
-	log.Printf("[monitor] reply to=%s len=%d", fromUserID, len(fullResponse))
+	log.Printf("[monitor] reply to=%s model=%s len=%d", fromUserID, modelName, len(fullResponse))
 	return nil
+}
+
+func (b *bot) llmForUser(userID string) (string, llm.Client, error) {
+	modelName, err := b.sessions.CurrentModel(userID)
+	if err != nil {
+		return "", nil, err
+	}
+	model, err := b.cfg.ResolveModel(modelName)
+	if err != nil {
+		model, err = b.cfg.ResolveModel(b.cfg.DefaultModel)
+		if err != nil {
+			return "", nil, err
+		}
+	}
+	if b.llmClients == nil {
+		b.llmClients = map[string]llm.Client{}
+	}
+	if b.newLLM == nil {
+		b.newLLM = defaultLLMFactory
+	}
+	client, ok := b.llmClients[model.Name]
+	if !ok {
+		client = b.newLLM(model)
+		b.llmClients[model.Name] = client
+	}
+	return model.Name, client, nil
 }
 
 func (b *bot) sendText(toUserID, text, contextToken string) {

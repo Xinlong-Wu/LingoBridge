@@ -4,19 +4,37 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 // LLMConfig holds the LLM API configuration.
 type LLMConfig struct {
-	Provider     string `yaml:"provider"`      // "openai" or "anthropic"
-	BaseURL      string `yaml:"base_url"`      // API base URL
-	APIKey       string `yaml:"api_key"`       // API key
-	Model        string `yaml:"model"`         // Model name
-	SystemPrompt string `yaml:"system_prompt"` // System prompt for the AI
-	MaxHistory   int    `yaml:"max_history"`   // Max messages to include from history
-	Endpoint     string `yaml:"endpoint"`      // "chat" (default) or "responses"
+	DefaultModel string                    `yaml:"default_model"` // Default model profile name
+	Models       map[string]LLMModelConfig `yaml:"models"`        // Named model profiles
+	SystemPrompt string                    `yaml:"system_prompt"` // System prompt for the AI
+	MaxHistory   int                       `yaml:"max_history"`   // Max messages to include from history
+}
+
+// LLMModelConfig holds one complete LLM profile.
+type LLMModelConfig struct {
+	Provider string `yaml:"provider"` // "openai" or "anthropic"
+	BaseURL  string `yaml:"base_url"` // API base URL
+	APIKey   string `yaml:"api_key"`  // API key
+	ID       string `yaml:"id"`       // Provider model identifier
+	Endpoint string `yaml:"endpoint"` // Provider endpoint mode
+}
+
+// ResolvedModel is an effective LLM profile selected for a user.
+type ResolvedModel struct {
+	Name     string
+	Provider string
+	BaseURL  string
+	APIKey   string
+	ID       string
+	Endpoint string
 }
 
 // Config is the top-level configuration.
@@ -25,14 +43,21 @@ type Config struct {
 }
 
 const DefaultSystemPrompt = "You are a helpful assistant."
+const DefaultModelEndpoint = "chat"
 
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
 		LLM: LLMConfig{
-			Provider:     "openai",
-			BaseURL:      "https://api.deepseek.com/v1",
-			Model:        "deepseek-chat",
+			DefaultModel: "deepseek",
+			Models: map[string]LLMModelConfig{
+				"deepseek": {
+					Provider: "openai",
+					BaseURL:  "https://api.deepseek.com/v1",
+					ID:       "deepseek-chat",
+					Endpoint: "chat",
+				},
+			},
 			SystemPrompt: DefaultSystemPrompt,
 			MaxHistory:   0, // 0 = no limit
 		},
@@ -101,6 +126,20 @@ func Load() (Config, error) {
 		return cfg, fmt.Errorf("read config: %w", err)
 	}
 
+	if err := rejectLegacyLLMFields(data); err != nil {
+		return cfg, err
+	}
+
+	// If the user explicitly provides llm.models, replace the built-in defaults
+	// instead of merging with them.
+	hasModels, err := hasLLMField(data, "models")
+	if err != nil {
+		return cfg, fmt.Errorf("parse config: %w", err)
+	}
+	if hasModels {
+		cfg.LLM.Models = map[string]LLMModelConfig{}
+	}
+
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
@@ -112,9 +151,7 @@ func Load() (Config, error) {
 	if cfg.LLM.MaxHistory < 0 {
 		cfg.LLM.MaxHistory = 0
 	}
-	if cfg.LLM.Endpoint == "" {
-		cfg.LLM.Endpoint = "chat"
-	}
+	cfg.LLM.ApplyDefaults()
 
 	return cfg, nil
 }
@@ -164,4 +201,151 @@ func EnsureSessionsDir() (string, error) {
 		return "", fmt.Errorf("create sessions dir: %w", err)
 	}
 	return dir, nil
+}
+
+// ApplyDefaults fills optional LLM profile fields.
+func (c *LLMConfig) ApplyDefaults() {
+	for name, model := range c.Models {
+		if model.Endpoint == "" {
+			model.Endpoint = DefaultModelEndpoint
+			c.Models[name] = model
+		}
+	}
+}
+
+// Validate checks that the configured model profiles are complete and usable.
+func (c LLMConfig) Validate() error {
+	if c.DefaultModel == "" {
+		return fmt.Errorf("llm.default_model is required")
+	}
+	if len(c.Models) == 0 {
+		return fmt.Errorf("llm.models must define at least one model profile")
+	}
+	if _, ok := c.Models[c.DefaultModel]; !ok {
+		return fmt.Errorf("llm.default_model %q is not defined in llm.models", c.DefaultModel)
+	}
+	for name, model := range c.Models {
+		if name == "" {
+			return fmt.Errorf("llm.models contains an empty profile name")
+		}
+		if err := validateModelProfile(name, model); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateModelProfile(name string, model LLMModelConfig) error {
+	endpoint := model.Endpoint
+	if endpoint == "" {
+		endpoint = DefaultModelEndpoint
+	}
+	if model.Provider == "" {
+		return fmt.Errorf("llm.models.%s.provider is required", name)
+	}
+	if model.Provider != "openai" && model.Provider != "anthropic" {
+		return fmt.Errorf("llm.models.%s.provider must be openai or anthropic", name)
+	}
+	if model.BaseURL == "" {
+		return fmt.Errorf("llm.models.%s.base_url is required", name)
+	}
+	if model.APIKey == "" {
+		return fmt.Errorf("llm.models.%s.api_key is required", name)
+	}
+	if model.ID == "" {
+		return fmt.Errorf("llm.models.%s.id is required", name)
+	}
+	switch model.Provider {
+	case "openai":
+		if endpoint != "chat" && endpoint != "responses" {
+			return fmt.Errorf("llm.models.%s.endpoint must be chat or responses for openai", name)
+		}
+	case "anthropic":
+		if endpoint != "messages" {
+			return fmt.Errorf("llm.models.%s.endpoint must be messages for anthropic", name)
+		}
+	}
+	return nil
+}
+
+// ModelNames returns sorted model profile names.
+func (c LLMConfig) ModelNames() []string {
+	names := make([]string, 0, len(c.Models))
+	for name := range c.Models {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// HasModel reports whether a named model profile exists.
+func (c LLMConfig) HasModel(name string) bool {
+	_, ok := c.Models[name]
+	return ok
+}
+
+// ResolveModel returns a complete model profile, falling back to default for empty or unknown names.
+func (c LLMConfig) ResolveModel(name string) (ResolvedModel, error) {
+	if name == "" || !c.HasModel(name) {
+		name = c.DefaultModel
+	}
+	model, ok := c.Models[name]
+	if !ok {
+		return ResolvedModel{}, fmt.Errorf("llm model profile %q is not defined", name)
+	}
+	endpoint := model.Endpoint
+	if endpoint == "" {
+		endpoint = DefaultModelEndpoint
+	}
+	return ResolvedModel{
+		Name:     name,
+		Provider: model.Provider,
+		BaseURL:  model.BaseURL,
+		APIKey:   model.APIKey,
+		ID:       model.ID,
+		Endpoint: endpoint,
+	}, nil
+}
+
+func rejectLegacyLLMFields(data []byte) error {
+	for _, field := range []string{"provider", "base_url", "api_key", "model", "endpoint"} {
+		found, err := hasLLMField(data, field)
+		if err != nil {
+			return fmt.Errorf("parse config: %w", err)
+		}
+		if found {
+			return fmt.Errorf("llm.%s has been removed; define it under llm.models.<name>.%s", field, legacyFieldReplacement(field))
+		}
+	}
+	return nil
+}
+
+func legacyFieldReplacement(field string) string {
+	if field == "model" {
+		return "id"
+	}
+	return field
+}
+
+func hasLLMField(data []byte, field string) (bool, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return false, err
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return false, nil
+	}
+	for i := 0; i+1 < len(root.Content[0].Content); i += 2 {
+		key := root.Content[0].Content[i]
+		value := root.Content[0].Content[i+1]
+		if key.Value != "llm" || value.Kind != yaml.MappingNode {
+			continue
+		}
+		for j := 0; j+1 < len(value.Content); j += 2 {
+			if strings.EqualFold(value.Content[j].Value, field) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }

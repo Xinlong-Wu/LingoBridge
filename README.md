@@ -21,7 +21,13 @@ Minimal config:
 
 ```yaml
 llm:
-  api_key: "sk-your-key-here"
+  default_model: "deepseek"
+  models:
+    deepseek:
+      provider: "openai"
+      base_url: "https://api.deepseek.com/v1"
+      api_key: "sk-your-key-here"
+      id: "deepseek-chat"
 ```
 
 ### 3. Add a WeChat bot account
@@ -62,10 +68,14 @@ Send these as WeChat messages to the bot:
 | Command | Description |
 |---|---|
 | `/help` | Show available in-chat commands |
+| `/current` | Show current session and model |
 | `/new [name]` | Create a new conversation session |
 | `/list` | List your sessions |
-| `/switch <name>` | Switch active session |
+| `/switch <name>` | Switch current session |
+| `/rename <name>` | Rename current session |
+| `/archive [name]` | Archive a session |
 | `/clear` | Archive current session, start fresh |
+| `/model [name]` | Show or switch model profile |
 
 ## Configuration
 
@@ -73,13 +83,18 @@ Send these as WeChat messages to the bot:
 
 | Field | Default | Description |
 |---|---|---|
-| `llm.provider` | `openai` | `"openai"` or `"anthropic"` |
-| `llm.base_url` | `https://api.deepseek.com/v1` | LLM API base URL |
-| `llm.api_key` | — | Your API key (required) |
-| `llm.model` | `deepseek-chat` | Model name |
-| `llm.endpoint` | `chat` | OpenAI-compatible endpoint: `chat` for `/v1/chat/completions`, `responses` for `/v1/responses` |
+| `llm.default_model` | `deepseek` | Default model profile name |
+| `llm.models.<name>.provider` | — | `"openai"` or `"anthropic"` |
+| `llm.models.<name>.base_url` | — | LLM API base URL |
+| `llm.models.<name>.api_key` | — | API key for this model profile |
+| `llm.models.<name>.id` | — | Provider model ID, such as `deepseek-chat` or `gpt-4o` |
+| `llm.models.<name>.endpoint` | `chat` | Endpoint mode: `chat` or `responses` for OpenAI-compatible APIs, `messages` for Anthropic |
 | `llm.system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `llm.max_history` | `0` | Max historical messages per request. `0` = no limit |
+
+Each model profile is independent. `provider`, `base_url`, `api_key`, and `id` are required; `endpoint` is optional and defaults to `chat`.
+Top-level `llm.model`, `llm.provider`, `llm.base_url`, `llm.api_key`, and `llm.endpoint` are no longer supported.
+On startup, `run` validates the default model profile and resets any saved per-user model preference that no longer exists back to `llm.default_model`.
 
 ## Storage
 
@@ -88,7 +103,7 @@ Send these as WeChat messages to the bot:
   config.yaml                          # User configuration
   wechatbox.sock                       # Local control socket used by a running process
   data/
-    wechatbox.db                       # SQLite: accounts, sessions, sync cursors
+    wechatbox.db                       # SQLite: accounts, sessions, user preferences, sync cursors
     sessions/{userId}/{sessionId}.jsonl # Conversation history (OpenAI batch format)
 ```
 

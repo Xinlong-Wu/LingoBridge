@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"wechatbox/internal/config"
+	"wechatbox/internal/llm"
 	"wechatbox/internal/store"
 	"wechatbox/internal/wechat/api"
 )
@@ -58,17 +59,23 @@ func (f *fakeCursorStore) SaveSyncBuf(accountID, buf string) error {
 }
 
 type fakeConversationManager struct {
-	sess     *store.Session
-	conv     *store.Conversation
-	saved    *store.Conversation
-	sessions []store.Session
+	sess        *store.Session
+	conv        *store.Conversation
+	saved       *store.Conversation
+	sessions    []store.Session
+	modelByUser map[string]string
+	models      []string
 }
 
-func (f *fakeConversationManager) GetOrCreateActiveSession(userID string) (*store.Session, error) {
+func (f *fakeConversationManager) GetOrCreateCurrentSession(userID string) (*store.Session, error) {
 	if f.sess != nil {
 		return f.sess, nil
 	}
-	return &store.Session{ID: "session", UserID: userID, Name: "default", Active: true}, nil
+	return &store.Session{ID: "session", UserID: userID, Name: "default", Current: true}, nil
+}
+
+func (f *fakeConversationManager) CurrentSession(userID string) (*store.Session, error) {
+	return f.GetOrCreateCurrentSession(userID)
 }
 
 func (f *fakeConversationManager) LoadHistory(userID, sessionID string) (*store.Conversation, error) {
@@ -84,7 +91,7 @@ func (f *fakeConversationManager) SaveHistory(userID, sessionID string, conv *st
 }
 
 func (f *fakeConversationManager) CreateSession(userID, name string) (*store.Session, error) {
-	return &store.Session{ID: "new", UserID: userID, Name: name, Active: true}, nil
+	return &store.Session{ID: "new", UserID: userID, Name: name, Current: true}, nil
 }
 
 func (f *fakeConversationManager) ListSessions(userID string) ([]store.Session, error) {
@@ -92,11 +99,49 @@ func (f *fakeConversationManager) ListSessions(userID string) ([]store.Session, 
 }
 
 func (f *fakeConversationManager) SwitchSession(userID, sessionName string) (*store.Session, error) {
-	return &store.Session{ID: "switched", UserID: userID, Name: sessionName, Active: true}, nil
+	return &store.Session{ID: "switched", UserID: userID, Name: sessionName, Current: true}, nil
+}
+
+func (f *fakeConversationManager) RenameCurrentSession(userID, newName string) (*store.Session, error) {
+	return &store.Session{ID: "session", UserID: userID, Name: newName, Current: true}, nil
+}
+
+func (f *fakeConversationManager) ArchiveSession(userID, sessionName string) (*store.ArchiveResult, error) {
+	return &store.ArchiveResult{
+		Archived:       store.Session{ID: "session", UserID: userID, Name: "default", Archived: true},
+		Current:        &store.Session{ID: "new", UserID: userID, Name: "new", Current: true},
+		CurrentChanged: true,
+	}, nil
 }
 
 func (f *fakeConversationManager) ClearSession(userID string) (*store.Session, error) {
-	return &store.Session{ID: "cleared", UserID: userID, Name: "session-1", Active: true}, nil
+	return &store.Session{ID: "cleared", UserID: userID, Name: "session-1", Current: true}, nil
+}
+
+func (f *fakeConversationManager) CurrentModel(userID string) (string, error) {
+	if f.modelByUser != nil && f.modelByUser[userID] != "" {
+		return f.modelByUser[userID], nil
+	}
+	return "deepseek", nil
+}
+
+func (f *fakeConversationManager) SetModel(userID, modelName string) error {
+	if f.modelByUser == nil {
+		f.modelByUser = map[string]string{}
+	}
+	f.modelByUser[userID] = modelName
+	return nil
+}
+
+func (f *fakeConversationManager) DefaultModelName() string {
+	return "deepseek"
+}
+
+func (f *fakeConversationManager) ListModels() []string {
+	if len(f.models) > 0 {
+		return f.models
+	}
+	return []string{"deepseek", "gpt4o"}
 }
 
 type fakeLLM struct {
@@ -127,17 +172,44 @@ func (f *fakeLLM) ChatStream(systemPrompt string, messages []store.Message, onCh
 func newTestBot() (*bot, *fakeWechatClient, *fakeConversationManager, *fakeLLM) {
 	client := &fakeWechatClient{}
 	sessions := &fakeConversationManager{
-		sess: &store.Session{ID: "session", UserID: "user", Name: "default", Active: true},
-		conv: &store.Conversation{},
+		sess:        &store.Session{ID: "session", UserID: "user", Name: "default", Current: true},
+		conv:        &store.Conversation{},
+		modelByUser: map[string]string{"user": "deepseek"},
 	}
 	llmClient := &fakeLLM{response: "hello"}
 	return &bot{
-		client:    client,
-		cursors:   &fakeCursorStore{},
-		sessions:  sessions,
-		llmClient: llmClient,
-		cfg:       config.LLMConfig{SystemPrompt: "system"},
+		client:     client,
+		cursors:    &fakeCursorStore{},
+		sessions:   sessions,
+		cfg:        testLLMConfig(),
+		llmClients: map[string]llm.Client{"deepseek": llmClient},
+		newLLM: func(model config.ResolvedModel) llm.Client {
+			return &fakeLLM{response: model.Name}
+		},
 	}, client, sessions, llmClient
+}
+
+func testLLMConfig() config.LLMConfig {
+	return config.LLMConfig{
+		DefaultModel: "deepseek",
+		Models: map[string]config.LLMModelConfig{
+			"deepseek": {
+				Provider: "openai",
+				BaseURL:  "https://deepseek.test/v1",
+				APIKey:   "key",
+				ID:       "deepseek-chat",
+				Endpoint: "chat",
+			},
+			"gpt4o": {
+				Provider: "openai",
+				BaseURL:  "https://openai.test/v1",
+				APIKey:   "key",
+				ID:       "gpt-4o",
+				Endpoint: "responses",
+			},
+		},
+		SystemPrompt: "system",
+	}
 }
 
 func textMessage(text string) *api.WeixinMessage {
@@ -189,7 +261,7 @@ func TestProcessOneTextMessage(t *testing.T) {
 func TestProcessOneSlashCommand(t *testing.T) {
 	b, client, _, llmClient := newTestBot()
 	b.sessions.(*fakeConversationManager).sessions = []store.Session{
-		{ID: "session", UserID: "user", Name: "default", Active: true},
+		{ID: "session", UserID: "user", Name: "default", Current: true},
 	}
 
 	if err := b.processOne(textMessage("/list")); err != nil {
@@ -267,6 +339,45 @@ func TestProcessOneLLMError(t *testing.T) {
 	}
 }
 
+func TestProcessOneUsesUserModelPreference(t *testing.T) {
+	b, client, sessions, defaultLLM := newTestBot()
+	preferredLLM := &fakeLLM{response: "from gpt4o"}
+	sessions.modelByUser["user"] = "gpt4o"
+	b.newLLM = func(model config.ResolvedModel) llm.Client {
+		if model.Name != "gpt4o" {
+			t.Fatalf("created model = %s, want gpt4o", model.Name)
+		}
+		return preferredLLM
+	}
+
+	if err := b.processOne(textMessage("hi")); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+
+	if defaultLLM.called {
+		t.Fatal("default LLM was called")
+	}
+	if !preferredLLM.called {
+		t.Fatal("preferred LLM was not called")
+	}
+	if got := lastSentText(t, client); got != "from gpt4o" {
+		t.Fatalf("sent text = %q, want preferred response", got)
+	}
+}
+
+func TestProcessOneFallsBackForUnknownUserModel(t *testing.T) {
+	b, _, sessions, defaultLLM := newTestBot()
+	sessions.modelByUser["user"] = "missing"
+
+	if err := b.processOne(textMessage("hi")); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+
+	if !defaultLLM.called {
+		t.Fatal("default LLM was not called for unknown model")
+	}
+}
+
 func TestRunAccountStopsOnContextCancel(t *testing.T) {
 	b, client, _, _ := newTestBot()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -284,10 +395,11 @@ func TestRunAccountStopsOnContextCancel(t *testing.T) {
 func TestRunAccountCancelsDuringGetUpdates(t *testing.T) {
 	client := &blockingWechatClient{ready: make(chan struct{})}
 	b := &bot{
-		client:    client,
-		cursors:   &fakeCursorStore{},
-		sessions:  &fakeConversationManager{},
-		llmClient: &fakeLLM{},
+		client:     client,
+		cursors:    &fakeCursorStore{},
+		sessions:   &fakeConversationManager{},
+		cfg:        testLLMConfig(),
+		llmClients: map[string]llm.Client{"deepseek": &fakeLLM{}},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
