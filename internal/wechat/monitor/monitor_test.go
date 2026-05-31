@@ -1,9 +1,11 @@
 package monitor
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"wechatbox/internal/config"
 	"wechatbox/internal/store"
@@ -13,9 +15,15 @@ import (
 type fakeWechatClient struct {
 	sent   []*api.WeixinMessage
 	typing []int
+	stops  int
 }
 
-func (f *fakeWechatClient) GetUpdates(buf string) (*api.GetUpdatesResp, error) {
+func (f *fakeWechatClient) GetUpdatesContext(ctx context.Context, buf string) (*api.GetUpdatesResp, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
 	return &api.GetUpdatesResp{}, nil
 }
 
@@ -34,7 +42,20 @@ func (f *fakeWechatClient) SendTyping(ilinkUserID, typingTicket string, status i
 }
 
 func (f *fakeWechatClient) NotifyStart() error { return nil }
-func (f *fakeWechatClient) NotifyStop() error  { return nil }
+func (f *fakeWechatClient) NotifyStop() error {
+	f.stops++
+	return nil
+}
+
+type fakeCursorStore struct{}
+
+func (f *fakeCursorStore) GetSyncBuf(accountID string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeCursorStore) SaveSyncBuf(accountID, buf string) error {
+	return nil
+}
 
 type fakeConversationManager struct {
 	sess     *store.Session
@@ -112,6 +133,7 @@ func newTestBot() (*bot, *fakeWechatClient, *fakeConversationManager, *fakeLLM) 
 	llmClient := &fakeLLM{response: "hello"}
 	return &bot{
 		client:    client,
+		cursors:   &fakeCursorStore{},
 		sessions:  sessions,
 		llmClient: llmClient,
 		cfg:       config.LLMConfig{SystemPrompt: "system"},
@@ -243,4 +265,76 @@ func TestProcessOneLLMError(t *testing.T) {
 	if got := lastSentText(t, client); !strings.Contains(got, "AI 响应失败") {
 		t.Fatalf("sent text = %q, want AI error message", got)
 	}
+}
+
+func TestRunAccountStopsOnContextCancel(t *testing.T) {
+	b, client, _, _ := newTestBot()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := b.runAccount(ctx, store.Account{ID: "account", Name: "bot"})
+	if err != nil {
+		t.Fatalf("runAccount returned error: %v", err)
+	}
+	if client.stops != 1 {
+		t.Fatalf("NotifyStop calls = %d, want 1", client.stops)
+	}
+}
+
+func TestRunAccountCancelsDuringGetUpdates(t *testing.T) {
+	client := &blockingWechatClient{ready: make(chan struct{})}
+	b := &bot{
+		client:    client,
+		cursors:   &fakeCursorStore{},
+		sessions:  &fakeConversationManager{},
+		llmClient: &fakeLLM{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- b.runAccount(ctx, store.Account{ID: "account", Name: "bot"})
+	}()
+
+	<-client.ready
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runAccount returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runAccount did not exit after cancel")
+	}
+	if client.stops != 1 {
+		t.Fatalf("NotifyStop calls = %d, want 1", client.stops)
+	}
+}
+
+type blockingWechatClient struct {
+	ready chan struct{}
+	stops int
+}
+
+func (b *blockingWechatClient) GetUpdatesContext(ctx context.Context, buf string) (*api.GetUpdatesResp, error) {
+	close(b.ready)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (b *blockingWechatClient) SendMessage(msg *api.WeixinMessage) error { return nil }
+
+func (b *blockingWechatClient) GetConfig(ilinkUserID, contextToken string) (*api.GetConfigResp, error) {
+	return &api.GetConfigResp{}, nil
+}
+
+func (b *blockingWechatClient) SendTyping(ilinkUserID, typingTicket string, status int) error {
+	return nil
+}
+
+func (b *blockingWechatClient) NotifyStart() error { return nil }
+func (b *blockingWechatClient) NotifyStop() error {
+	b.stops++
+	return nil
 }

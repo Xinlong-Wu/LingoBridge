@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -74,6 +75,22 @@ func TestDoRequestTimeout(t *testing.T) {
 	_, err := client.doGet("slow", 5*time.Millisecond)
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("doGet error = %v, want ErrTimeout", err)
+	}
+}
+
+func TestGetUpdatesContextCancel(t *testing.T) {
+	client := NewClient("https://wechatbox.test", "")
+	client.HTTPClient = testHTTPClient(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := client.GetUpdatesContext(ctx, "buf")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetUpdatesContext error = %v, want context.Canceled", err)
 	}
 }
 

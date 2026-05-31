@@ -38,19 +38,21 @@ Scan the QR code with your WeChat app:
 ./wechatbox run
 ```
 
-Listens to all enabled accounts concurrently. Use `--account` to run a specific one:
+Listens to all enabled accounts concurrently. If no enabled accounts exist yet, it stays running and waits for a later account reload. Use `--account` to run a specific one:
 
 ```bash
 ./wechatbox run --account mybot
 ```
 
+While `run` is active, `account new` and `account delete` notify it over a local Unix socket so account changes are applied without restarting the bot loop.
+
 ## CLI Reference
 
 | Command | Description |
 |---|---|
-| `account new [--name <name>]` | Add a WeChat bot account via QR login |
+| `account new [--name <name>]` | Add a WeChat bot account via QR login and reload a running bot process |
 | `account list` | List all accounts |
-| `account delete <name>` | Delete an account |
+| `account delete <name>` | Delete an account and reload a running bot process |
 | `run [--account <name>]` | Start the bot loop |
 
 ## In-Chat Commands
@@ -83,6 +85,7 @@ Send these as WeChat messages to the bot:
 ```
 ~/.wechatbox/
   config.yaml                          # User configuration
+  wechatbox.sock                       # Local control socket used by a running process
   data/
     wechatbox.db                       # SQLite: accounts, sessions, sync cursors
     sessions/{userId}/{sessionId}.jsonl # Conversation history (OpenAI batch format)

@@ -57,6 +57,15 @@ func ConfigPath() (string, error) {
 	return filepath.Join(dir, "config.yaml"), nil
 }
 
+// ControlSocketPath returns the Unix socket path for the local control API.
+func ControlSocketPath() (string, error) {
+	dir, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "wechatbox.sock"), nil
+}
+
 // DataDir returns the data directory (~/.wechatbox/data).
 func DataDir() (string, error) {
 	dir, err := ConfigDir()

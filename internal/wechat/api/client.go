@@ -79,17 +79,25 @@ func getBaseInfo() *BaseInfo {
 
 // doPost sends a POST request and returns the response body.
 func (c *Client) doPost(endpoint string, body interface{}, timeout time.Duration) ([]byte, error) {
-	return c.doRequest(http.MethodPost, endpoint, body, timeout, c.buildHeaders())
+	return c.doPostContext(context.Background(), endpoint, body, timeout)
+}
+
+func (c *Client) doPostContext(ctx context.Context, endpoint string, body interface{}, timeout time.Duration) ([]byte, error) {
+	return c.doRequest(ctx, http.MethodPost, endpoint, body, timeout, c.buildHeaders())
 }
 
 // doGet sends a GET request and returns the response body.
 func (c *Client) doGet(endpoint string, timeout time.Duration) ([]byte, error) {
-	h := http.Header{}
-	h.Set("Content-Type", "application/json")
-	return c.doRequest(http.MethodGet, endpoint, nil, timeout, h)
+	return c.doGetContext(context.Background(), endpoint, timeout)
 }
 
-func (c *Client) doRequest(method, endpoint string, body interface{}, timeout time.Duration, headers http.Header) ([]byte, error) {
+func (c *Client) doGetContext(ctx context.Context, endpoint string, timeout time.Duration) ([]byte, error) {
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	return c.doRequest(ctx, http.MethodGet, endpoint, nil, timeout, h)
+}
+
+func (c *Client) doRequest(ctx context.Context, method, endpoint string, body interface{}, timeout time.Duration, headers http.Header) ([]byte, error) {
 	var reqBody io.Reader
 	var bodyBytes []byte
 	bodyBytes, err := json.Marshal(body)
@@ -101,7 +109,9 @@ func (c *Client) doRequest(method, endpoint string, body interface{}, timeout ti
 	}
 
 	reqURL := c.BaseURL + "/" + strings.TrimLeft(endpoint, "/")
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -162,12 +172,17 @@ func isTimeoutError(ctx context.Context, err error) bool {
 
 // GetUpdates long-polls for new messages.
 func (c *Client) GetUpdates(buf string) (*GetUpdatesResp, error) {
+	return c.GetUpdatesContext(context.Background(), buf)
+}
+
+// GetUpdatesContext long-polls for new messages and exits early when ctx is canceled.
+func (c *Client) GetUpdatesContext(ctx context.Context, buf string) (*GetUpdatesResp, error) {
 	req := GetUpdatesReq{
 		GetUpdatesBuf: buf,
 		BaseInfo:      getBaseInfo(),
 	}
 
-	respBody, err := c.doPost("ilink/bot/getupdates", req, defaultLongPollTimeout)
+	respBody, err := c.doPostContext(ctx, "ilink/bot/getupdates", req, defaultLongPollTimeout)
 	if err != nil {
 		// Return empty response on timeout (normal long-poll behavior)
 		if errors.Is(err, ErrTimeout) {

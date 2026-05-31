@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,11 +12,13 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
-	"sync"
 	"syscall"
+	"time"
 
 	"wechatbox/internal/config"
+	"wechatbox/internal/control"
 	"wechatbox/internal/llm"
+	"wechatbox/internal/runner"
 	"wechatbox/internal/session"
 	"wechatbox/internal/store"
 	"wechatbox/internal/wechat/login"
@@ -183,6 +186,7 @@ func cmdAccountNew(args []string) error {
 	if err := login.Login(st, *accountName); err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
+	notifyRunningProcess()
 	return nil
 }
 
@@ -207,35 +211,6 @@ func cmdRun(args []string) error {
 	}
 	defer st.Close()
 
-	accounts, err := st.ListAccounts()
-	if err != nil {
-		return fmt.Errorf("list accounts: %w", err)
-	}
-
-	enabledAccounts := make([]store.Account, 0)
-	for _, a := range accounts {
-		if a.Enabled {
-			enabledAccounts = append(enabledAccounts, a)
-		}
-	}
-
-	if len(enabledAccounts) == 0 {
-		return fmt.Errorf("no enabled accounts. Run 'wechatbox account new' first")
-	}
-
-	if *targetAccount != "" {
-		filtered := make([]store.Account, 0)
-		for _, a := range enabledAccounts {
-			if a.Name == *targetAccount {
-				filtered = append(filtered, a)
-			}
-		}
-		if len(filtered) == 0 {
-			return fmt.Errorf("account %q not found. Use 'wechatbox account list' to see available accounts", *targetAccount)
-		}
-		enabledAccounts = filtered
-	}
-
 	llmClient := llm.NewClient(llm.Config{
 		Provider: cfg.LLM.Provider,
 		BaseURL:  cfg.LLM.BaseURL,
@@ -253,29 +228,39 @@ func cmdRun(args []string) error {
 	log.Printf("LLM system_prompt: %s", cfg.LLM.SystemPrompt)
 	log.Printf("LLM endpoint: %s", cfg.LLM.Endpoint)
 
-	var wg sync.WaitGroup
-	for _, acc := range enabledAccounts {
-		wg.Add(1)
-		go func(a store.Account) {
-			defer wg.Done()
-			log.Printf("Starting bot for account: %s (%s)", a.Name, a.ID)
-			if err := monitor.Run(st, sm, llmClient, cfg.LLM, a); err != nil {
-				log.Printf("monitor for %s exited: %v", a.Name, err)
-			}
-		}(acc)
+	runCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+
+	supervisor := runner.NewSupervisor(st, func(ctx context.Context, acc store.Account) error {
+		return monitor.RunContext(ctx, st, sm, llmClient, cfg.LLM, acc)
+	}, *targetAccount)
+
+	controlServer, err := control.StartServer(runCtx, func(context.Context) error {
+		return supervisor.Reconcile(runCtx)
+	})
+	if err != nil {
+		if errors.Is(err, control.ErrAlreadyRunning) {
+			return fmt.Errorf("another wechatbox run process is already active")
+		}
+		return fmt.Errorf("start control server: %w", err)
 	}
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigCh
-		log.Println("Shutting down...")
-		os.Exit(0)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := controlServer.Close(shutdownCtx); err != nil {
+			log.Printf("control server shutdown: %v", err)
+		}
 	}()
 
-	log.Printf("Listening on %d account(s)...", len(enabledAccounts))
-	wg.Wait()
+	if err := supervisor.Reconcile(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("reconcile accounts: %w", err)
+	}
+
+	log.Printf("Listening on %d account(s)...", supervisor.RunningCount())
+	<-runCtx.Done()
+	log.Println("Shutting down...")
+	supervisor.Stop()
 	return nil
 }
 
@@ -341,5 +326,21 @@ func cmdAccountDelete(args []string) error {
 	}
 
 	fmt.Printf("Deleted account: %s\n", name)
+	notifyRunningProcess()
 	return nil
+}
+
+func notifyRunningProcess() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	err := control.NotifyReload(ctx)
+	switch {
+	case err == nil:
+		fmt.Println("Reloaded running wechatbox process.")
+	case errors.Is(err, control.ErrUnavailable):
+		fmt.Println("No running wechatbox process found; start or restart 'wechatbox run' to pick up changes.")
+	default:
+		fmt.Printf("Warning: notify running process failed: %v\n", err)
+	}
 }

@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -27,7 +28,7 @@ type cursorStore interface {
 }
 
 type wechatClient interface {
-	GetUpdates(buf string) (*api.GetUpdatesResp, error)
+	GetUpdatesContext(ctx context.Context, buf string) (*api.GetUpdatesResp, error)
 	SendMessage(msg *api.WeixinMessage) error
 	GetConfig(ilinkUserID, contextToken string) (*api.GetConfigResp, error)
 	SendTyping(ilinkUserID, typingTicket string, status int) error
@@ -52,6 +53,11 @@ type bot struct {
 
 // Run starts the single-threaded monitor loop for an account.
 func Run(st *store.Store, sm *session.Manager, llmClient llm.Client, cfg config.LLMConfig, acc store.Account) error {
+	return RunContext(context.Background(), st, sm, llmClient, cfg, acc)
+}
+
+// RunContext starts the monitor loop for an account until ctx is canceled.
+func RunContext(ctx context.Context, st *store.Store, sm *session.Manager, llmClient llm.Client, cfg config.LLMConfig, acc store.Account) error {
 	client := api.NewClient(acc.BaseURL, acc.Token)
 	client.Debug = false
 
@@ -62,10 +68,10 @@ func Run(st *store.Store, sm *session.Manager, llmClient llm.Client, cfg config.
 		llmClient: llmClient,
 		cfg:       cfg,
 	}
-	return b.runAccount(acc)
+	return b.runAccount(ctx, acc)
 }
 
-func (b *bot) runAccount(acc store.Account) error {
+func (b *bot) runAccount(ctx context.Context, acc store.Account) error {
 	log.Printf("[monitor] Starting for account %s (%s)", acc.Name, acc.ID)
 
 	if err := b.client.NotifyStart(); err != nil {
@@ -86,18 +92,29 @@ func (b *bot) runAccount(acc store.Account) error {
 	sessionPausedUntil := time.Time{}
 
 	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+
 		if time.Now().Before(sessionPausedUntil) {
 			wait := time.Until(sessionPausedUntil)
 			log.Printf("[monitor] Session paused for %v", wait.Round(time.Second))
-			time.Sleep(wait)
+			if !sleepContext(ctx, wait) {
+				return nil
+			}
 		}
 
-		resp, err := b.client.GetUpdates(buf)
+		resp, err := b.client.GetUpdatesContext(ctx, buf)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			consecutiveFails++
 			log.Printf("[monitor] getUpdates failed: %v (fail %d/%d)", err, consecutiveFails, maxConsecutiveFails)
 			if consecutiveFails >= maxConsecutiveFails {
-				time.Sleep(backoffBase)
+				if !sleepContext(ctx, backoffBase) {
+					return nil
+				}
 			}
 			continue
 		}
@@ -122,6 +139,18 @@ func (b *bot) runAccount(acc store.Account) error {
 				log.Printf("[monitor] process message: %v", err)
 			}
 		}
+	}
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
