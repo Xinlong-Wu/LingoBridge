@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
+	"unicode"
 
 	"wechatbox/internal/config"
 	"wechatbox/internal/llm"
@@ -20,6 +22,8 @@ const (
 	sessionExpiryPause  = 1 * time.Hour
 	maxConsecutiveFails = 3
 	backoffBase         = 5 * time.Second
+	textChunkLimit      = 4000
+	typingKeepalive     = 5 * time.Second
 )
 
 type cursorStore interface {
@@ -52,6 +56,7 @@ type bot struct {
 	cfg        config.LLMConfig
 	llmClients map[string]llm.Client
 	newLLM     llmFactory
+	typingTick time.Duration
 }
 
 // Run starts the single-threaded monitor loop for an account.
@@ -256,9 +261,9 @@ func (b *bot) replyWithLLM(fromUserID, contextToken, text string) error {
 		return err
 	}
 
-	b.sendTyping(fromUserID, contextToken, api.TypingStatusTyping)
+	stopTyping := b.startTypingKeepalive(fromUserID, contextToken)
 	fullResponse, err := llmClient.ChatStream(b.cfg.SystemPrompt, msgs, nil)
-	b.sendTyping(fromUserID, contextToken, api.TypingStatusCancel)
+	stopTyping()
 
 	if err != nil {
 		log.Printf("[monitor] LLM error model=%s: %v", modelName, err)
@@ -276,7 +281,9 @@ func (b *bot) replyWithLLM(fromUserID, contextToken, text string) error {
 	}
 
 	filtered := markdown.FilterText(fullResponse)
-	b.sendText(fromUserID, filtered, contextToken)
+	if err := b.sendText(fromUserID, filtered, contextToken); err != nil {
+		return err
+	}
 
 	log.Printf("[monitor] reply to=%s model=%s len=%d", fromUserID, modelName, len(fullResponse))
 	return nil
@@ -308,11 +315,55 @@ func (b *bot) llmForUser(userID string) (string, llm.Client, error) {
 	return model.Name, client, nil
 }
 
-func (b *bot) sendText(toUserID, text, contextToken string) {
-	msg := message.BuildTextMessage(toUserID, text, contextToken)
-	if err := b.client.SendMessage(msg); err != nil {
-		log.Printf("[monitor] sendMessage failed: %v", err)
+func (b *bot) sendText(toUserID, text, contextToken string) error {
+	chunks := splitTextChunks(text, textChunkLimit)
+	for i, chunk := range chunks {
+		msg := message.BuildTextMessage(toUserID, chunk, contextToken)
+		if err := b.client.SendMessage(msg); err != nil {
+			log.Printf("[monitor] sendMessage failed chunk=%d/%d len=%d: %v", i+1, len(chunks), len(chunk), err)
+			return err
+		}
 	}
+	return nil
+}
+
+func splitTextChunks(text string, limit int) []string {
+	if limit <= 0 {
+		return []string{text}
+	}
+
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return []string{text}
+	}
+
+	chunks := make([]string, 0, len(runes)/limit+1)
+	for start := 0; start < len(runes); {
+		end := start + limit
+		if end >= len(runes) {
+			chunks = append(chunks, string(runes[start:]))
+			break
+		}
+
+		split := findChunkSplit(runes, start, end)
+		chunks = append(chunks, string(runes[start:split]))
+		start = split
+	}
+	return chunks
+}
+
+func findChunkSplit(runes []rune, start, end int) int {
+	for i := end - 1; i >= start; i-- {
+		if runes[i] == '\n' {
+			return i + 1
+		}
+	}
+	for i := end - 1; i >= start; i-- {
+		if unicode.IsSpace(runes[i]) {
+			return i + 1
+		}
+	}
+	return end
 }
 
 func (b *bot) sendTyping(toUserID, contextToken string, status int) {
@@ -322,5 +373,40 @@ func (b *bot) sendTyping(toUserID, contextToken string, status int) {
 	}
 	if err := b.client.SendTyping(toUserID, resp.TypingTicket, status); err != nil {
 		log.Printf("[monitor] sendTyping failed: %v", err)
+	}
+}
+
+func (b *bot) startTypingKeepalive(toUserID, contextToken string) func() {
+	interval := b.typingTick
+	if interval <= 0 {
+		interval = typingKeepalive
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+
+	b.sendTyping(toUserID, contextToken, api.TypingStatusTyping)
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				b.sendTyping(toUserID, contextToken, api.TypingStatusTyping)
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(stop)
+			<-done
+			b.sendTyping(toUserID, contextToken, api.TypingStatusCancel)
+		})
 	}
 }

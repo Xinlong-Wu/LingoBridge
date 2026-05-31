@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"wechatbox/internal/config"
 	"wechatbox/internal/llm"
@@ -14,9 +15,14 @@ import (
 )
 
 type fakeWechatClient struct {
-	sent   []*api.WeixinMessage
-	typing []int
-	stops  int
+	sent       []*api.WeixinMessage
+	typing     []int
+	stops      int
+	sendErr    error
+	failSendAt int
+	sendCalls  int
+	typingErr  error
+	typingCh   chan int
 }
 
 func (f *fakeWechatClient) GetUpdatesContext(ctx context.Context, buf string) (*api.GetUpdatesResp, error) {
@@ -29,6 +35,13 @@ func (f *fakeWechatClient) GetUpdatesContext(ctx context.Context, buf string) (*
 }
 
 func (f *fakeWechatClient) SendMessage(msg *api.WeixinMessage) error {
+	f.sendCalls++
+	if f.failSendAt > 0 && f.sendCalls == f.failSendAt {
+		if f.sendErr != nil {
+			return f.sendErr
+		}
+		return errors.New("send failed")
+	}
 	f.sent = append(f.sent, msg)
 	return nil
 }
@@ -39,6 +52,15 @@ func (f *fakeWechatClient) GetConfig(ilinkUserID, contextToken string) (*api.Get
 
 func (f *fakeWechatClient) SendTyping(ilinkUserID, typingTicket string, status int) error {
 	f.typing = append(f.typing, status)
+	if f.typingCh != nil {
+		select {
+		case f.typingCh <- status:
+		default:
+		}
+	}
+	if f.typingErr != nil {
+		return f.typingErr
+	}
 	return nil
 }
 
@@ -149,6 +171,8 @@ type fakeLLM struct {
 	err      error
 	called   bool
 	messages []store.Message
+	started  chan struct{}
+	release  chan struct{}
 }
 
 func (f *fakeLLM) Chat(systemPrompt string, messages []store.Message) (string, error) {
@@ -158,6 +182,12 @@ func (f *fakeLLM) Chat(systemPrompt string, messages []store.Message) (string, e
 func (f *fakeLLM) ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (string, error) {
 	f.called = true
 	f.messages = messages
+	if f.started != nil {
+		close(f.started)
+	}
+	if f.release != nil {
+		<-f.release
+	}
 	if f.err != nil {
 		return "", f.err
 	}
@@ -234,6 +264,19 @@ func lastSentText(t *testing.T, client *fakeWechatClient) string {
 	return items[0].TextItem.Text
 }
 
+func joinedSentText(t *testing.T, client *fakeWechatClient) string {
+	t.Helper()
+	var out strings.Builder
+	for _, msg := range client.sent {
+		items := msg.ItemList
+		if len(items) == 0 || items[0].TextItem == nil {
+			t.Fatal("sent message is not text")
+		}
+		out.WriteString(items[0].TextItem.Text)
+	}
+	return out.String()
+}
+
 func TestProcessOneTextMessage(t *testing.T) {
 	b, client, sessions, llmClient := newTestBot()
 
@@ -255,6 +298,127 @@ func TestProcessOneTextMessage(t *testing.T) {
 	}
 	if got := sessions.saved.Messages[0].Content; got != "hi" {
 		t.Fatalf("saved user message = %q, want hi", got)
+	}
+}
+
+func TestProcessOneTypingKeepaliveRepeatsUntilLLMReturns(t *testing.T) {
+	b, client, _, llmClient := newTestBot()
+	b.typingTick = 5 * time.Millisecond
+	client.typingCh = make(chan int, 10)
+	llmClient.started = make(chan struct{})
+	llmClient.release = make(chan struct{})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- b.processOne(textMessage("hi"))
+	}()
+
+	select {
+	case <-llmClient.started:
+	case <-time.After(time.Second):
+		t.Fatal("LLM did not start")
+	}
+
+	typingCount := 0
+	for typingCount < 2 {
+		select {
+		case status := <-client.typingCh:
+			if status == api.TypingStatusTyping {
+				typingCount++
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("typing keepalive count = %d, want at least 2", typingCount)
+		}
+	}
+
+	close(llmClient.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("processOne returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("processOne did not finish")
+	}
+
+	if got := client.typing[len(client.typing)-1]; got != api.TypingStatusCancel {
+		t.Fatalf("last typing status = %d, want cancel", got)
+	}
+}
+
+func TestProcessOneTypingErrorDoesNotBlockReply(t *testing.T) {
+	b, client, _, llmClient := newTestBot()
+	client.typingErr = errors.New("typing failed")
+
+	if err := b.processOne(textMessage("hi")); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+
+	if !llmClient.called {
+		t.Fatal("LLM was not called")
+	}
+	if got := lastSentText(t, client); got != "hello" {
+		t.Fatalf("sent text = %q, want hello", got)
+	}
+}
+
+func TestProcessOneLongReplyIsChunked(t *testing.T) {
+	b, client, _, llmClient := newTestBot()
+	llmClient.response = strings.Repeat("甲", textChunkLimit+50)
+
+	if err := b.processOne(textMessage("hi")); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+
+	if len(client.sent) != 2 {
+		t.Fatalf("sent messages = %d, want 2", len(client.sent))
+	}
+	if got := joinedSentText(t, client); got != llmClient.response {
+		t.Fatalf("joined sent text length = %d, want exact response length %d", len(got), len(llmClient.response))
+	}
+	for i, msg := range client.sent {
+		text := msg.ItemList[0].TextItem.Text
+		if got := len([]rune(text)); got > textChunkLimit {
+			t.Fatalf("chunk %d rune length = %d, want <= %d", i+1, got, textChunkLimit)
+		}
+	}
+}
+
+func TestProcessOneReturnsErrorWhenReplyChunkSendFails(t *testing.T) {
+	b, client, sessions, llmClient := newTestBot()
+	llmClient.response = strings.Repeat("x", textChunkLimit+1)
+	client.failSendAt = 2
+	client.sendErr = errors.New("send failed")
+
+	err := b.processOne(textMessage("hi"))
+	if err == nil || !strings.Contains(err.Error(), "send failed") {
+		t.Fatalf("processOne error = %v, want send failed", err)
+	}
+	if len(client.sent) != 1 {
+		t.Fatalf("sent messages = %d, want first chunk only", len(client.sent))
+	}
+	if sessions.saved == nil || len(sessions.saved.Messages) != 2 {
+		t.Fatalf("saved conversation = %#v, want complete assistant history saved before send", sessions.saved)
+	}
+}
+
+func TestSplitTextChunksPreservesMultibyteText(t *testing.T) {
+	text := "你好🙂世界\n" + strings.Repeat("再见🙂 ", 5)
+	chunks := splitTextChunks(text, 7)
+
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %d, want multiple chunks", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if !utf8.ValidString(chunk) {
+			t.Fatalf("chunk %d is not valid UTF-8: %q", i+1, chunk)
+		}
+		if got := len([]rune(chunk)); got > 7 {
+			t.Fatalf("chunk %d rune length = %d, want <= 7", i+1, got)
+		}
+	}
+	if got := strings.Join(chunks, ""); got != text {
+		t.Fatalf("joined chunks = %q, want %q", got, text)
 	}
 }
 
@@ -401,6 +565,9 @@ func TestProcessOneLLMError(t *testing.T) {
 	}
 	if got := lastSentText(t, client); !strings.Contains(got, "AI 响应失败") {
 		t.Fatalf("sent text = %q, want AI error message", got)
+	}
+	if len(client.typing) != 2 || client.typing[len(client.typing)-1] != api.TypingStatusCancel {
+		t.Fatalf("typing statuses = %v, want typing then cancel", client.typing)
 	}
 }
 

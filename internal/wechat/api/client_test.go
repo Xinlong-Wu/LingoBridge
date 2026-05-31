@@ -65,6 +65,30 @@ func TestSendMessageSetsHeadersAndBaseInfo(t *testing.T) {
 	}
 }
 
+func TestSendMessageReturnsRetError(t *testing.T) {
+	client := NewClient("https://wechatbox.test", "")
+	client.HTTPClient = testHTTPClient(func(r *http.Request) (*http.Response, error) {
+		return testResponse(r, http.StatusOK, `{"ret":1,"errmsg":"too long"}`), nil
+	})
+
+	err := client.SendMessage(&WeixinMessage{})
+	if err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatalf("SendMessage error = %v, want too long", err)
+	}
+}
+
+func TestSendMessageReturnsErrcodeError(t *testing.T) {
+	client := NewClient("https://wechatbox.test", "")
+	client.HTTPClient = testHTTPClient(func(r *http.Request) (*http.Response, error) {
+		return testResponse(r, http.StatusOK, `{"errcode":123,"errmsg":"bad"}`), nil
+	})
+
+	err := client.SendMessage(&WeixinMessage{})
+	if err == nil || !strings.Contains(err.Error(), "bad") {
+		t.Fatalf("SendMessage error = %v, want bad", err)
+	}
+}
+
 func TestDoRequestTimeout(t *testing.T) {
 	client := NewClient("https://wechatbox.test", "")
 	client.HTTPClient = testHTTPClient(func(r *http.Request) (*http.Response, error) {

@@ -65,35 +65,35 @@ type RefMessage struct {
 
 // MessageItem is a single item within a message.
 type MessageItem struct {
-	Type         int        `json:"type,omitempty"`
-	CreateTimeMs int64      `json:"create_time_ms,omitempty"`
-	UpdateTimeMs int64      `json:"update_time_ms,omitempty"`
-	IsCompleted  bool       `json:"is_completed,omitempty"`
-	MsgID        string     `json:"msg_id,omitempty"`
+	Type         int         `json:"type,omitempty"`
+	CreateTimeMs int64       `json:"create_time_ms,omitempty"`
+	UpdateTimeMs int64       `json:"update_time_ms,omitempty"`
+	IsCompleted  bool        `json:"is_completed,omitempty"`
+	MsgID        string      `json:"msg_id,omitempty"`
 	RefMsg       *RefMessage `json:"ref_msg,omitempty"`
-	TextItem     *TextItem  `json:"text_item,omitempty"`
-	ImageItem    *ImageItem `json:"image_item,omitempty"`
-	VoiceItem    *VoiceItem `json:"voice_item,omitempty"`
-	FileItem     *FileItem  `json:"file_item,omitempty"`
-	VideoItem    *VideoItem `json:"video_item,omitempty"`
+	TextItem     *TextItem   `json:"text_item,omitempty"`
+	ImageItem    *ImageItem  `json:"image_item,omitempty"`
+	VoiceItem    *VoiceItem  `json:"voice_item,omitempty"`
+	FileItem     *FileItem   `json:"file_item,omitempty"`
+	VideoItem    *VideoItem  `json:"video_item,omitempty"`
 }
 
 // WeixinMessage is the unified message type.
 type WeixinMessage struct {
-	Seq           int            `json:"seq,omitempty"`
-	MessageID     int64          `json:"message_id,omitempty"`
-	FromUserID    string         `json:"from_user_id,omitempty"`
-	ToUserID      string         `json:"to_user_id,omitempty"`
-	ClientID      string         `json:"client_id,omitempty"`
-	CreateTimeMs  int64          `json:"create_time_ms,omitempty"`
-	UpdateTimeMs  int64          `json:"update_time_ms,omitempty"`
-	DeleteTimeMs  int64          `json:"delete_time_ms,omitempty"`
-	SessionID     string         `json:"session_id,omitempty"`
-	GroupID       string         `json:"group_id,omitempty"`
-	MessageType   int            `json:"message_type,omitempty"`
-	MessageState  int            `json:"message_state,omitempty"`
-	ItemList      []*MessageItem `json:"item_list,omitempty"`
-	ContextToken  string         `json:"context_token,omitempty"`
+	Seq          int            `json:"seq,omitempty"`
+	MessageID    int64          `json:"message_id,omitempty"`
+	FromUserID   string         `json:"from_user_id,omitempty"`
+	ToUserID     string         `json:"to_user_id,omitempty"`
+	ClientID     string         `json:"client_id,omitempty"`
+	CreateTimeMs int64          `json:"create_time_ms,omitempty"`
+	UpdateTimeMs int64          `json:"update_time_ms,omitempty"`
+	DeleteTimeMs int64          `json:"delete_time_ms,omitempty"`
+	SessionID    string         `json:"session_id,omitempty"`
+	GroupID      string         `json:"group_id,omitempty"`
+	MessageType  int            `json:"message_type,omitempty"`
+	MessageState int            `json:"message_state,omitempty"`
+	ItemList     []*MessageItem `json:"item_list,omitempty"`
+	ContextToken string         `json:"context_token,omitempty"`
 }
 
 // Message type constants.
@@ -130,8 +130,8 @@ const (
 
 // Typing status constants.
 const (
-	TypingStatusTyping  = 1
-	TypingStatusCancel  = 2
+	TypingStatusTyping = 1
+	TypingStatusCancel = 2
 )
 
 // GetUpdatesReq is the request for long-polling updates.
@@ -142,11 +142,11 @@ type GetUpdatesReq struct {
 
 // GetUpdatesResp is the response to getUpdates.
 type GetUpdatesResp struct {
-	Ret                 int               `json:"ret,omitempty"`
-	Errcode             int               `json:"errcode,omitempty"`
-	Errmsg              string            `json:"errmsg,omitempty"`
-	Msgs                []*WeixinMessage  `json:"msgs,omitempty"`
-	GetUpdatesBuf       string            `json:"get_updates_buf,omitempty"`
+	Ret                  int              `json:"ret,omitempty"`
+	Errcode              int              `json:"errcode,omitempty"`
+	Errmsg               string           `json:"errmsg,omitempty"`
+	Msgs                 []*WeixinMessage `json:"msgs,omitempty"`
+	GetUpdatesBuf        string           `json:"get_updates_buf,omitempty"`
 	LongpollingTimeoutMs int              `json:"longpolling_timeout_ms,omitempty"`
 }
 
@@ -156,20 +156,27 @@ type SendMessageReq struct {
 	BaseInfo *BaseInfo      `json:"base_info,omitempty"`
 }
 
+// SendMessageResp is the response from sendMessage.
+type SendMessageResp struct {
+	Ret     int    `json:"ret,omitempty"`
+	Errcode int    `json:"errcode,omitempty"`
+	Errmsg  string `json:"errmsg,omitempty"`
+}
+
 // GetUploadUrlReq is the request to get a CDN upload URL.
 type GetUploadUrlReq struct {
-	FileKey          string `json:"filekey,omitempty"`
-	MediaType        int    `json:"media_type,omitempty"`
-	ToUserID         string `json:"to_user_id,omitempty"`
-	RawSize          int    `json:"rawsize,omitempty"`
-	RawFileMD5       string `json:"rawfilemd5,omitempty"`
-	FileSize         int    `json:"filesize,omitempty"`
-	ThumbRawSize     int    `json:"thumb_rawsize,omitempty"`
-	ThumbRawFileMD5  string `json:"thumb_rawfilemd5,omitempty"`
-	ThumbFileSize    int    `json:"thumb_filesize,omitempty"`
-	NoNeedThumb      bool   `json:"no_need_thumb,omitempty"`
-	AESKey           string `json:"aeskey,omitempty"`
-	BaseInfo         *BaseInfo `json:"base_info,omitempty"`
+	FileKey         string    `json:"filekey,omitempty"`
+	MediaType       int       `json:"media_type,omitempty"`
+	ToUserID        string    `json:"to_user_id,omitempty"`
+	RawSize         int       `json:"rawsize,omitempty"`
+	RawFileMD5      string    `json:"rawfilemd5,omitempty"`
+	FileSize        int       `json:"filesize,omitempty"`
+	ThumbRawSize    int       `json:"thumb_rawsize,omitempty"`
+	ThumbRawFileMD5 string    `json:"thumb_rawfilemd5,omitempty"`
+	ThumbFileSize   int       `json:"thumb_filesize,omitempty"`
+	NoNeedThumb     bool      `json:"no_need_thumb,omitempty"`
+	AESKey          string    `json:"aeskey,omitempty"`
+	BaseInfo        *BaseInfo `json:"base_info,omitempty"`
 }
 
 // GetUploadUrlResp is the response from getUploadUrl.

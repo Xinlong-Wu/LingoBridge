@@ -208,8 +208,26 @@ func (c *Client) SendMessage(msg *WeixinMessage) error {
 		Msg:      msg,
 		BaseInfo: getBaseInfo(),
 	}
-	_, err := c.doPost("ilink/bot/sendmessage", req, defaultAPITimeout)
-	return err
+	respBody, err := c.doPost("ilink/bot/sendmessage", req, defaultAPITimeout)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(respBody)) == "" {
+		return nil
+	}
+
+	var resp SendMessageResp
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return fmt.Errorf("unmarshal sendMessage response: %w", err)
+	}
+	if resp.Ret != 0 || resp.Errcode != 0 {
+		msg := resp.Errmsg
+		if msg == "" {
+			msg = "unknown error"
+		}
+		return fmt.Errorf("sendMessage ret=%d errcode=%d: %s", resp.Ret, resp.Errcode, msg)
+	}
+	return nil
 }
 
 // GetUploadUrl gets a pre-signed CDN upload URL.

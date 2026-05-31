@@ -89,6 +89,9 @@ current message
 
 Quoted media is not downloaded or interpreted; only the current text is sent.
 
+Long text replies are automatically split into multiple WeChat messages before
+sending.
+
 ## Configuration
 
 `~/.wechatbox/config.yaml`:
