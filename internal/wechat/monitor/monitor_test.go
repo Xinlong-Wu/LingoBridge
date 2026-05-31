@@ -276,6 +276,71 @@ func TestProcessOneSlashCommand(t *testing.T) {
 	}
 }
 
+func TestProcessOneQuotedTextMessage(t *testing.T) {
+	b, _, sessions, llmClient := newTestBot()
+	msg := &api.WeixinMessage{
+		FromUserID:   "user",
+		ContextToken: "context",
+		ItemList: []*api.MessageItem{
+			{
+				Type:     api.ItemTypeText,
+				TextItem: &api.TextItem{Text: "what about this?"},
+				RefMsg: &api.RefMessage{MessageItem: &api.MessageItem{
+					Type:     api.ItemTypeText,
+					TextItem: &api.TextItem{Text: "original text"},
+				}},
+			},
+		},
+	}
+
+	if err := b.processOne(msg); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+
+	want := "[引用: original text]\nwhat about this?"
+	if !llmClient.called {
+		t.Fatal("LLM was not called")
+	}
+	if got := llmClient.messages[len(llmClient.messages)-1].Content; got != want {
+		t.Fatalf("LLM user message = %q, want %q", got, want)
+	}
+	if got := sessions.saved.Messages[0].Content; got != want {
+		t.Fatalf("saved user message = %q, want %q", got, want)
+	}
+}
+
+func TestProcessOneQuotedSlashCommandUsesPlainText(t *testing.T) {
+	b, client, _, llmClient := newTestBot()
+	b.sessions.(*fakeConversationManager).sessions = []store.Session{
+		{ID: "session", UserID: "user", Name: "default", Current: true},
+	}
+	msg := &api.WeixinMessage{
+		FromUserID:   "user",
+		ContextToken: "context",
+		ItemList: []*api.MessageItem{
+			{
+				Type:     api.ItemTypeText,
+				TextItem: &api.TextItem{Text: "/list"},
+				RefMsg: &api.RefMessage{MessageItem: &api.MessageItem{
+					Type:     api.ItemTypeText,
+					TextItem: &api.TextItem{Text: "quoted"},
+				}},
+			},
+		},
+	}
+
+	if err := b.processOne(msg); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+
+	if llmClient.called {
+		t.Fatal("LLM was called for slash command")
+	}
+	if got := lastSentText(t, client); !strings.Contains(got, "default") {
+		t.Fatalf("sent text = %q, want session list", got)
+	}
+}
+
 func TestProcessOneVoiceTranscription(t *testing.T) {
 	b, _, sessions, llmClient := newTestBot()
 	msg := &api.WeixinMessage{

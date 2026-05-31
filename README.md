@@ -77,6 +77,18 @@ Send these as WeChat messages to the bot:
 | `/clear` | Archive current session, start fresh |
 | `/model [name]` | Show or switch model profile |
 
+## Message Handling
+
+When a user replies to a quoted WeChat text message, WeChatBox includes the
+quoted context in the message sent to the LLM:
+
+```text
+[引用: quoted text]
+current message
+```
+
+Quoted media is not downloaded or interpreted; only the current text is sent.
+
 ## Configuration
 
 `~/.wechatbox/config.yaml`:

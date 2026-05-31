@@ -26,11 +26,65 @@ func ExtractText(msg *api.WeixinMessage) string {
 	}
 	var texts []string
 	for _, item := range msg.ItemList {
-		if item.Type == api.ItemTypeText && item.TextItem != nil {
+		if item != nil && item.Type == api.ItemTypeText && item.TextItem != nil {
 			texts = append(texts, item.TextItem.Text)
 		}
 	}
 	return strings.Join(texts, "")
+}
+
+// ExtractLLMText extracts the message body sent to the LLM. When a text
+// message replies to another text message, it prefixes the current text with
+// quoted context so the model can understand what the user is referring to.
+func ExtractLLMText(msg *api.WeixinMessage) string {
+	if msg == nil {
+		return ""
+	}
+	return bodyFromItemList(msg.ItemList)
+}
+
+func bodyFromItemList(items []*api.MessageItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		switch item.Type {
+		case api.ItemTypeText:
+			if item.TextItem == nil {
+				continue
+			}
+			text := item.TextItem.Text
+			if item.RefMsg == nil {
+				return text
+			}
+			if item.RefMsg.MessageItem != nil && isMediaItem(item.RefMsg.MessageItem) {
+				return text
+			}
+
+			var parts []string
+			if item.RefMsg.Title != "" {
+				parts = append(parts, item.RefMsg.Title)
+			}
+			if item.RefMsg.MessageItem != nil {
+				refBody := bodyFromItemList([]*api.MessageItem{item.RefMsg.MessageItem})
+				if refBody != "" {
+					parts = append(parts, refBody)
+				}
+			}
+			if len(parts) == 0 {
+				return text
+			}
+			return "[引用: " + strings.Join(parts, " | ") + "]\n" + text
+		case api.ItemTypeVoice:
+			if item.VoiceItem != nil && item.VoiceItem.Text != "" {
+				return item.VoiceItem.Text
+			}
+		}
+	}
+	return ""
 }
 
 // HasMedia checks if the message contains any media items.
@@ -39,12 +93,23 @@ func HasMedia(msg *api.WeixinMessage) bool {
 		return false
 	}
 	for _, item := range msg.ItemList {
-		switch item.Type {
-		case api.ItemTypeImage, api.ItemTypeVoice, api.ItemTypeVideo, api.ItemTypeFile:
+		if item != nil && isMediaItem(item) {
 			return true
 		}
 	}
 	return false
+}
+
+func isMediaItem(item *api.MessageItem) bool {
+	if item == nil {
+		return false
+	}
+	switch item.Type {
+	case api.ItemTypeImage, api.ItemTypeVoice, api.ItemTypeVideo, api.ItemTypeFile:
+		return true
+	default:
+		return false
+	}
 }
 
 // ToLLMMessages converts a session conversation and a new user message into

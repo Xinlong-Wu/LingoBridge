@@ -175,10 +175,11 @@ func (b *bot) processOne(msg *api.WeixinMessage) error {
 
 	fromUserID := msg.FromUserID
 	contextToken := msg.ContextToken
-	text := message.ExtractText(msg)
-	log.Printf("[monitor] msg from=%s len=%d", fromUserID, len(text))
+	commandText := message.ExtractText(msg)
+	llmText := message.ExtractLLMText(msg)
+	log.Printf("[monitor] msg from=%s len=%d", fromUserID, len(llmText))
 
-	if resp, handled, err := commands.Handle(text, fromUserID, b.sessions); handled {
+	if resp, handled, err := commands.Handle(commandText, fromUserID, b.sessions); handled {
 		if err != nil {
 			log.Printf("[monitor] command error: %v", err)
 			b.sendText(fromUserID, fmt.Sprintf("❌ 错误：%v", err), contextToken)
@@ -189,12 +190,12 @@ func (b *bot) processOne(msg *api.WeixinMessage) error {
 	}
 
 	var stop bool
-	text, stop = b.applyMedia(msg, fromUserID, contextToken, text)
-	if stop || text == "" {
+	llmText, stop = b.applyMedia(msg, fromUserID, contextToken, llmText)
+	if stop || llmText == "" {
 		return nil
 	}
 
-	return b.replyWithLLM(fromUserID, contextToken, text)
+	return b.replyWithLLM(fromUserID, contextToken, llmText)
 }
 
 func (b *bot) applyMedia(msg *api.WeixinMessage, fromUserID, contextToken, text string) (string, bool) {
