@@ -53,6 +53,21 @@ func TestHandleNewDuplicateSession(t *testing.T) {
 	}
 }
 
+func TestHandleHelp(t *testing.T) {
+	resp, handled, err := Handle("/help", "user", &fakeSessionManager{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle /help")
+	}
+	for _, want := range []string{"/help", "/new", "/list", "/switch", "/clear"} {
+		if !strings.Contains(resp, want) {
+			t.Fatalf("response = %q, want %s", resp, want)
+		}
+	}
+}
+
 func TestHandleSwitchMissingSession(t *testing.T) {
 	manager := &fakeSessionManager{
 		switchErr: fmt.Errorf("%w: missing", store.ErrSessionNotFound),

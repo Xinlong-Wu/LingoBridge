@@ -35,6 +35,8 @@ func Handle(text string, userID string, sm SessionManager) (string, bool, error)
 	args := parts[1:]
 
 	switch cmd {
+	case "/help":
+		return handleHelp()
 	case "/new":
 		return handleNew(userID, args, sm)
 	case "/list":
@@ -46,6 +48,17 @@ func Handle(text string, userID string, sm SessionManager) (string, bool, error)
 	default:
 		return "", false, nil // Not a recognized slash command
 	}
+}
+
+func handleHelp() (string, bool, error) {
+	return strings.Join([]string{
+		"可用命令：",
+		"/help - 查看命令帮助",
+		"/new [名称] - 创建新会话",
+		"/list - 查看会话列表",
+		"/switch <名称> - 切换会话",
+		"/clear - 清空当前会话并开始新会话",
+	}, "\n"), true, nil
 }
 
 func handleNew(userID string, args []string, sm SessionManager) (string, bool, error) {

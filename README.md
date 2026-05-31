@@ -61,6 +61,7 @@ Send these as WeChat messages to the bot:
 
 | Command | Description |
 |---|---|
+| `/help` | Show available in-chat commands |
 | `/new [name]` | Create a new conversation session |
 | `/list` | List your sessions |
 | `/switch <name>` | Switch active session |
