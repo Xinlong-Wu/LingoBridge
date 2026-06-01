@@ -2,9 +2,15 @@ package llm
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"wechatbox/internal/store"
 )
 
 func TestParseSSE(t *testing.T) {
@@ -107,6 +113,293 @@ func TestParseSSELongLine(t *testing.T) {
 	}
 }
 
+func TestConvertToResponsesInputWithImageFileID(t *testing.T) {
+	client := &openaiResponsesClient{}
+	input, err := client.convertToResponsesInput([]store.Message{
+		{Role: "system", Content: "system"},
+		{
+			Role:    "user",
+			Content: "what is this?",
+			Attachments: []store.Attachment{
+				{Type: "image", RefProvider: "openai", RefType: "file", RefID: "file_123", MIMEType: "image/png"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("convertToResponsesInput returned error: %v", err)
+	}
+	if len(input) != 1 {
+		t.Fatalf("input len = %d, want 1", len(input))
+	}
+	msg, ok := input[0].(responsesInputMessage)
+	if !ok {
+		t.Fatalf("input[0] type = %T, want responsesInputMessage", input[0])
+	}
+	parts, ok := msg.Content.([]responsesInputContent)
+	if !ok {
+		t.Fatalf("content type = %T, want []responsesInputContent", msg.Content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("parts len = %d, want 2", len(parts))
+	}
+	if parts[0].Type != "input_text" || parts[0].Text != "what is this?" {
+		t.Fatalf("text part = %#v", parts[0])
+	}
+	if parts[1].Type != "input_image" || parts[1].FileID != "file_123" {
+		t.Fatalf("image part = %#v", parts[1])
+	}
+}
+
+func TestConvertToResponsesInputWithImageGenerationRef(t *testing.T) {
+	client := &openaiResponsesClient{}
+	input, err := client.convertToResponsesInput([]store.Message{
+		{
+			Role:    "assistant",
+			Content: "[图片: mime=image/png filename=image.png]",
+			Attachments: []store.Attachment{
+				{Type: "image", RefProvider: "openai", RefType: "image_generation_call", RefID: "ig_123", MIMEType: "image/png"},
+			},
+		},
+		{Role: "user", Content: "make it brighter"},
+	})
+	if err != nil {
+		t.Fatalf("convertToResponsesInput returned error: %v", err)
+	}
+	if len(input) != 3 {
+		t.Fatalf("input len = %d, want 3", len(input))
+	}
+	if _, ok := input[0].(responsesInputMessage); !ok {
+		t.Fatalf("input[0] type = %T, want responsesInputMessage", input[0])
+	}
+	msg := input[0].(responsesInputMessage)
+	parts, ok := msg.Content.([]responsesInputContent)
+	if !ok {
+		t.Fatalf("assistant content type = %T, want []responsesInputContent", msg.Content)
+	}
+	if len(parts) != 1 || parts[0].Type != "output_text" {
+		t.Fatalf("assistant text parts = %#v, want output_text", parts)
+	}
+	call, ok := input[1].(responsesInputImageGenerationCall)
+	if !ok {
+		t.Fatalf("input[1] type = %T, want responsesInputImageGenerationCall", input[1])
+	}
+	if call.Type != "image_generation_call" || call.ID != "ig_123" {
+		t.Fatalf("generation call = %#v, want ig_123", call)
+	}
+	if msg, ok := input[2].(responsesInputMessage); !ok || msg.Role != "user" {
+		t.Fatalf("input[2] = %#v, want user message", input[2])
+	}
+}
+
+func TestConvertToResponsesInputRequiresImageFileID(t *testing.T) {
+	client := &openaiResponsesClient{}
+	_, err := client.convertToResponsesInput([]store.Message{
+		{Role: "user", Attachments: []store.Attachment{{Type: "image"}}},
+	})
+	if !errors.Is(err, ErrUnsupportedAttachment) || !strings.Contains(err.Error(), "missing openai file or image_generation_call reference") {
+		t.Fatalf("convertToResponsesInput error = %v, want missing image reference", err)
+	}
+}
+
+func TestConvertToOpenAIChatMessagesRejectsAttachments(t *testing.T) {
+	_, err := convertToOpenAIChatMessages([]store.Message{
+		{Role: "user", Content: "hi", Attachments: []store.Attachment{{Type: "image", RefProvider: "openai", RefType: "file", RefID: "file_123"}}},
+	})
+	if !errors.Is(err, ErrUnsupportedAttachment) {
+		t.Fatalf("convertToOpenAIChatMessages error = %v, want ErrUnsupportedAttachment", err)
+	}
+}
+
+func TestUploadOpenAIVisionFile(t *testing.T) {
+	var gotPurpose, gotFilename string
+	var gotFile []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/files" {
+			t.Fatalf("path = %q, want /v1/files", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if err := r.ParseMultipartForm(1024); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		gotPurpose = r.FormValue("purpose")
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile: %v", err)
+		}
+		defer file.Close()
+		gotFilename = header.Filename
+		gotFile, err = io.ReadAll(file)
+		if err != nil {
+			t.Fatalf("ReadAll file: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"file_abc"}`))
+	}))
+	defer server.Close()
+
+	fileID, err := uploadOpenAIVisionFile(server.Client(), server.URL, "test-key", "image.png", []byte("image-bytes"))
+	if err != nil {
+		t.Fatalf("uploadOpenAIVisionFile returned error: %v", err)
+	}
+	if fileID != "file_abc" {
+		t.Fatalf("fileID = %q, want file_abc", fileID)
+	}
+	if gotPurpose != "vision" {
+		t.Fatalf("purpose = %q, want vision", gotPurpose)
+	}
+	if gotFilename != "image.png" || string(gotFile) != "image-bytes" {
+		t.Fatalf("uploaded file = %q %q, want image.png image-bytes", gotFilename, gotFile)
+	}
+}
+
+func TestOpenAIResponsesPrepareUserMessageUploadsImage(t *testing.T) {
+	var gotFilename string
+	var gotFile []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/files" {
+			t.Fatalf("path = %q, want /v1/files", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if err := r.ParseMultipartForm(1024); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		if got := r.FormValue("purpose"); got != "vision" {
+			t.Fatalf("purpose = %q, want vision", got)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile: %v", err)
+		}
+		defer file.Close()
+		gotFilename = header.Filename
+		gotFile, err = io.ReadAll(file)
+		if err != nil {
+			t.Fatalf("ReadAll file: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"file_abc"}`))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{
+		openaiBase: openaiBase{
+			cfg: Config{
+				BaseURL: server.URL,
+				APIKey:  "test-key",
+				Model:   "gpt-test",
+			},
+			httpClient: server.Client(),
+		},
+	}
+	msg, err := client.PrepareUserMessage("what is this?", []InputAttachment{{
+		Type:     "image",
+		MIMEType: "image/png",
+		Filename: "image.png",
+		Size:     len("image-bytes"),
+		Data:     []byte("image-bytes"),
+	}})
+	if err != nil {
+		t.Fatalf("PrepareUserMessage returned error: %v", err)
+	}
+	if gotFilename != "image.png" || string(gotFile) != "image-bytes" {
+		t.Fatalf("uploaded file = %q %q, want image.png image-bytes", gotFilename, gotFile)
+	}
+	if msg.Role != "user" || msg.Content != "what is this?" {
+		t.Fatalf("message = %#v, want user message", msg)
+	}
+	if len(msg.Attachments) != 1 {
+		t.Fatalf("attachments = %#v, want one attachment", msg.Attachments)
+	}
+	attachment := msg.Attachments[0]
+	if attachment.Type != "image" || attachment.MIMEType != "image/png" || attachment.Filename != "image.png" || attachment.Size != len("image-bytes") {
+		t.Fatalf("attachment metadata = %#v", attachment)
+	}
+	if attachment.RefProvider != "openai" || attachment.RefType != "file" || attachment.RefID != "file_abc" {
+		t.Fatalf("attachment ref = %#v, want openai file file_abc", attachment)
+	}
+}
+
+func TestOpenAIResponsesAssistantMessageSavesGenerationRef(t *testing.T) {
+	client := &openaiResponsesClient{}
+	msg := client.AssistantMessage(Response{
+		Text: "caption",
+		Images: []Image{{
+			Data:     []byte("image-bytes"),
+			MIMEType: "image/png",
+			Filename: "image.png",
+			Reference: AttachmentRef{
+				Provider: "openai",
+				Type:     "image_generation_call",
+				ID:       "ig_123",
+			},
+		}},
+	})
+
+	if strings.Contains(msg.Content, "base64=") {
+		t.Fatalf("content contains base64: %q", msg.Content)
+	}
+	if got := msg.Content; got != "caption\n[图片: mime=image/png filename=image.png]" {
+		t.Fatalf("content = %q", got)
+	}
+	if len(msg.Attachments) != 1 {
+		t.Fatalf("attachments = %#v, want one image attachment", msg.Attachments)
+	}
+	attachment := msg.Attachments[0]
+	if attachment.RefProvider != "openai" || attachment.RefType != "image_generation_call" || attachment.RefID != "ig_123" {
+		t.Fatalf("attachment ref = %#v, want openai image_generation_call ig_123", attachment)
+	}
+}
+
+func TestPrepareUserMessageRejectsAttachmentsWithoutProviderSupport(t *testing.T) {
+	attachment := []InputAttachment{{Type: "image", Data: []byte("image-bytes")}}
+	if _, err := (&openaiChatClient{}).PrepareUserMessage("hi", attachment); !errors.Is(err, ErrUnsupportedAttachment) {
+		t.Fatalf("openai chat PrepareUserMessage error = %v, want ErrUnsupportedAttachment", err)
+	}
+	if _, err := (&anthropicClient{}).PrepareUserMessage("hi", attachment); !errors.Is(err, ErrUnsupportedAttachment) {
+		t.Fatalf("anthropic PrepareUserMessage error = %v, want ErrUnsupportedAttachment", err)
+	}
+}
+
+func TestOpenAIResponsesRequestEnablesStore(t *testing.T) {
+	var reqBody responsesRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q, want /v1/responses", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{
+		openaiBase: openaiBase{
+			cfg: Config{
+				BaseURL: server.URL,
+				APIKey:  "key",
+				Model:   "gpt-test",
+			},
+			httpClient: server.Client(),
+		},
+	}
+	resp, err := client.Chat("", []store.Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if resp.Text != "ok" {
+		t.Fatalf("response text = %q, want ok", resp.Text)
+	}
+	if !reqBody.Store {
+		t.Fatal("responses request store = false, want true")
+	}
+}
+
 func TestParseResponsesOutputWithImage(t *testing.T) {
 	imageB64 := base64.StdEncoding.EncodeToString([]byte("image-bytes"))
 	resp, err := parseResponsesOutput(responsesOutput{Output: []responsesOutputItem{
@@ -131,6 +424,9 @@ func TestParseResponsesOutputWithImage(t *testing.T) {
 	if len(resp.Images) != 1 || string(resp.Images[0].Data) != "image-bytes" {
 		t.Fatalf("response images = %#v, want decoded image", resp.Images)
 	}
+	if resp.Images[0].Reference.Provider != "openai" || resp.Images[0].Reference.Type != "image_generation_call" || resp.Images[0].Reference.ID != "ig_1" {
+		t.Fatalf("image reference = %#v, want openai image_generation_call ig_1", resp.Images[0].Reference)
+	}
 	if resp.Images[0].MIMEType != "image/png" {
 		t.Fatalf("image MIME type = %q, want image/png", resp.Images[0].MIMEType)
 	}
@@ -154,6 +450,9 @@ func TestParseResponsesSSEOutputItemDoneImage(t *testing.T) {
 	if len(resp.Images) != 1 || string(resp.Images[0].Data) != "image-bytes" {
 		t.Fatalf("response images = %#v, want decoded image", resp.Images)
 	}
+	if resp.Images[0].Reference.Provider != "openai" || resp.Images[0].Reference.Type != "image_generation_call" || resp.Images[0].Reference.ID != "ig_1" {
+		t.Fatalf("image reference = %#v, want openai image_generation_call ig_1", resp.Images[0].Reference)
+	}
 }
 
 func TestParseResponsesSSECompletedImage(t *testing.T) {
@@ -166,6 +465,9 @@ func TestParseResponsesSSECompletedImage(t *testing.T) {
 	}
 	if len(resp.Images) != 1 || string(resp.Images[0].Data) != "image-bytes" {
 		t.Fatalf("response images = %#v, want decoded image", resp.Images)
+	}
+	if resp.Images[0].Reference.Provider != "openai" || resp.Images[0].Reference.Type != "image_generation_call" || resp.Images[0].Reference.ID != "ig_1" {
+		t.Fatalf("image reference = %#v, want openai image_generation_call ig_1", resp.Images[0].Reference)
 	}
 }
 
@@ -183,6 +485,9 @@ func TestParseResponsesSSECompletedImageFromKnownItemWithoutType(t *testing.T) {
 	}
 	if len(resp.Images) != 1 || string(resp.Images[0].Data) != "image-bytes" {
 		t.Fatalf("response images = %#v, want decoded image", resp.Images)
+	}
+	if resp.Images[0].Reference.Provider != "openai" || resp.Images[0].Reference.Type != "image_generation_call" || resp.Images[0].Reference.ID != "image_item_1" {
+		t.Fatalf("image reference = %#v, want openai image_generation_call image_item_1", resp.Images[0].Reference)
 	}
 }
 
@@ -228,6 +533,9 @@ func TestParseResponsesSSEUsesCompletedImageOverGeneratingItem(t *testing.T) {
 	if len(resp.Images) != 1 || string(resp.Images[0].Data) != "final-image" {
 		t.Fatalf("response images = %#v, want final image only", resp.Images)
 	}
+	if resp.Images[0].Reference.Provider != "openai" || resp.Images[0].Reference.Type != "image_generation_call" || resp.Images[0].Reference.ID != "ig_1" {
+		t.Fatalf("image reference = %#v, want openai image_generation_call ig_1", resp.Images[0].Reference)
+	}
 }
 
 func TestParseResponsesSSECompletedImageEventDedupesResponseOutput(t *testing.T) {
@@ -244,6 +552,9 @@ func TestParseResponsesSSECompletedImageEventDedupesResponseOutput(t *testing.T)
 	}
 	if len(resp.Images) != 1 || string(resp.Images[0].Data) != "final-image" {
 		t.Fatalf("response images = %#v, want one final image", resp.Images)
+	}
+	if resp.Images[0].Reference.Provider != "openai" || resp.Images[0].Reference.Type != "image_generation_call" || resp.Images[0].Reference.ID != "ig_1" {
+		t.Fatalf("image reference = %#v, want openai image_generation_call ig_1", resp.Images[0].Reference)
 	}
 }
 

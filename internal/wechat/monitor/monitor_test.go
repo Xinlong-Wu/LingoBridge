@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -186,12 +187,40 @@ func (f *fakeConversationManager) ListModels() []string {
 }
 
 type fakeLLM struct {
-	response llm.Response
-	err      error
-	called   bool
-	messages []store.Message
-	started  chan struct{}
-	release  chan struct{}
+	response            llm.Response
+	err                 error
+	prepareErr          error
+	called              bool
+	prepareCalled       bool
+	assistantCalled     bool
+	preparedContent     string
+	preparedAttachments []llm.InputAttachment
+	assistantMsg        store.Message
+	messages            []store.Message
+	started             chan struct{}
+	release             chan struct{}
+}
+
+func (f *fakeLLM) PrepareUserMessage(content string, attachments []llm.InputAttachment) (store.Message, error) {
+	f.prepareCalled = true
+	f.preparedContent = content
+	f.preparedAttachments = append([]llm.InputAttachment(nil), attachments...)
+	if f.prepareErr != nil {
+		return store.Message{}, f.prepareErr
+	}
+	msg := store.Message{Role: "user", Content: content}
+	for _, attachment := range attachments {
+		msg.Attachments = append(msg.Attachments, store.Attachment{
+			Type:        attachment.Type,
+			MIMEType:    attachment.MIMEType,
+			Filename:    attachment.Filename,
+			Size:        attachment.Size,
+			RefProvider: "fake",
+			RefType:     "prepared",
+			RefID:       "prepared-image",
+		})
+	}
+	return msg, nil
 }
 
 func (f *fakeLLM) Chat(systemPrompt string, messages []store.Message) (llm.Response, error) {
@@ -216,6 +245,29 @@ func (f *fakeLLM) ChatStream(systemPrompt string, messages []store.Message, onCh
 		}
 	}
 	return f.response, nil
+}
+
+func (f *fakeLLM) AssistantMessage(resp llm.Response) store.Message {
+	f.assistantCalled = true
+	if f.assistantMsg.Role != "" || f.assistantMsg.Content != "" || len(f.assistantMsg.Attachments) > 0 {
+		return f.assistantMsg
+	}
+	var parts []string
+	if resp.Text != "" {
+		parts = append(parts, resp.Text)
+	}
+	for _, image := range resp.Images {
+		mimeType := image.MIMEType
+		if mimeType == "" {
+			mimeType = "image/png"
+		}
+		filename := image.Filename
+		if filename == "" {
+			filename = "image.png"
+		}
+		parts = append(parts, fmt.Sprintf("[图片: mime=%s filename=%s base64=%s]", mimeType, filename, base64.StdEncoding.EncodeToString(image.Data)))
+	}
+	return store.Message{Role: "assistant", Content: strings.Join(parts, "\n")}
 }
 
 func newTestBot() (*bot, *fakeWechatClient, *fakeConversationManager, *fakeLLM) {
@@ -271,6 +323,24 @@ func textMessage(text string) *api.WeixinMessage {
 	}
 }
 
+func imageMessage(text string) *api.WeixinMessage {
+	items := []*api.MessageItem{}
+	if text != "" {
+		items = append(items, &api.MessageItem{Type: api.ItemTypeText, TextItem: &api.TextItem{Text: text}})
+	}
+	items = append(items, &api.MessageItem{
+		Type: api.ItemTypeImage,
+		ImageItem: &api.ImageItem{
+			Media: &api.CDNMedia{EncryptQueryParam: "download-param", AESKey: "aes-key", EncryptType: 1},
+		},
+	})
+	return &api.WeixinMessage{
+		FromUserID:   "user",
+		ContextToken: "context",
+		ItemList:     items,
+	}
+}
+
 func lastSentText(t *testing.T, client *fakeWechatClient) string {
 	t.Helper()
 	if len(client.sent) == 0 {
@@ -320,6 +390,110 @@ func TestProcessOneTextMessage(t *testing.T) {
 	}
 }
 
+func TestProcessOneImageMessageUsesPreparedAttachmentRef(t *testing.T) {
+	b, _, sessions, llmClient := newTestBot()
+	b.downloadImage = func(item *api.ImageItem) ([]byte, string, error) {
+		return []byte("image-bytes"), "image/png", nil
+	}
+
+	if err := b.processOne(imageMessage("what is this?")); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+
+	if !llmClient.called {
+		t.Fatal("LLM was not called")
+	}
+	if !llmClient.prepareCalled {
+		t.Fatal("PrepareUserMessage was not called")
+	}
+	if llmClient.preparedContent != "what is this?" {
+		t.Fatalf("prepared content = %q, want prompt text", llmClient.preparedContent)
+	}
+	if len(llmClient.preparedAttachments) != 1 {
+		t.Fatalf("prepared attachments = %#v, want one image attachment", llmClient.preparedAttachments)
+	}
+	prepared := llmClient.preparedAttachments[0]
+	if prepared.Type != "image" || prepared.MIMEType != "image/png" || prepared.Filename != "wechat-image.png" || string(prepared.Data) != "image-bytes" {
+		t.Fatalf("prepared attachment = %#v", prepared)
+	}
+	userMsg := llmClient.messages[len(llmClient.messages)-1]
+	if userMsg.Content != "what is this?" {
+		t.Fatalf("LLM user content = %q, want prompt text", userMsg.Content)
+	}
+	if len(userMsg.Attachments) != 1 || userMsg.Attachments[0].RefProvider != "fake" || userMsg.Attachments[0].RefType != "prepared" || userMsg.Attachments[0].RefID != "prepared-image" {
+		t.Fatalf("LLM user attachments = %#v, want prepared ref", userMsg.Attachments)
+	}
+	if sessions.saved == nil || len(sessions.saved.Messages) < 1 {
+		t.Fatalf("saved conversation = %#v, want saved image message", sessions.saved)
+	}
+	if got := sessions.saved.Messages[0].Attachments[0].RefID; got != "prepared-image" {
+		t.Fatalf("saved ref id = %q, want prepared-image", got)
+	}
+}
+
+func TestProcessOneImageOnlyUsesDefaultPrompt(t *testing.T) {
+	b, _, sessions, llmClient := newTestBot()
+	b.downloadImage = func(item *api.ImageItem) ([]byte, string, error) {
+		return []byte("image-bytes"), "image/png", nil
+	}
+
+	if err := b.processOne(imageMessage("")); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+
+	if llmClient.preparedContent != defaultImagePrompt {
+		t.Fatalf("prepared content = %q, want default image prompt", llmClient.preparedContent)
+	}
+	userMsg := llmClient.messages[len(llmClient.messages)-1]
+	if userMsg.Content != defaultImagePrompt {
+		t.Fatalf("LLM user content = %q, want default image prompt", userMsg.Content)
+	}
+	if len(userMsg.Attachments) != 1 {
+		t.Fatalf("LLM user attachments = %#v, want image attachment", userMsg.Attachments)
+	}
+	if got := sessions.saved.Messages[0].Content; got != defaultImagePrompt {
+		t.Fatalf("saved user content = %q, want default image prompt", got)
+	}
+}
+
+func TestProcessOneImageUnsupportedByModel(t *testing.T) {
+	b, client, sessions, llmClient := newTestBot()
+	b.downloadImage = func(item *api.ImageItem) ([]byte, string, error) {
+		return []byte("image-bytes"), "image/png", nil
+	}
+	llmClient.prepareErr = llm.ErrUnsupportedAttachment
+
+	err := b.processOne(imageMessage("what is this?"))
+	if !errors.Is(err, llm.ErrUnsupportedAttachment) {
+		t.Fatalf("processOne error = %v, want ErrUnsupportedAttachment", err)
+	}
+	if llmClient.called {
+		t.Fatal("LLM was called")
+	}
+	if sessions.saved != nil {
+		t.Fatalf("conversation was saved: %#v", sessions.saved)
+	}
+	if got := lastSentText(t, client); !strings.Contains(got, "不支持图片上下文") {
+		t.Fatalf("sent text = %q, want unsupported image notice", got)
+	}
+}
+
+func TestProcessOneLLMUnsupportedAttachmentSendsImageNotice(t *testing.T) {
+	b, client, sessions, llmClient := newTestBot()
+	llmClient.err = llm.ErrUnsupportedAttachment
+
+	err := b.processOne(textMessage("continue"))
+	if !errors.Is(err, llm.ErrUnsupportedAttachment) {
+		t.Fatalf("processOne error = %v, want ErrUnsupportedAttachment", err)
+	}
+	if sessions.saved != nil {
+		t.Fatalf("conversation was saved: %#v", sessions.saved)
+	}
+	if got := lastSentText(t, client); !strings.Contains(got, "不支持图片上下文") {
+		t.Fatalf("sent text = %q, want unsupported image notice", got)
+	}
+}
+
 func TestProcessOneSendsTextThenImage(t *testing.T) {
 	b, client, sessions, llmClient := newTestBot()
 	llmClient.response = llm.Response{
@@ -352,6 +526,67 @@ func TestProcessOneSendsTextThenImage(t *testing.T) {
 	}
 	if got := sessions.saved.Messages[1].Content; got != "caption\n[图片: mime=image/png filename=image.png base64=aW1hZ2UtYnl0ZXM=]" {
 		t.Fatalf("saved assistant message = %q", got)
+	}
+}
+
+func TestProcessOneSavesAssistantMessageFromLLMClient(t *testing.T) {
+	b, client, sessions, llmClient := newTestBot()
+	llmClient.response = llm.Response{
+		Text: "caption",
+		Images: []llm.Image{{
+			Data:     []byte("image-bytes"),
+			MIMEType: "image/png",
+			Filename: "image.png",
+			Reference: llm.AttachmentRef{
+				Provider: "openai",
+				Type:     "image_generation_call",
+				ID:       "ig_123",
+			},
+		}},
+	}
+	llmClient.assistantMsg = store.Message{
+		Role:    "assistant",
+		Content: "caption\n[图片: mime=image/png filename=image.png]",
+		Attachments: []store.Attachment{{
+			Type:        "image",
+			MIMEType:    "image/png",
+			Filename:    "image.png",
+			Size:        len("image-bytes"),
+			RefProvider: "openai",
+			RefType:     "image_generation_call",
+			RefID:       "ig_123",
+		}},
+	}
+	b.uploadImage = func(client wechatClient, httpClient *http.Client, cdnBaseURL, toUserID string, image llm.Image) (*uploadedImage, error) {
+		return &uploadedImage{
+			Media:   &api.CDNMedia{EncryptQueryParam: "download-param", AESKey: "aes-key", EncryptType: 1},
+			MidSize: 32,
+		}, nil
+	}
+
+	if err := b.processOne(textMessage("draw")); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+
+	if len(client.sent) != 2 {
+		t.Fatalf("sent messages = %d, want text and image", len(client.sent))
+	}
+	if !llmClient.assistantCalled {
+		t.Fatal("AssistantMessage was not called")
+	}
+	assistantMsg := sessions.saved.Messages[1]
+	if strings.Contains(assistantMsg.Content, "base64=") {
+		t.Fatalf("saved assistant content contains base64: %q", assistantMsg.Content)
+	}
+	if got := assistantMsg.Content; got != "caption\n[图片: mime=image/png filename=image.png]" {
+		t.Fatalf("saved assistant content = %q", got)
+	}
+	if len(assistantMsg.Attachments) != 1 {
+		t.Fatalf("assistant attachments = %#v, want one image attachment", assistantMsg.Attachments)
+	}
+	attachment := assistantMsg.Attachments[0]
+	if attachment.RefProvider != "openai" || attachment.RefType != "image_generation_call" || attachment.RefID != "ig_123" {
+		t.Fatalf("attachment ref = %#v, want openai image_generation_call ig_123", attachment)
 	}
 }
 

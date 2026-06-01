@@ -116,6 +116,13 @@ func isMediaItem(item *api.MessageItem) bool {
 // the messages array format for the LLM API. It includes the system prompt
 // and truncates history to maxHistory messages.
 func ToLLMMessages(systemPrompt string, conv *store.Conversation, newMsg string, maxHistory int) []store.Message {
+	return ToLLMMessagesWithUserMessage(systemPrompt, conv, store.Message{Role: "user", Content: newMsg}, maxHistory)
+}
+
+// ToLLMMessagesWithUserMessage converts a session conversation and a new user
+// message into the messages array format for the LLM API. It includes the
+// system prompt and truncates history to maxHistory messages.
+func ToLLMMessagesWithUserMessage(systemPrompt string, conv *store.Conversation, newMsg store.Message, maxHistory int) []store.Message {
 	var msgs []store.Message
 
 	// Add system prompt
@@ -133,7 +140,10 @@ func ToLLMMessages(systemPrompt string, conv *store.Conversation, newMsg string,
 	msgs = append(msgs, history[startIdx:]...)
 
 	// Add the new user message
-	msgs = append(msgs, store.Message{Role: "user", Content: newMsg})
+	if newMsg.Role == "" {
+		newMsg.Role = "user"
+	}
+	msgs = append(msgs, newMsg)
 
 	return msgs
 }

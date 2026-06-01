@@ -9,10 +9,22 @@ import (
 	"wechatbox/internal/config"
 )
 
-// Message represents a single chat message in the OpenAI format.
+// Attachment represents non-text content associated with a chat message.
+type Attachment struct {
+	Type        string `json:"type"`
+	MIMEType    string `json:"mime_type,omitempty"`
+	Filename    string `json:"filename,omitempty"`
+	Size        int    `json:"size,omitempty"`
+	RefProvider string `json:"ref_provider,omitempty"`
+	RefType     string `json:"ref_type,omitempty"`
+	RefID       string `json:"ref_id,omitempty"`
+}
+
+// Message represents a single chat message stored in conversation history.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role        string       `json:"role"`
+	Content     string       `json:"content"`
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 // Conversation is a snapshot of a full conversation (one JSONL line).
