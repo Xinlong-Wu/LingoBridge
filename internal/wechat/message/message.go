@@ -157,16 +157,17 @@ func BuildTextMessage(toUserID, text, contextToken string) *api.WeixinMessage {
 }
 
 // BuildImageMessage creates a WeixinMessage for sending an image.
-func BuildImageMessage(toUserID string, media *api.CDNMedia, contextToken string) *api.WeixinMessage {
+func BuildImageMessage(toUserID string, media *api.CDNMedia, midSize int, contextToken string) *api.WeixinMessage {
 	return &api.WeixinMessage{
 		ToUserID:     toUserID,
+		ClientID:     generateClientID(),
 		MessageType:  api.MessageTypeBot,
 		MessageState: api.MessageStateFinish,
 		ItemList: []*api.MessageItem{
 			{
 				Type:        api.ItemTypeImage,
 				IsCompleted: true,
-				ImageItem:   &api.ImageItem{Media: media},
+				ImageItem:   &api.ImageItem{Media: media, MidSize: midSize},
 			},
 		},
 		ContextToken: contextToken,

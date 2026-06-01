@@ -2,8 +2,11 @@ package monitor
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 	"unicode"
@@ -34,6 +37,7 @@ type cursorStore interface {
 type wechatClient interface {
 	GetUpdatesContext(ctx context.Context, buf string) (*api.GetUpdatesResp, error)
 	SendMessage(msg *api.WeixinMessage) error
+	GetUploadUrl(req *api.GetUploadUrlReq) (*api.GetUploadUrlResp, error)
 	GetConfig(ilinkUserID, contextToken string) (*api.GetConfigResp, error)
 	SendTyping(ilinkUserID, typingTicket string, status int) error
 	NotifyStart() error
@@ -50,13 +54,16 @@ type conversationManager interface {
 type llmFactory func(config.ResolvedModel) llm.Client
 
 type bot struct {
-	client     wechatClient
-	cursors    cursorStore
-	sessions   conversationManager
-	cfg        config.LLMConfig
-	llmClients map[string]llm.Client
-	newLLM     llmFactory
-	typingTick time.Duration
+	client      wechatClient
+	cursors     cursorStore
+	sessions    conversationManager
+	cfg         config.LLMConfig
+	llmClients  map[string]llm.Client
+	newLLM      llmFactory
+	typingTick  time.Duration
+	cdnBaseURL  string
+	cdnClient   *http.Client
+	uploadImage imageUploader
 }
 
 // Run starts the single-threaded monitor loop for an account.
@@ -76,6 +83,7 @@ func RunContext(ctx context.Context, st *store.Store, sm *session.Manager, cfg c
 		cfg:        cfg,
 		llmClients: map[string]llm.Client{},
 		newLLM:     defaultLLMFactory,
+		cdnBaseURL: defaultWeixinCDNBaseURL,
 	}
 	return b.runAccount(ctx, acc)
 }
@@ -262,7 +270,7 @@ func (b *bot) replyWithLLM(fromUserID, contextToken, text string) error {
 	}
 
 	stopTyping := b.startTypingKeepalive(fromUserID, contextToken)
-	fullResponse, err := llmClient.ChatStream(b.cfg.SystemPrompt, msgs, nil)
+	llmResponse, err := llmClient.ChatStream(b.cfg.SystemPrompt, msgs, nil)
 	stopTyping()
 
 	if err != nil {
@@ -271,22 +279,52 @@ func (b *bot) replyWithLLM(fromUserID, contextToken, text string) error {
 		return err
 	}
 
+	assistantHistory := responseHistoryContent(llmResponse)
 	conv.Messages = append(conv.Messages,
 		store.Message{Role: "user", Content: text},
-		store.Message{Role: "assistant", Content: fullResponse},
+		store.Message{Role: "assistant", Content: assistantHistory},
 	)
 
 	if err := b.sessions.SaveHistory(fromUserID, sess.ID, conv); err != nil {
 		log.Printf("[monitor] save history: %v", err)
 	}
 
-	filtered := markdown.FilterText(fullResponse)
-	if err := b.sendText(fromUserID, filtered, contextToken); err != nil {
-		return err
+	if llmResponse.Text != "" {
+		filtered := markdown.FilterText(llmResponse.Text)
+		if err := b.sendText(fromUserID, filtered, contextToken); err != nil {
+			return err
+		}
 	}
 
-	log.Printf("[monitor] reply to=%s model=%s len=%d", fromUserID, modelName, len(fullResponse))
+	for i, image := range llmResponse.Images {
+		if err := b.sendImage(fromUserID, contextToken, image); err != nil {
+			log.Printf("[monitor] send image failed image=%d/%d: %v", i+1, len(llmResponse.Images), err)
+			b.sendText(fromUserID, "❌ AI 响应失败，请重试。", contextToken)
+			return err
+		}
+	}
+
+	log.Printf("[monitor] reply to=%s model=%s len=%d images=%d", fromUserID, modelName, len(llmResponse.Text), len(llmResponse.Images))
 	return nil
+}
+
+func responseHistoryContent(resp llm.Response) string {
+	var parts []string
+	if resp.Text != "" {
+		parts = append(parts, resp.Text)
+	}
+	for _, image := range resp.Images {
+		mimeType := image.MIMEType
+		if mimeType == "" {
+			mimeType = "image/png"
+		}
+		filename := image.Filename
+		if filename == "" {
+			filename = "image.png"
+		}
+		parts = append(parts, fmt.Sprintf("[图片: mime=%s filename=%s base64=%s]", mimeType, filename, base64.StdEncoding.EncodeToString(image.Data)))
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (b *bot) llmForUser(userID string) (string, llm.Client, error) {
@@ -323,6 +361,24 @@ func (b *bot) sendText(toUserID, text, contextToken string) error {
 			log.Printf("[monitor] sendMessage failed chunk=%d/%d len=%d: %v", i+1, len(chunks), len(chunk), err)
 			return err
 		}
+	}
+	return nil
+}
+
+func (b *bot) sendImage(toUserID, contextToken string, image llm.Image) error {
+	uploader := b.uploadImage
+	if uploader == nil {
+		uploader = uploadImageToWeixinCDN
+	}
+	uploaded, err := uploader(b.client, b.cdnClient, b.cdnBaseURL, toUserID, image)
+	if err != nil {
+		return err
+	}
+
+	msg := message.BuildImageMessage(toUserID, uploaded.Media, uploaded.MidSize, contextToken)
+	if err := b.client.SendMessage(msg); err != nil {
+		log.Printf("[monitor] sendImage failed len=%d: %v", len(image.Data), err)
+		return err
 	}
 	return nil
 }

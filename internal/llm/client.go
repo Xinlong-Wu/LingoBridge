@@ -3,9 +3,11 @@ package llm
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -15,10 +17,23 @@ import (
 // Client is the common LLM client interface.
 type Client interface {
 	// Chat sends messages and returns the full response.
-	Chat(systemPrompt string, messages []store.Message) (string, error)
+	Chat(systemPrompt string, messages []store.Message) (Response, error)
 	// ChatStream sends messages and streams the response via callback.
 	// The callback receives incremental text chunks.
-	ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (string, error)
+	ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (Response, error)
+}
+
+// Response is the common LLM response shape across providers.
+type Response struct {
+	Text   string
+	Images []Image
+}
+
+// Image is a generated image returned by an LLM provider.
+type Image struct {
+	Data     []byte
+	MIMEType string
+	Filename string
 }
 
 // Config holds the LLM client configuration.
@@ -41,6 +56,8 @@ func NewClient(cfg Config) Client {
 }
 
 type streamParser func(data string) string
+
+const maxSSERawLogLen = 4096
 
 func postJSON(client *http.Client, reqURL string, headers http.Header, reqBody any, label string) ([]byte, error) {
 	resp, err := sendJSON(client, reqURL, headers, reqBody)
@@ -74,6 +91,21 @@ func postStream(client *http.Client, reqURL string, headers http.Header, reqBody
 	return parseSSE(resp.Body, parser, onChunk)
 }
 
+func postResponsesStream(client *http.Client, reqURL string, headers http.Header, reqBody any, onChunk func(chunk string) error) (Response, error) {
+	resp, err := sendJSON(client, reqURL, headers, reqBody)
+	if err != nil {
+		return Response{}, fmt.Errorf("responses stream request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return Response{}, fmt.Errorf("responses stream HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
+	}
+
+	return parseResponsesSSE(resp.Body, onChunk)
+}
+
 func sendJSON(client *http.Client, reqURL string, headers http.Header, reqBody any) (*http.Response, error) {
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -95,34 +127,67 @@ func sendJSON(client *http.Client, reqURL string, headers http.Header, reqBody a
 
 func parseSSE(body io.Reader, parser streamParser, onChunk func(chunk string) error) (string, error) {
 	var fullText strings.Builder
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			break
-		}
-
+	err := readSSEData(body, func(data string) (bool, error) {
 		chunk := parser(data)
 		if chunk == "" {
-			continue
+			return false, nil
 		}
 
 		fullText.WriteString(chunk)
 		if onChunk != nil {
 			if err := onChunk(chunk); err != nil {
-				return fullText.String(), err
+				return false, err
 			}
 		}
-	}
+		return false, nil
+	})
+	return fullText.String(), err
+}
 
-	return fullText.String(), scanner.Err()
+func readSSEData(body io.Reader, handle func(data string) (done bool, err error)) error {
+	reader := bufio.NewReader(body)
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if line != "" {
+			line = strings.TrimRight(line, "\r\n")
+			logSSERawData(line)
+			if !strings.HasPrefix(line, "data: ") {
+				if err == io.EOF {
+					return nil
+				}
+				continue
+			}
+
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				return nil
+			}
+
+			done, handleErr := handle(data)
+			if handleErr != nil {
+				return handleErr
+			}
+			if done {
+				return nil
+			}
+		}
+
+		if err == io.EOF {
+			return nil
+		}
+	}
+}
+
+func logSSERawData(line string) {
+	if len(line) <= maxSSERawLogLen {
+		log.Printf("[llm] SSE rawdata: %s", line)
+		return
+	}
+	log.Printf("[llm] SSE rawdata: %s... (truncated, len=%d)", line[:maxSSERawLogLen], len(line))
 }
 
 func bearerHeaders(apiKey string) http.Header {
@@ -188,21 +253,32 @@ type responsesRequest struct {
 }
 
 type responsesOutput struct {
-	Output []struct {
-		Type    string `json:"type"`
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	} `json:"output"`
+	Output []responsesOutputItem `json:"output"`
+}
+
+type responsesOutputItem struct {
+	ID      string                    `json:"id"`
+	Type    string                    `json:"type"`
+	Status  string                    `json:"status"`
+	Content []responsesOutputItemPart `json:"content"`
+	Result  string                    `json:"result"`
+}
+
+type responsesOutputItemPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 type responsesStreamEvent struct {
-	Type  string `json:"type"`
-	Delta string `json:"delta"`
+	Type     string              `json:"type"`
+	Delta    string              `json:"delta"`
+	Item     responsesOutputItem `json:"item"`
+	ItemID   string              `json:"item_id"`
+	Result   string              `json:"result"`
+	Response responsesOutput     `json:"response"`
 }
 
-func (c *openaiClient) Chat(systemPrompt string, messages []store.Message) (string, error) {
+func (c *openaiClient) Chat(systemPrompt string, messages []store.Message) (Response, error) {
 	reqURL, useResponses := c.requestURL()
 	if useResponses {
 		return c.chatResponses(reqURL, messages, false, nil)
@@ -216,21 +292,21 @@ func (c *openaiClient) Chat(systemPrompt string, messages []store.Message) (stri
 
 	body, err := postJSON(c.httpClient, reqURL, bearerHeaders(c.cfg.APIKey), reqBody, "openai")
 	if err != nil {
-		return "", err
+		return Response{}, err
 	}
 
 	var chatResp openaiChatResponse
 	if err := json.Unmarshal(body, &chatResp); err != nil {
-		return "", fmt.Errorf("unmarshal response: %w", err)
+		return Response{}, fmt.Errorf("unmarshal response: %w", err)
 	}
 
 	if len(chatResp.Choices) > 0 {
-		return chatResp.Choices[0].Message.Content, nil
+		return Response{Text: chatResp.Choices[0].Message.Content}, nil
 	}
-	return "", fmt.Errorf("no choices in response")
+	return Response{}, fmt.Errorf("no choices in response")
 }
 
-func (c *openaiClient) ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (string, error) {
+func (c *openaiClient) ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (Response, error) {
 	reqURL, useResponses := c.requestURL()
 	if useResponses {
 		return c.chatResponses(reqURL, messages, true, onChunk)
@@ -242,10 +318,14 @@ func (c *openaiClient) ChatStream(systemPrompt string, messages []store.Message,
 		Stream:   true,
 	}
 
-	return postStream(c.httpClient, reqURL, bearerHeaders(c.cfg.APIKey), reqBody, "openai", parseOpenAIStreamEvent, onChunk)
+	text, err := postStream(c.httpClient, reqURL, bearerHeaders(c.cfg.APIKey), reqBody, "openai", parseOpenAIStreamEvent, onChunk)
+	if err != nil {
+		return Response{}, err
+	}
+	return Response{Text: text}, nil
 }
 
-func (c *openaiClient) chatResponses(reqURL string, messages []store.Message, stream bool, onChunk func(chunk string) error) (string, error) {
+func (c *openaiClient) chatResponses(reqURL string, messages []store.Message, stream bool, onChunk func(chunk string) error) (Response, error) {
 	input := make([]store.Message, 0, len(messages))
 	for _, m := range messages {
 		if m.Role != "system" {
@@ -260,28 +340,26 @@ func (c *openaiClient) chatResponses(reqURL string, messages []store.Message, st
 	}
 
 	if stream {
-		return postStream(c.httpClient, reqURL, bearerHeaders(c.cfg.APIKey), reqBody, "responses", parseResponsesStreamEvent, onChunk)
+		return postResponsesStream(c.httpClient, reqURL, bearerHeaders(c.cfg.APIKey), reqBody, onChunk)
 	}
 
 	body, err := postJSON(c.httpClient, reqURL, bearerHeaders(c.cfg.APIKey), reqBody, "responses")
 	if err != nil {
-		return "", err
+		return Response{}, err
 	}
 
 	var out responsesOutput
 	if err := json.Unmarshal(body, &out); err != nil {
-		return "", fmt.Errorf("unmarshal responses: %w", err)
+		return Response{}, fmt.Errorf("unmarshal responses: %w", err)
 	}
-	for _, o := range out.Output {
-		if o.Type == "message" {
-			for _, c := range o.Content {
-				if c.Type == "output_text" {
-					return c.Text, nil
-				}
-			}
-		}
+	resp, err := parseResponsesOutput(out)
+	if err != nil {
+		return Response{}, err
 	}
-	return "", fmt.Errorf("no output_text in responses")
+	if resp.Text == "" && len(resp.Images) == 0 {
+		return Response{}, fmt.Errorf("no output_text or image_generation_call in responses")
+	}
+	return resp, nil
 }
 
 func parseOpenAIStreamEvent(data string) string {
@@ -304,6 +382,156 @@ func parseResponsesStreamEvent(data string) string {
 		return ""
 	}
 	return event.Delta
+}
+
+func parseResponsesOutput(out responsesOutput) (Response, error) {
+	var resp Response
+	seenImages := map[string]bool{}
+	for _, item := range out.Output {
+		if err := appendResponsesOutputItem(&resp, item, seenImages, true); err != nil {
+			return Response{}, err
+		}
+	}
+	return resp, nil
+}
+
+func parseResponsesSSE(body io.Reader, onChunk func(chunk string) error) (Response, error) {
+	var resp Response
+	seenImages := map[string]bool{}
+	knownImageItems := map[string]bool{}
+	var textBuilder strings.Builder
+
+	err := readSSEData(body, func(data string) (bool, error) {
+		var event responsesStreamEvent
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			return false, nil
+		}
+
+		switch event.Type {
+		case "response.output_text.delta":
+			if event.Delta == "" {
+				return false, nil
+			}
+			textBuilder.WriteString(event.Delta)
+			resp.Text = textBuilder.String()
+			if onChunk != nil {
+				if err := onChunk(event.Delta); err != nil {
+					return false, err
+				}
+			}
+		case "response.output_item.added":
+			rememberResponsesImageItem(event.Item, knownImageItems)
+		case "response.output_item.done":
+			rememberResponsesImageItem(event.Item, knownImageItems)
+			if err := appendResponsesOutputItem(&resp, event.Item, seenImages, false); err != nil {
+				return false, err
+			}
+		case "response.image_generation_call.completed":
+			if event.ItemID != "" {
+				knownImageItems[event.ItemID] = true
+			}
+			if err := appendResponsesOutputItem(&resp, responsesOutputItem{
+				ID:     event.ItemID,
+				Type:   "image_generation_call",
+				Status: "completed",
+				Result: event.Result,
+			}, seenImages, false); err != nil {
+				return false, err
+			}
+		case "response.completed":
+			includeText := textBuilder.Len() == 0
+			for _, item := range event.Response.Output {
+				if item.ID != "" && knownImageItems[item.ID] && item.Result != "" {
+					if err := appendResponsesImage(&resp, item, seenImages); err != nil {
+						return false, err
+					}
+					continue
+				}
+				if err := appendResponsesOutputItem(&resp, item, seenImages, includeText); err != nil {
+					return false, err
+				}
+			}
+		}
+		return false, nil
+	})
+	if err != nil {
+		return Response{}, err
+	}
+	return resp, nil
+}
+
+func rememberResponsesImageItem(item responsesOutputItem, knownImageItems map[string]bool) {
+	if item.ID != "" && item.Type == "image_generation_call" {
+		knownImageItems[item.ID] = true
+	}
+}
+
+func appendResponsesOutputItem(resp *Response, item responsesOutputItem, seenImages map[string]bool, includeText bool) error {
+	if item.Type == "message" {
+		if !includeText {
+			return nil
+		}
+		for _, part := range item.Content {
+			if part.Type == "output_text" {
+				resp.Text += part.Text
+			}
+		}
+		return nil
+	}
+
+	if isResponsesImageItem(item) {
+		if !isFinalResponsesImage(item.Status) {
+			return nil
+		}
+		return appendResponsesImage(resp, item, seenImages)
+	}
+	return nil
+}
+
+func isResponsesImageItem(item responsesOutputItem) bool {
+	return item.Type == "image_generation_call"
+}
+
+func isFinalResponsesImage(status string) bool {
+	return status == "" || status == "completed"
+}
+
+func appendResponsesImage(resp *Response, item responsesOutputItem, seenImages map[string]bool) error {
+	if item.Result == "" {
+		return nil
+	}
+	imageKey := item.ID
+	if imageKey == "" {
+		imageKey = item.Result
+	}
+	if seenImages[imageKey] {
+		return nil
+	}
+	imageData, err := decodeResponseImageResult(item.Result)
+	if err != nil {
+		return err
+	}
+	seenImages[imageKey] = true
+	resp.Images = append(resp.Images, Image{
+		Data:     imageData,
+		MIMEType: "image/png",
+		Filename: "openai-response-image.png",
+	})
+	return nil
+}
+
+func decodeResponseImageResult(result string) ([]byte, error) {
+	raw := result
+	if strings.HasPrefix(raw, "data:") {
+		if comma := strings.Index(raw, ","); comma >= 0 {
+			raw = raw[comma+1:]
+		}
+	}
+	data, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode response image result: %w", err)
+	}
+	return data, nil
 }
 
 // --- Anthropic client ---
@@ -370,7 +598,7 @@ func convertToAnthropicMessages(messages []store.Message, systemPrompt string) (
 	return msgs, system
 }
 
-func (c *anthropicClient) Chat(systemPrompt string, messages []store.Message) (string, error) {
+func (c *anthropicClient) Chat(systemPrompt string, messages []store.Message) (Response, error) {
 	anthropicMsgs, system := convertToAnthropicMessages(messages, systemPrompt)
 
 	reqBody := anthropicRequest{
@@ -384,21 +612,21 @@ func (c *anthropicClient) Chat(systemPrompt string, messages []store.Message) (s
 	reqURL := c.requestURL()
 	body, err := postJSON(c.httpClient, reqURL, anthropicHeaders(c.cfg.APIKey), reqBody, "anthropic")
 	if err != nil {
-		return "", err
+		return Response{}, err
 	}
 
 	var chatResp anthropicResponse
 	if err := json.Unmarshal(body, &chatResp); err != nil {
-		return "", fmt.Errorf("unmarshal response: %w", err)
+		return Response{}, fmt.Errorf("unmarshal response: %w", err)
 	}
 
 	if len(chatResp.Content) > 0 {
-		return chatResp.Content[0].Text, nil
+		return Response{Text: chatResp.Content[0].Text}, nil
 	}
-	return "", fmt.Errorf("no content in response")
+	return Response{}, fmt.Errorf("no content in response")
 }
 
-func (c *anthropicClient) ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (string, error) {
+func (c *anthropicClient) ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (Response, error) {
 	anthropicMsgs, system := convertToAnthropicMessages(messages, systemPrompt)
 
 	reqBody := anthropicRequest{
@@ -410,7 +638,11 @@ func (c *anthropicClient) ChatStream(systemPrompt string, messages []store.Messa
 	}
 
 	reqURL := c.requestURL()
-	return postStream(c.httpClient, reqURL, anthropicHeaders(c.cfg.APIKey), reqBody, "anthropic", parseAnthropicStreamEvent, onChunk)
+	text, err := postStream(c.httpClient, reqURL, anthropicHeaders(c.cfg.APIKey), reqBody, "anthropic", parseAnthropicStreamEvent, onChunk)
+	if err != nil {
+		return Response{}, err
+	}
+	return Response{Text: text}, nil
 }
 
 func (c *anthropicClient) requestURL() string {

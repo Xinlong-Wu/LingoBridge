@@ -2,7 +2,11 @@ package monitor
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +16,7 @@ import (
 	"wechatbox/internal/llm"
 	"wechatbox/internal/store"
 	"wechatbox/internal/wechat/api"
+	"wechatbox/internal/wechat/cdn"
 )
 
 type fakeWechatClient struct {
@@ -23,6 +28,9 @@ type fakeWechatClient struct {
 	sendCalls  int
 	typingErr  error
 	typingCh   chan int
+	uploadResp *api.GetUploadUrlResp
+	uploadErr  error
+	uploadReq  *api.GetUploadUrlReq
 }
 
 func (f *fakeWechatClient) GetUpdatesContext(ctx context.Context, buf string) (*api.GetUpdatesResp, error) {
@@ -44,6 +52,17 @@ func (f *fakeWechatClient) SendMessage(msg *api.WeixinMessage) error {
 	}
 	f.sent = append(f.sent, msg)
 	return nil
+}
+
+func (f *fakeWechatClient) GetUploadUrl(req *api.GetUploadUrlReq) (*api.GetUploadUrlResp, error) {
+	f.uploadReq = req
+	if f.uploadErr != nil {
+		return nil, f.uploadErr
+	}
+	if f.uploadResp != nil {
+		return f.uploadResp, nil
+	}
+	return &api.GetUploadUrlResp{UploadFullURL: "https://cdn.test/upload"}, nil
 }
 
 func (f *fakeWechatClient) GetConfig(ilinkUserID, contextToken string) (*api.GetConfigResp, error) {
@@ -167,7 +186,7 @@ func (f *fakeConversationManager) ListModels() []string {
 }
 
 type fakeLLM struct {
-	response string
+	response llm.Response
 	err      error
 	called   bool
 	messages []store.Message
@@ -175,11 +194,11 @@ type fakeLLM struct {
 	release  chan struct{}
 }
 
-func (f *fakeLLM) Chat(systemPrompt string, messages []store.Message) (string, error) {
+func (f *fakeLLM) Chat(systemPrompt string, messages []store.Message) (llm.Response, error) {
 	return f.response, f.err
 }
 
-func (f *fakeLLM) ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (string, error) {
+func (f *fakeLLM) ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (llm.Response, error) {
 	f.called = true
 	f.messages = messages
 	if f.started != nil {
@@ -189,11 +208,11 @@ func (f *fakeLLM) ChatStream(systemPrompt string, messages []store.Message, onCh
 		<-f.release
 	}
 	if f.err != nil {
-		return "", f.err
+		return llm.Response{}, f.err
 	}
-	if onChunk != nil {
-		if err := onChunk(f.response); err != nil {
-			return "", err
+	if onChunk != nil && f.response.Text != "" {
+		if err := onChunk(f.response.Text); err != nil {
+			return llm.Response{}, err
 		}
 	}
 	return f.response, nil
@@ -206,7 +225,7 @@ func newTestBot() (*bot, *fakeWechatClient, *fakeConversationManager, *fakeLLM) 
 		conv:        &store.Conversation{},
 		modelByUser: map[string]string{"user": "deepseek"},
 	}
-	llmClient := &fakeLLM{response: "hello"}
+	llmClient := &fakeLLM{response: llm.Response{Text: "hello"}}
 	return &bot{
 		client:     client,
 		cursors:    &fakeCursorStore{},
@@ -214,7 +233,7 @@ func newTestBot() (*bot, *fakeWechatClient, *fakeConversationManager, *fakeLLM) 
 		cfg:        testLLMConfig(),
 		llmClients: map[string]llm.Client{"deepseek": llmClient},
 		newLLM: func(model config.ResolvedModel) llm.Client {
-			return &fakeLLM{response: model.Name}
+			return &fakeLLM{response: llm.Response{Text: model.Name}}
 		},
 	}, client, sessions, llmClient
 }
@@ -301,6 +320,189 @@ func TestProcessOneTextMessage(t *testing.T) {
 	}
 }
 
+func TestProcessOneSendsTextThenImage(t *testing.T) {
+	b, client, sessions, llmClient := newTestBot()
+	llmClient.response = llm.Response{
+		Text:   "caption",
+		Images: []llm.Image{{Data: []byte("image-bytes"), MIMEType: "image/png", Filename: "image.png"}},
+	}
+	b.uploadImage = func(client wechatClient, httpClient *http.Client, cdnBaseURL, toUserID string, image llm.Image) (*uploadedImage, error) {
+		return &uploadedImage{
+			Media:   &api.CDNMedia{EncryptQueryParam: "download-param", AESKey: "aes-key", EncryptType: 1},
+			MidSize: 32,
+		}, nil
+	}
+
+	if err := b.processOne(textMessage("draw")); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+
+	if len(client.sent) != 2 {
+		t.Fatalf("sent messages = %d, want text and image", len(client.sent))
+	}
+	if got := client.sent[0].ItemList[0].TextItem.Text; got != "caption" {
+		t.Fatalf("sent text = %q, want caption", got)
+	}
+	imageItem := client.sent[1].ItemList[0].ImageItem
+	if imageItem == nil || imageItem.Media == nil {
+		t.Fatal("second sent message is not an image")
+	}
+	if imageItem.Media.EncryptQueryParam != "download-param" || imageItem.MidSize != 32 {
+		t.Fatalf("image item = %#v", imageItem)
+	}
+	if got := sessions.saved.Messages[1].Content; got != "caption\n[图片: mime=image/png filename=image.png base64=aW1hZ2UtYnl0ZXM=]" {
+		t.Fatalf("saved assistant message = %q", got)
+	}
+}
+
+func TestProcessOneSendsImageOnly(t *testing.T) {
+	b, client, sessions, llmClient := newTestBot()
+	llmClient.response = llm.Response{
+		Images: []llm.Image{{Data: []byte("image-bytes"), MIMEType: "image/png", Filename: "image.png"}},
+	}
+	b.uploadImage = func(client wechatClient, httpClient *http.Client, cdnBaseURL, toUserID string, image llm.Image) (*uploadedImage, error) {
+		return &uploadedImage{
+			Media:   &api.CDNMedia{EncryptQueryParam: "download-param", AESKey: "aes-key", EncryptType: 1},
+			MidSize: 32,
+		}, nil
+	}
+
+	if err := b.processOne(textMessage("draw")); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+
+	if len(client.sent) != 1 {
+		t.Fatalf("sent messages = %d, want image only", len(client.sent))
+	}
+	if item := client.sent[0].ItemList[0]; item.Type != api.ItemTypeImage || item.ImageItem == nil {
+		t.Fatalf("sent item = %#v, want image", item)
+	}
+	if got := sessions.saved.Messages[1].Content; got != "[图片: mime=image/png filename=image.png base64=aW1hZ2UtYnl0ZXM=]" {
+		t.Fatalf("saved assistant message = %q", got)
+	}
+}
+
+func TestProcessOneImageUploadFailureSendsErrorNotice(t *testing.T) {
+	b, client, _, llmClient := newTestBot()
+	llmClient.response = llm.Response{
+		Images: []llm.Image{{Data: []byte("image-bytes"), MIMEType: "image/png", Filename: "image.png"}},
+	}
+	b.uploadImage = func(client wechatClient, httpClient *http.Client, cdnBaseURL, toUserID string, image llm.Image) (*uploadedImage, error) {
+		return nil, errors.New("upload failed")
+	}
+
+	err := b.processOne(textMessage("draw"))
+	if err == nil || !strings.Contains(err.Error(), "upload failed") {
+		t.Fatalf("processOne error = %v, want upload failed", err)
+	}
+	if got := lastSentText(t, client); !strings.Contains(got, "AI 响应失败") {
+		t.Fatalf("sent text = %q, want AI error message", got)
+	}
+}
+
+func TestUploadImageToWeixinCDN(t *testing.T) {
+	plain := []byte("image-bytes")
+	var uploadedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/octet-stream" {
+			t.Fatalf("Content-Type = %q", got)
+		}
+		var err error
+		uploadedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upload body: %v", err)
+		}
+		w.Header().Set("x-encrypted-param", "download-param")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &fakeWechatClient{
+		uploadResp: &api.GetUploadUrlResp{UploadFullURL: server.URL},
+	}
+	uploaded, err := uploadImageToWeixinCDN(client, server.Client(), "", "user", llm.Image{Data: plain})
+	if err != nil {
+		t.Fatalf("uploadImageToWeixinCDN returned error: %v", err)
+	}
+
+	if client.uploadReq == nil {
+		t.Fatal("GetUploadUrl was not called")
+	}
+	if client.uploadReq.MediaType != api.UploadMediaTypeImage || client.uploadReq.ToUserID != "user" {
+		t.Fatalf("upload request = %#v", client.uploadReq)
+	}
+	if client.uploadReq.RawSize != len(plain) || client.uploadReq.FileSize != cdn.AESPaddedSize(len(plain)) {
+		t.Fatalf("upload sizes = raw %d file %d", client.uploadReq.RawSize, client.uploadReq.FileSize)
+	}
+	if len(uploadedBody) != cdn.AESPaddedSize(len(plain)) {
+		t.Fatalf("uploaded body len = %d, want %d", len(uploadedBody), cdn.AESPaddedSize(len(plain)))
+	}
+	if uploaded.Media.EncryptQueryParam != "download-param" || uploaded.Media.AESKey == "" || uploaded.Media.EncryptType != 1 {
+		t.Fatalf("uploaded media = %#v", uploaded.Media)
+	}
+	decodedMediaAESKey, err := base64.StdEncoding.DecodeString(uploaded.Media.AESKey)
+	if err != nil {
+		t.Fatalf("decode media aes_key: %v", err)
+	}
+	if got := string(decodedMediaAESKey); got != client.uploadReq.AESKey {
+		t.Fatalf("media aes_key decodes to %q, want upload aeskey hex %q", got, client.uploadReq.AESKey)
+	}
+	if len(decodedMediaAESKey) != 32 {
+		t.Fatalf("media aes_key decoded len = %d, want 32-byte hex string", len(decodedMediaAESKey))
+	}
+	if uploaded.MidSize != len(uploadedBody) {
+		t.Fatalf("mid size = %d, want %d", uploaded.MidSize, len(uploadedBody))
+	}
+}
+
+func TestUploadImageToWeixinCDNFallsBackToUploadParamCDNURL(t *testing.T) {
+	plain := []byte("image-bytes")
+	client := &fakeWechatClient{
+		uploadResp: &api.GetUploadUrlResp{UploadParam: "upload-param"},
+	}
+	var uploadedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/upload" {
+			t.Fatalf("path = %q, want /upload", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("encrypted_query_param"); got != "upload-param" {
+			t.Fatalf("encrypted_query_param = %q, want upload-param", got)
+		}
+		if client.uploadReq == nil {
+			t.Fatal("GetUploadUrl was not called before CDN upload")
+		}
+		if got := r.URL.Query().Get("filekey"); got == "" || got != client.uploadReq.FileKey {
+			t.Fatalf("filekey = %q, want generated filekey %q", got, client.uploadReq.FileKey)
+		}
+		var err error
+		uploadedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upload body: %v", err)
+		}
+		w.Header().Set("x-encrypted-param", "download-param")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	uploaded, err := uploadImageToWeixinCDN(client, server.Client(), server.URL, "user", llm.Image{Data: plain})
+	if err != nil {
+		t.Fatalf("uploadImageToWeixinCDN returned error: %v", err)
+	}
+
+	if len(uploadedBody) != cdn.AESPaddedSize(len(plain)) {
+		t.Fatalf("uploaded body len = %d, want %d", len(uploadedBody), cdn.AESPaddedSize(len(plain)))
+	}
+	if uploaded.Media.EncryptQueryParam != "download-param" || uploaded.MidSize != len(uploadedBody) {
+		t.Fatalf("uploaded = %#v", uploaded)
+	}
+}
+
 func TestProcessOneTypingKeepaliveRepeatsUntilLLMReturns(t *testing.T) {
 	b, client, _, llmClient := newTestBot()
 	b.typingTick = 5 * time.Millisecond
@@ -364,7 +566,7 @@ func TestProcessOneTypingErrorDoesNotBlockReply(t *testing.T) {
 
 func TestProcessOneLongReplyIsChunked(t *testing.T) {
 	b, client, _, llmClient := newTestBot()
-	llmClient.response = strings.Repeat("甲", textChunkLimit+50)
+	llmClient.response.Text = strings.Repeat("甲", textChunkLimit+50)
 
 	if err := b.processOne(textMessage("hi")); err != nil {
 		t.Fatalf("processOne returned error: %v", err)
@@ -373,8 +575,8 @@ func TestProcessOneLongReplyIsChunked(t *testing.T) {
 	if len(client.sent) != 2 {
 		t.Fatalf("sent messages = %d, want 2", len(client.sent))
 	}
-	if got := joinedSentText(t, client); got != llmClient.response {
-		t.Fatalf("joined sent text length = %d, want exact response length %d", len(got), len(llmClient.response))
+	if got := joinedSentText(t, client); got != llmClient.response.Text {
+		t.Fatalf("joined sent text length = %d, want exact response length %d", len(got), len(llmClient.response.Text))
 	}
 	for i, msg := range client.sent {
 		text := msg.ItemList[0].TextItem.Text
@@ -386,7 +588,7 @@ func TestProcessOneLongReplyIsChunked(t *testing.T) {
 
 func TestProcessOneReturnsErrorWhenReplyChunkSendFails(t *testing.T) {
 	b, client, sessions, llmClient := newTestBot()
-	llmClient.response = strings.Repeat("x", textChunkLimit+1)
+	llmClient.response.Text = strings.Repeat("x", textChunkLimit+1)
 	client.failSendAt = 2
 	client.sendErr = errors.New("send failed")
 
@@ -573,7 +775,7 @@ func TestProcessOneLLMError(t *testing.T) {
 
 func TestProcessOneUsesUserModelPreference(t *testing.T) {
 	b, client, sessions, defaultLLM := newTestBot()
-	preferredLLM := &fakeLLM{response: "from gpt4o"}
+	preferredLLM := &fakeLLM{response: llm.Response{Text: "from gpt4o"}}
 	sessions.modelByUser["user"] = "gpt4o"
 	b.newLLM = func(model config.ResolvedModel) llm.Client {
 		if model.Name != "gpt4o" {
@@ -668,6 +870,10 @@ func (b *blockingWechatClient) GetUpdatesContext(ctx context.Context, buf string
 }
 
 func (b *blockingWechatClient) SendMessage(msg *api.WeixinMessage) error { return nil }
+
+func (b *blockingWechatClient) GetUploadUrl(req *api.GetUploadUrlReq) (*api.GetUploadUrlResp, error) {
+	return &api.GetUploadUrlResp{}, nil
+}
 
 func (b *blockingWechatClient) GetConfig(ilinkUserID, contextToken string) (*api.GetConfigResp, error) {
 	return &api.GetConfigResp{}, nil
