@@ -18,6 +18,7 @@ type Attachment struct {
 	RefProvider string `json:"ref_provider,omitempty"`
 	RefType     string `json:"ref_type,omitempty"`
 	RefID       string `json:"ref_id,omitempty"`
+	LocalPath   string `json:"local_path,omitempty"`
 }
 
 // Message represents a single chat message stored in conversation history.

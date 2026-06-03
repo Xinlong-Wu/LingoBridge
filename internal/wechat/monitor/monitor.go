@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,13 @@ const (
 	typingKeepalive     = 5 * time.Second
 	defaultImagePrompt  = "请描述这张图片。"
 	maxVisionImageBytes = 20 * 1024 * 1024
+	aiErrorSummaryRunes = 300
+)
+
+var (
+	bearerTokenPattern = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]+`)
+	openAIKeyPattern   = regexp.MustCompile(`sk-[A-Za-z0-9_-]{8,}`)
+	hexTokenPattern    = regexp.MustCompile(`\b[0-9a-fA-F]{32,}\b`)
 )
 
 type cursorStore interface {
@@ -57,6 +65,7 @@ type conversationManager interface {
 
 type llmFactory func(config.ResolvedModel) llm.Client
 type imageDownloader func(item *api.ImageItem) ([]byte, string, error)
+type mediaSaver func(userID, sessionID, role string, index int, mimeType string, data []byte) (*store.MediaFile, error)
 
 type bot struct {
 	client        wechatClient
@@ -70,6 +79,7 @@ type bot struct {
 	cdnClient     *http.Client
 	uploadImage   imageUploader
 	downloadImage imageDownloader
+	saveMedia     mediaSaver
 }
 
 // Run starts the single-threaded monitor loop for an account.
@@ -271,7 +281,7 @@ func imageItems(msg *api.WeixinMessage) []*api.ImageItem {
 	return images
 }
 
-func (b *bot) imageInputAttachments(msg *api.WeixinMessage) ([]llm.InputAttachment, error) {
+func (b *bot) imageInputAttachments(userID, sessionID string, msg *api.WeixinMessage) ([]llm.InputAttachment, error) {
 	images := imageItems(msg)
 	if len(images) == 0 {
 		return nil, nil
@@ -301,13 +311,17 @@ func (b *bot) imageInputAttachments(msg *api.WeixinMessage) ([]llm.InputAttachme
 			return nil, fmt.Errorf("download image: unsupported MIME type %q", mimeType)
 		}
 
-		filename := imageFilename(mimeType, i)
+		mediaFile, err := b.saveMediaFile(userID, sessionID, "user", i, mimeType, data)
+		if err != nil {
+			return nil, fmt.Errorf("save image: %w", err)
+		}
 		attachments = append(attachments, llm.InputAttachment{
-			Type:     "image",
-			MIMEType: mimeType,
-			Filename: filename,
-			Size:     len(data),
-			Data:     data,
+			Type:      "image",
+			MIMEType:  mimeType,
+			Filename:  mediaFile.Filename,
+			Size:      len(data),
+			Data:      data,
+			LocalPath: mediaFile.RelativePath,
 		})
 	}
 	return attachments, nil
@@ -384,24 +398,6 @@ func detectImageMIME(data []byte) string {
 	return http.DetectContentType(data)
 }
 
-func imageFilename(mimeType string, index int) string {
-	ext := "bin"
-	switch mimeType {
-	case "image/jpeg":
-		ext = "jpg"
-	case "image/png":
-		ext = "png"
-	case "image/gif":
-		ext = "gif"
-	case "image/webp":
-		ext = "webp"
-	}
-	if index <= 0 {
-		return "wechat-image." + ext
-	}
-	return fmt.Sprintf("wechat-image-%d.%s", index+1, ext)
-}
-
 func (b *bot) replyWithLLM(fromUserID, contextToken, text string, msg *api.WeixinMessage) error {
 	sess, err := b.sessions.GetOrCreateCurrentSession(fromUserID)
 	if err != nil {
@@ -428,7 +424,7 @@ func (b *bot) replyWithLLM(fromUserID, contextToken, text string, msg *api.Weixi
 		if text == "" {
 			text = defaultImagePrompt
 		}
-		attachments, err := b.imageInputAttachments(msg)
+		attachments, err := b.imageInputAttachments(fromUserID, sess.ID, msg)
 		if err != nil {
 			log.Printf("[monitor] image download failed model=%s: %v", modelName, err)
 			b.sendText(fromUserID, imageInputErrorText(err), contextToken)
@@ -444,7 +440,7 @@ func (b *bot) replyWithLLM(fromUserID, contextToken, text string, msg *api.Weixi
 		userMsg, err = llmClient.PrepareUserMessage(text, nil)
 		if err != nil {
 			log.Printf("[monitor] prepare user message failed model=%s: %v", modelName, err)
-			b.sendText(fromUserID, "❌ AI 响应失败，请重试。", contextToken)
+			b.sendText(fromUserID, aiErrorNotice(err), contextToken)
 			return err
 		}
 	}
@@ -463,12 +459,19 @@ func (b *bot) replyWithLLM(fromUserID, contextToken, text string, msg *api.Weixi
 		if errors.Is(err, llm.ErrUnsupportedAttachment) {
 			b.sendText(fromUserID, imageInputErrorText(err), contextToken)
 		} else {
-			b.sendText(fromUserID, "❌ AI 响应失败，请重试。", contextToken)
+			b.sendText(fromUserID, aiErrorNotice(err), contextToken)
 		}
 		return err
 	}
 
-	assistantHistory := llmClient.AssistantMessage(llmResponse)
+	llmResponse = b.persistResponseImages(fromUserID, sess.ID, llmResponse)
+
+	assistantHistory, err := llmClient.AssistantMessage(llmResponse)
+	if err != nil {
+		log.Printf("[monitor] prepare assistant history failed model=%s: %v", modelName, err)
+		b.sendText(fromUserID, aiErrorNotice(err), contextToken)
+		return err
+	}
 	conv.Messages = append(conv.Messages,
 		userMsg,
 		assistantHistory,
@@ -488,13 +491,73 @@ func (b *bot) replyWithLLM(fromUserID, contextToken, text string, msg *api.Weixi
 	for i, image := range llmResponse.Images {
 		if err := b.sendImage(fromUserID, contextToken, image); err != nil {
 			log.Printf("[monitor] send image failed image=%d/%d: %v", i+1, len(llmResponse.Images), err)
-			b.sendText(fromUserID, "❌ AI 响应失败，请重试。", contextToken)
+			b.sendText(fromUserID, aiErrorNotice(err), contextToken)
 			return err
 		}
 	}
 
 	log.Printf("[monitor] reply to=%s model=%s len=%d images=%d", fromUserID, modelName, len(llmResponse.Text), len(llmResponse.Images))
 	return nil
+}
+
+func aiErrorNotice(err error) string {
+	summary := summarizeError(err, aiErrorSummaryRunes)
+	if summary == "" {
+		summary = "未知错误"
+	}
+	return "❌ AI 响应失败：" + summary
+}
+
+func summarizeError(err error, maxRunes int) string {
+	if err == nil {
+		return ""
+	}
+	summary := err.Error()
+	summary = bearerTokenPattern.ReplaceAllString(summary, "Bearer [REDACTED]")
+	summary = openAIKeyPattern.ReplaceAllString(summary, "sk-[REDACTED]")
+	summary = hexTokenPattern.ReplaceAllString(summary, "[REDACTED]")
+	summary = strings.Join(strings.Fields(summary), " ")
+	return truncateRunes(summary, maxRunes)
+}
+
+func truncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "..."
+}
+
+func (b *bot) persistResponseImages(userID, sessionID string, resp llm.Response) llm.Response {
+	for i := range resp.Images {
+		if len(resp.Images[i].Data) == 0 {
+			continue
+		}
+		mimeType := resp.Images[i].MIMEType
+		if mimeType == "" {
+			mimeType = "image/png"
+		}
+		resp.Images[i].MIMEType = mimeType
+		mediaFile, err := b.saveMediaFile(userID, sessionID, "assistant", i, mimeType, resp.Images[i].Data)
+		if err != nil {
+			log.Printf("[monitor] save response image failed image=%d: %v", i+1, err)
+			continue
+		}
+		resp.Images[i].Filename = mediaFile.Filename
+		resp.Images[i].LocalPath = mediaFile.RelativePath
+	}
+	return resp
+}
+
+func (b *bot) saveMediaFile(userID, sessionID, role string, index int, mimeType string, data []byte) (*store.MediaFile, error) {
+	saver := b.saveMedia
+	if saver == nil {
+		saver = store.SaveMediaFile
+	}
+	return saver(userID, sessionID, role, index, mimeType, data)
 }
 
 func (b *bot) llmForUser(userID string) (string, llm.Client, error) {

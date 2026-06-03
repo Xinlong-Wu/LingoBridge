@@ -20,7 +20,7 @@ func (c *anthropicClient) PrepareUserMessage(content string, attachments []Input
 	return prepareTextUserMessage(content, attachments)
 }
 
-func (c *anthropicClient) AssistantMessage(resp Response) store.Message {
+func (c *anthropicClient) AssistantMessage(resp Response) (store.Message, error) {
 	return defaultAssistantMessage(resp)
 }
 

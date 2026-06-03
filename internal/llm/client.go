@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	// "log"
 	"net/http"
 	"strings"
 
@@ -25,7 +25,7 @@ type Client interface {
 	// The callback receives incremental text chunks.
 	ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (Response, error)
 	// AssistantMessage converts a provider response into the stored history shape.
-	AssistantMessage(resp Response) store.Message
+	AssistantMessage(resp Response) (store.Message, error)
 }
 
 // Response is the common LLM response shape across providers.
@@ -36,11 +36,12 @@ type Response struct {
 
 // InputAttachment is non-text user input before provider-specific preparation.
 type InputAttachment struct {
-	Type     string
-	MIMEType string
-	Filename string
-	Size     int
-	Data     []byte
+	Type      string
+	MIMEType  string
+	Filename  string
+	Size      int
+	Data      []byte
+	LocalPath string
 }
 
 // AttachmentRef identifies provider-owned content that can be referenced later.
@@ -55,6 +56,7 @@ type Image struct {
 	Data      []byte
 	MIMEType  string
 	Filename  string
+	LocalPath string
 	Reference AttachmentRef
 }
 
@@ -87,8 +89,8 @@ func prepareTextUserMessage(content string, attachments []InputAttachment) (stor
 	return store.Message{Role: "user", Content: content}, nil
 }
 
-func defaultAssistantMessage(resp Response) store.Message {
-	return store.Message{Role: "assistant", Content: responseHistoryContent(resp)}
+func defaultAssistantMessage(resp Response) (store.Message, error) {
+	return store.Message{Role: "assistant", Content: responseHistoryContent(resp)}, nil
 }
 
 func responseHistoryContent(resp Response) string {
@@ -169,6 +171,8 @@ func sendJSON(client *http.Client, reqURL string, headers http.Header, reqBody a
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
+	// log.Printf("[llm] request body: %s", string(bodyBytes))
+
 	req, err := http.NewRequest("POST", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
@@ -240,11 +244,11 @@ func readSSEData(body io.Reader, handle func(data string) (done bool, err error)
 }
 
 func logSSERawData(line string) {
-	if len(line) <= maxSSERawLogLen {
-		log.Printf("[llm] SSE rawdata: %s", line)
-		return
-	}
-	log.Printf("[llm] SSE rawdata: %s... (truncated, len=%d)", line[:maxSSERawLogLen], len(line))
+	// if len(line) <= maxSSERawLogLen {
+	// 	log.Printf("[llm] SSE rawdata: %s", line)
+	// 	return
+	// }
+	// log.Printf("[llm] SSE rawdata: %s... (truncated, len=%d)", line[:maxSSERawLogLen], len(line))
 }
 
 func bearerHeaders(apiKey string) http.Header {

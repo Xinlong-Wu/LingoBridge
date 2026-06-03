@@ -15,7 +15,7 @@ func (c *openaiChatClient) PrepareUserMessage(content string, attachments []Inpu
 	return prepareTextUserMessage(content, attachments)
 }
 
-func (c *openaiChatClient) AssistantMessage(resp Response) store.Message {
+func (c *openaiChatClient) AssistantMessage(resp Response) (store.Message, error) {
 	return defaultAssistantMessage(resp)
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -41,29 +42,33 @@ func (c *openaiResponsesClient) PrepareUserMessage(content string, attachments [
 			RefProvider: c.refProvider(),
 			RefType:     openAIRefTypeFile,
 			RefID:       fileID,
+			LocalPath:   attachment.LocalPath,
 		})
 	}
 	return msg, nil
 }
 
-func (c *openaiResponsesClient) AssistantMessage(resp Response) store.Message {
+func (c *openaiResponsesClient) AssistantMessage(resp Response) (store.Message, error) {
 	msg := store.Message{Role: "assistant", Content: responseHistoryContentWithoutImageData(resp)}
 	for _, image := range resp.Images {
-		if !c.isRef(image.Reference, openAIRefTypeImageGenerationCall) {
-			continue
-		}
 		mimeType, filename := imageHistoryMetadata(image)
+		fileID, err := c.uploadVisionFile(filename, image.Data)
+		if err != nil {
+			log.Printf("[llm] generated image file upload failed filename=%s: %v", filename, err)
+			fileID = ""
+		}
 		msg.Attachments = append(msg.Attachments, store.Attachment{
 			Type:        "image",
 			MIMEType:    mimeType,
 			Filename:    filename,
 			Size:        len(image.Data),
-			RefProvider: image.Reference.Provider,
-			RefType:     image.Reference.Type,
-			RefID:       image.Reference.ID,
+			RefProvider: c.refProvider(),
+			RefType:     openAIRefTypeFile,
+			RefID:       fileID,
+			LocalPath:   image.LocalPath,
 		})
 	}
-	return msg
+	return msg, nil
 }
 
 type responsesRequest struct {
@@ -82,11 +87,6 @@ type responsesInputContent struct {
 	Type   string `json:"type"`
 	Text   string `json:"text,omitempty"`
 	FileID string `json:"file_id,omitempty"`
-}
-
-type responsesInputImageGenerationCall struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
 }
 
 type responsesOutput struct {
@@ -133,7 +133,7 @@ func (c *openaiResponsesClient) chatResponses(messages []store.Message, stream b
 		Model:  c.cfg.Model,
 		Input:  input,
 		Stream: stream,
-		Store:  true,
+		Store:  false,
 	}
 
 	if stream {
@@ -165,65 +165,56 @@ func (c *openaiResponsesClient) convertToResponsesInput(messages []store.Message
 		if m.Role == "system" {
 			continue
 		}
-		message, generationCalls, err := c.responsesInputItems(m)
+		message, err := c.responsesInputItems(m)
 		if err != nil {
 			return nil, err
 		}
 		if message != nil {
 			input = append(input, *message)
 		}
-		for _, call := range generationCalls {
-			input = append(input, call)
-		}
 	}
 	return input, nil
 }
 
-func (c *openaiResponsesClient) responsesInputItems(m store.Message) (*responsesInputMessage, []responsesInputImageGenerationCall, error) {
-	content, generationCalls, err := c.responsesMessageContent(m)
+func (c *openaiResponsesClient) responsesInputItems(m store.Message) (*responsesInputMessage, error) {
+	content, err := c.responsesMessageContent(m)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if content == nil {
-		return nil, generationCalls, nil
+		return nil, nil
 	}
-	return &responsesInputMessage{Role: m.Role, Content: content}, generationCalls, nil
+	return &responsesInputMessage{Role: m.Role, Content: content}, nil
 }
 
-func (c *openaiResponsesClient) responsesMessageContent(m store.Message) (any, []responsesInputImageGenerationCall, error) {
+func (c *openaiResponsesClient) responsesMessageContent(m store.Message) (any, error) {
 	if len(m.Attachments) == 0 {
-		return m.Content, nil, nil
+		return m.Content, nil
 	}
 
 	parts := make([]responsesInputContent, 0, len(m.Attachments)+1)
-	var generationCalls []responsesInputImageGenerationCall
 	if m.Content != "" {
 		parts = append(parts, responsesInputContent{Type: responsesTextPartType(m.Role), Text: m.Content})
 	}
 	for _, attachment := range m.Attachments {
 		if attachment.Type != "image" {
-			return nil, nil, fmt.Errorf("%w: unsupported attachment type %q", ErrUnsupportedAttachment, attachment.Type)
+			return nil, fmt.Errorf("%w: unsupported attachment type %q", ErrUnsupportedAttachment, attachment.Type)
 		}
-		if c.isStoreRef(attachment, openAIRefTypeFile) {
-			parts = append(parts, responsesInputContent{Type: "input_image", FileID: attachment.RefID})
+		if attachment.RefProvider == c.refProvider() && attachment.RefType == openAIRefTypeFile {
+			if attachment.RefID != "" {
+				parts = append(parts, responsesInputContent{Type: "input_image", FileID: attachment.RefID})
+			}
 			continue
 		}
-		if c.isStoreRef(attachment, openAIRefTypeImageGenerationCall) {
-			generationCalls = append(generationCalls, responsesInputImageGenerationCall{
-				Type: openAIRefTypeImageGenerationCall,
-				ID:   attachment.RefID,
-			})
+		if attachment.RefProvider == c.refProvider() && attachment.RefType == openAIRefTypeImageGenerationCall {
 			continue
 		}
-		return nil, nil, fmt.Errorf("%w: image attachment missing %s file or image_generation_call reference", ErrUnsupportedAttachment, c.refProvider())
-	}
-	if len(parts) == 0 && len(generationCalls) == 0 {
-		return nil, nil, fmt.Errorf("%w: message has attachments but no supported content", ErrUnsupportedAttachment)
+		return nil, fmt.Errorf("%w: image attachment missing %s file reference", ErrUnsupportedAttachment, c.refProvider())
 	}
 	if len(parts) == 0 {
-		return nil, generationCalls, nil
+		return nil, nil
 	}
-	return parts, generationCalls, nil
+	return parts, nil
 }
 
 func responsesTextPartType(role string) string {
