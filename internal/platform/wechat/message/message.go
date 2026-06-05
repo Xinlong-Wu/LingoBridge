@@ -7,8 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"wechatbox/internal/store"
-	"wechatbox/internal/wechat/api"
+	"wechatbox/internal/platform/wechat/api"
 )
 
 func generateClientID() string {
@@ -110,42 +109,6 @@ func isMediaItem(item *api.MessageItem) bool {
 	default:
 		return false
 	}
-}
-
-// ToLLMMessages converts a session conversation and a new user message into
-// the messages array format for the LLM API. It includes the system prompt
-// and truncates history to maxHistory messages.
-func ToLLMMessages(systemPrompt string, conv *store.Conversation, newMsg string, maxHistory int) []store.Message {
-	return ToLLMMessagesWithUserMessage(systemPrompt, conv, store.Message{Role: "user", Content: newMsg}, maxHistory)
-}
-
-// ToLLMMessagesWithUserMessage converts a session conversation and a new user
-// message into the messages array format for the LLM API. It includes the
-// system prompt and truncates history to maxHistory messages.
-func ToLLMMessagesWithUserMessage(systemPrompt string, conv *store.Conversation, newMsg store.Message, maxHistory int) []store.Message {
-	var msgs []store.Message
-
-	// Add system prompt
-	if systemPrompt != "" {
-		msgs = append(msgs, store.Message{Role: "system", Content: systemPrompt})
-	}
-
-	// Add conversation history (already includes previous turns)
-	history := conv.Messages
-	startIdx := 0
-	if maxHistory > 0 && len(history) > maxHistory {
-		startIdx = len(history) - maxHistory
-	}
-
-	msgs = append(msgs, history[startIdx:]...)
-
-	// Add the new user message
-	if newMsg.Role == "" {
-		newMsg.Role = "user"
-	}
-	msgs = append(msgs, newMsg)
-
-	return msgs
 }
 
 // BuildTextMessage creates a WeixinMessage for sending text.

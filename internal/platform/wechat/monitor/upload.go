@@ -13,8 +13,8 @@ import (
 	"strings"
 
 	"wechatbox/internal/llm"
-	"wechatbox/internal/wechat/api"
-	"wechatbox/internal/wechat/cdn"
+	"wechatbox/internal/platform/wechat/api"
+	"wechatbox/internal/platform/wechat/cdn"
 )
 
 const defaultWeixinCDNBaseURL = "https://novac2c.cdn.weixin.qq.com/c2c"

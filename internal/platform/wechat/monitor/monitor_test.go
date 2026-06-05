@@ -15,9 +15,9 @@ import (
 
 	"wechatbox/internal/config"
 	"wechatbox/internal/llm"
+	"wechatbox/internal/platform/wechat/api"
+	"wechatbox/internal/platform/wechat/cdn"
 	"wechatbox/internal/store"
-	"wechatbox/internal/wechat/api"
-	"wechatbox/internal/wechat/cdn"
 )
 
 type fakeWechatClient struct {

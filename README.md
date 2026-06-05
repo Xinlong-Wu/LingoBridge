@@ -1,6 +1,6 @@
 # WeChatBox
 
-WeChat Bot → LLM direct bridge. Connects WeChat bot accounts to OpenAI/Anthropic-compatible LLM APIs.
+WeChat/Feishu Bot → LLM direct bridge. Connects chat bot accounts to OpenAI/Anthropic-compatible LLM APIs.
 
 ## Quick Start
 
@@ -30,13 +30,24 @@ llm:
       id: "deepseek-chat"
 ```
 
-### 3. Add a WeChat bot account
+### 3. Add a bot account
 
 Scan the QR code with your WeChat app:
 
 ```bash
-./wechatbox account new --name mybot
+./wechatbox account new weixin --name mybot
 ```
+
+Or add a Feishu self-built app account:
+
+```bash
+./wechatbox account new feishu --name fsbot --app-id cli_xxx --app-secret your-app-secret
+```
+
+For Feishu, enable bot capability and long-connection event subscription for
+`im.message.receive_v1` in the Feishu Open Platform app console. The first
+version supports text messages in 1:1 chats and group messages that mention the
+bot.
 
 ### 4. Run
 
@@ -56,14 +67,15 @@ While `run` is active, `account new` and `account delete` notify it over a local
 
 | Command | Description |
 |---|---|
-| `account new [--name <name>]` | Add a WeChat bot account via QR login and reload a running bot process |
-| `account list` | List all accounts |
+| `account new weixin [--name <name>]` | Add a WeChat bot account via QR login and reload a running bot process |
+| `account new feishu --name <name> --app-id <id> --app-secret <secret> [--base-url <url>]` | Add a Feishu self-built app account and reload a running bot process |
+| `account list` | List all accounts with their platform |
 | `account delete <name>` | Delete an account and reload a running bot process |
 | `run [--account <name>]` | Start the bot loop |
 
 ## In-Chat Commands
 
-Send these as WeChat messages to the bot:
+Send these as WeChat or Feishu text messages to the bot:
 
 | Command | Description |
 |---|---|
@@ -77,7 +89,13 @@ Send these as WeChat messages to the bot:
 | `/clear` | Archive current session, start fresh |
 | `/model [name]` | Show or switch model profile |
 
+Platforms can narrow or extend the shared command set through their platform
+definition. The current WeChat and Feishu adapters both enable the default
+shared commands listed above.
+
 ## Message Handling
+
+### WeChat
 
 When a user replies to a quoted WeChat text message, WeChatBox includes the
 quoted context in the message sent to the LLM:
@@ -117,6 +135,20 @@ Image understanding currently requires an OpenAI-compatible model profile with
 Long text replies are automatically split into multiple WeChat messages before
 sending.
 
+### Feishu
+
+Feishu support uses a self-built app long connection. In 1:1 chats, all text
+messages are processed. In group chats, only messages that mention the bot are
+processed, and the mention token is removed before sending text to the LLM.
+
+Feishu conversation history is isolated per user in 1:1 chats and per
+`chat_id + user` in group chats, so multiple people in the same group do not
+share one session by accident.
+
+Feishu image, file, video, and voice messages are acknowledged with an
+unsupported-message notice in this first version. Generated images from the LLM
+are not sent back to Feishu yet.
+
 ## Configuration
 
 `~/.wechatbox/config.yaml`:
@@ -143,11 +175,30 @@ On startup, `run` validates the default model profile and resets any saved per-u
   config.yaml                          # User configuration
   wechatbox.sock                       # Local control socket used by a running process
   data/
-    wechatbox.db                       # SQLite: accounts, sessions, user preferences, sync cursors
+    wechatbox.db                       # SQLite: platform accounts, credentials, sessions, user preferences, sync cursors
     sessions/{userId}/{sessionId}.jsonl # Conversation history; image attachments may store provider refs
     media/{safeUserId}/{safeSessionId}/ # Local copies of user and generated images
 ```
 
+The `accounts` table stores a `platform` value (`wechat` or `feishu`) and a
+`credentials_json` payload for platform-specific credentials. Existing WeChat
+accounts migrate automatically with `platform='wechat'`.
+
+## Internal Architecture
+
+WeChatBox uses a three-layer adapter structure:
+
+```
+internal/platform/wechat/   # WeChat adapter: native events/API <-> core messages
+internal/platform/feishu/   # Feishu adapter: native events/API <-> core messages
+internal/platform/          # Platform registry: account creation, runtime factories, command policy
+internal/core/              # Shared command, session, history, LLM orchestration
+internal/llm/               # Provider adapters: core messages <-> provider APIs
+```
+
+In-chat slash commands live in `internal/commands/` and are shared by every
+platform adapter unless that platform's command policy disables them.
+
 ## Tech Stack
 
-Go 1.25.1, SQLite, YAML. Single binary, minimal dependencies.
+Go 1.25.1, SQLite, YAML, Feishu Open Platform Go SDK. Single binary, minimal dependencies.

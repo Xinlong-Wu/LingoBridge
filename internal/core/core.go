@@ -1,0 +1,324 @@
+package core
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"regexp"
+	"strings"
+	"sync"
+
+	"wechatbox/internal/commands"
+	"wechatbox/internal/config"
+	"wechatbox/internal/llm"
+	"wechatbox/internal/markdown"
+	"wechatbox/internal/store"
+)
+
+const (
+	DefaultTextChunkLimit = 4000
+	AIErrorSummaryRunes   = 300
+)
+
+var (
+	bearerTokenPattern = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]+`)
+	openAIKeyPattern   = regexp.MustCompile(`sk-[A-Za-z0-9_-]{8,}`)
+	hexTokenPattern    = regexp.MustCompile(`\b[0-9a-fA-F]{32,}\b`)
+)
+
+type Platform interface {
+	Run(ctx context.Context, handler Handler) error
+}
+
+type Handler interface {
+	Handle(ctx context.Context, msg InboundMessage, sender Sender) error
+}
+
+type Sender interface {
+	Send(ctx context.Context, msg OutboundMessage) error
+	StartTyping(ctx context.Context) func()
+}
+
+type InboundMessage struct {
+	Platform           string
+	AccountID          string
+	UserKey            string
+	CommandText        string
+	CommandPolicy      commands.Policy
+	LLMText            string
+	PrepareUserMessage PrepareUserMessageFunc
+	PrepareErrorNotice func(error) string
+	MutateResponse     ResponseMutator
+	ErrorNotice        func(error) string
+	Metadata           map[string]string
+}
+
+type OutboundMessage struct {
+	Text  string
+	Image llm.Image
+}
+
+type PrepareUserMessageFunc func(ctx context.Context, userID, sessionID string, client llm.Client) (store.Message, error)
+
+type ConversationManager interface {
+	commands.SessionManager
+	GetOrCreateCurrentSession(userID string) (*store.Session, error)
+	LoadHistory(userID, sessionID string) (*store.Conversation, error)
+	SaveHistory(userID, sessionID string, conv *store.Conversation) error
+}
+
+type LLMFactory func(config.ResolvedModel) llm.Client
+type ResponseMutator func(userID, sessionID string, resp llm.Response) llm.Response
+
+type Bot struct {
+	Sessions       ConversationManager
+	LLMConfig      config.LLMConfig
+	LLMClients     map[string]llm.Client
+	mu             sync.Mutex
+	NewLLM         LLMFactory
+	MutateResponse ResponseMutator
+	ErrorNotice    func(error) string
+	TextChunkLimit int
+}
+
+func New(sessions ConversationManager, cfg config.LLMConfig) *Bot {
+	return &Bot{
+		Sessions:       sessions,
+		LLMConfig:      cfg,
+		LLMClients:     map[string]llm.Client{},
+		NewLLM:         defaultLLMFactory,
+		TextChunkLimit: DefaultTextChunkLimit,
+	}
+}
+
+func defaultLLMFactory(model config.ResolvedModel) llm.Client {
+	return llm.NewClient(llm.Config{
+		Provider: model.Provider,
+		BaseURL:  model.BaseURL,
+		APIKey:   model.APIKey,
+		Model:    model.ID,
+		Endpoint: model.Endpoint,
+	})
+}
+
+func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) error {
+	if msg.UserKey == "" {
+		return nil
+	}
+	if resp, handled, err := commands.HandleWithPolicy(msg.CommandText, msg.UserKey, b.Sessions, msg.CommandPolicy); handled {
+		if err != nil {
+			log.Printf("[core] command error: %v", err)
+			_ = sender.Send(ctx, OutboundMessage{Text: fmt.Sprintf("❌ 错误：%v", err)})
+			return nil
+		}
+		return sender.Send(ctx, OutboundMessage{Text: resp})
+	}
+	if strings.TrimSpace(msg.LLMText) == "" && msg.PrepareUserMessage == nil {
+		return nil
+	}
+	return b.reply(ctx, msg, sender)
+}
+
+func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) error {
+	sess, err := b.Sessions.GetOrCreateCurrentSession(msg.UserKey)
+	if err != nil {
+		log.Printf("[core] get session: %v", err)
+		_ = sender.Send(ctx, OutboundMessage{Text: "❌ 会话加载失败，请重试。"})
+		return err
+	}
+
+	modelName, llmClient, err := b.llmForUser(msg.UserKey)
+	if err != nil {
+		log.Printf("[core] resolve LLM: %v", err)
+		_ = sender.Send(ctx, OutboundMessage{Text: "❌ 模型配置不可用，请检查配置。"})
+		return err
+	}
+
+	userMsg, err := b.prepareUserMessage(ctx, msg, sess.ID, llmClient)
+	if err != nil {
+		log.Printf("[core] prepare user message failed model=%s: %v", modelName, err)
+		_ = sender.Send(ctx, OutboundMessage{Text: b.prepareErrorNotice(msg, err)})
+		return err
+	}
+	if userMsg.Content == "" && len(userMsg.Attachments) == 0 {
+		return nil
+	}
+
+	conv, err := b.Sessions.LoadHistory(msg.UserKey, sess.ID)
+	if err != nil {
+		log.Printf("[core] load history: %v", err)
+		conv = &store.Conversation{}
+	}
+
+	msgs := ToLLMMessagesWithUserMessage(b.LLMConfig.SystemPrompt, conv, userMsg, b.LLMConfig.MaxHistory)
+
+	stopTyping := sender.StartTyping(ctx)
+	llmResponse, err := llmClient.ChatStream(b.LLMConfig.SystemPrompt, msgs, nil)
+	stopTyping()
+	if err != nil {
+		log.Printf("[core] LLM error model=%s: %v", modelName, err)
+		_ = sender.Send(ctx, OutboundMessage{Text: b.errorNotice(msg, err)})
+		return err
+	}
+	if msg.MutateResponse != nil {
+		llmResponse = msg.MutateResponse(msg.UserKey, sess.ID, llmResponse)
+	} else if b.MutateResponse != nil {
+		llmResponse = b.MutateResponse(msg.UserKey, sess.ID, llmResponse)
+	}
+
+	assistantHistory, err := llmClient.AssistantMessage(llmResponse)
+	if err != nil {
+		log.Printf("[core] prepare assistant history failed model=%s: %v", modelName, err)
+		_ = sender.Send(ctx, OutboundMessage{Text: b.errorNotice(msg, err)})
+		return err
+	}
+	conv.Messages = append(conv.Messages, userMsg, assistantHistory)
+
+	if err := b.Sessions.SaveHistory(msg.UserKey, sess.ID, conv); err != nil {
+		log.Printf("[core] save history: %v", err)
+	}
+
+	if llmResponse.Text != "" {
+		filtered := markdown.FilterText(llmResponse.Text)
+		for _, chunk := range SplitTextChunks(filtered, b.chunkLimit()) {
+			if err := sender.Send(ctx, OutboundMessage{Text: chunk}); err != nil {
+				return err
+			}
+		}
+	}
+
+	for i, image := range llmResponse.Images {
+		if err := sender.Send(ctx, OutboundMessage{Image: image}); err != nil {
+			log.Printf("[core] send image failed image=%d/%d: %v", i+1, len(llmResponse.Images), err)
+			_ = sender.Send(ctx, OutboundMessage{Text: b.errorNotice(msg, err)})
+			return err
+		}
+	}
+
+	log.Printf("[core] reply to=%s model=%s len=%d images=%d", msg.UserKey, modelName, len(llmResponse.Text), len(llmResponse.Images))
+	return nil
+}
+
+func (b *Bot) prepareUserMessage(ctx context.Context, msg InboundMessage, sessionID string, llmClient llm.Client) (store.Message, error) {
+	if msg.PrepareUserMessage != nil {
+		return msg.PrepareUserMessage(ctx, msg.UserKey, sessionID, llmClient)
+	}
+	return llmClient.PrepareUserMessage(msg.LLMText, nil)
+}
+
+func (b *Bot) llmForUser(userID string) (string, llm.Client, error) {
+	modelName, err := b.Sessions.CurrentModel(userID)
+	if err != nil {
+		return "", nil, err
+	}
+	model, err := b.LLMConfig.ResolveModel(modelName)
+	if err != nil {
+		model, err = b.LLMConfig.ResolveModel(b.LLMConfig.DefaultModel)
+		if err != nil {
+			return "", nil, err
+		}
+	}
+	newLLM := b.NewLLM
+	if newLLM == nil {
+		newLLM = defaultLLMFactory
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.LLMClients == nil {
+		b.LLMClients = map[string]llm.Client{}
+	}
+	client, ok := b.LLMClients[model.Name]
+	if !ok {
+		client = newLLM(model)
+		b.LLMClients[model.Name] = client
+	}
+	return model.Name, client, nil
+}
+
+func (b *Bot) chunkLimit() int {
+	if b.TextChunkLimit < 0 {
+		return -1
+	}
+	if b.TextChunkLimit <= 0 {
+		return DefaultTextChunkLimit
+	}
+	return b.TextChunkLimit
+}
+
+func (b *Bot) prepareErrorNotice(msg InboundMessage, err error) string {
+	if msg.PrepareErrorNotice != nil {
+		return msg.PrepareErrorNotice(err)
+	}
+	return b.errorNotice(msg, err)
+}
+
+func (b *Bot) errorNotice(msg InboundMessage, err error) string {
+	if msg.ErrorNotice != nil {
+		return msg.ErrorNotice(err)
+	}
+	if b.ErrorNotice != nil {
+		return b.ErrorNotice(err)
+	}
+	return AIErrorNotice(err)
+}
+
+func AIErrorNotice(err error) string {
+	summary := SummarizeError(err, AIErrorSummaryRunes)
+	if summary == "" {
+		summary = "未知错误"
+	}
+	return "❌ AI 响应失败：" + summary
+}
+
+func SummarizeError(err error, maxRunes int) string {
+	if err == nil {
+		return ""
+	}
+	summary := err.Error()
+	summary = bearerTokenPattern.ReplaceAllString(summary, "Bearer [REDACTED]")
+	summary = openAIKeyPattern.ReplaceAllString(summary, "sk-[REDACTED]")
+	summary = hexTokenPattern.ReplaceAllString(summary, "[REDACTED]")
+	summary = strings.Join(strings.Fields(summary), " ")
+	return TruncateRunes(summary, maxRunes)
+}
+
+func TruncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "..."
+}
+
+func SplitTextChunks(text string, limit int) []string {
+	if limit <= 0 {
+		return []string{text}
+	}
+	var chunks []string
+	for len(text) > 0 {
+		if len(text) <= limit {
+			chunks = append(chunks, text)
+			break
+		}
+
+		cut := limit
+		for cut > 0 && (text[cut]&0xC0) == 0x80 {
+			cut--
+		}
+		if cut == 0 {
+			cut = limit
+		}
+		chunks = append(chunks, text[:cut])
+		text = text[cut:]
+	}
+	if len(chunks) == 0 {
+		return []string{""}
+	}
+	return chunks
+}
+
+var ErrUnsupportedImage = errors.New("platform does not support sending images")

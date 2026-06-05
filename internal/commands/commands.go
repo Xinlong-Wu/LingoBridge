@@ -24,9 +24,70 @@ type SessionManager interface {
 	ListModels() []string
 }
 
+// Policy controls which shared slash commands are available for a platform.
+type Policy struct {
+	Disabled map[string]bool
+}
+
+type commandSpec struct {
+	Name string
+	Help string
+}
+
+var commandSpecs = []commandSpec{
+	{Name: "/help", Help: "/help - 查看命令帮助"},
+	{Name: "/current", Help: "/current - 查看当前会话和模型"},
+	{Name: "/new", Help: "/new [名称] - 创建新会话"},
+	{Name: "/list", Help: "/list - 查看会话列表"},
+	{Name: "/switch", Help: "/switch <名称> - 切换会话"},
+	{Name: "/rename", Help: "/rename <名称> - 重命名当前会话"},
+	{Name: "/archive", Help: "/archive [名称] - 归档会话"},
+	{Name: "/clear", Help: "/clear - 清空当前会话并开始新会话"},
+	{Name: "/model", Help: "/model [名称] - 查看或切换模型"},
+}
+
+func DefaultPolicy() Policy {
+	return Policy{}
+}
+
+func PolicyWithDisabled(commands ...string) Policy {
+	p := Policy{Disabled: map[string]bool{}}
+	for _, cmd := range commands {
+		cmd = normalizeCommand(cmd)
+		if cmd != "" {
+			p.Disabled[cmd] = true
+		}
+	}
+	return p
+}
+
+func (p Policy) Allows(cmd string) bool {
+	cmd = normalizeCommand(cmd)
+	if cmd == "" {
+		return false
+	}
+	return !p.Disabled[cmd]
+}
+
+func normalizeCommand(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+	if !strings.HasPrefix(cmd, "/") {
+		cmd = "/" + cmd
+	}
+	return cmd
+}
+
 // Handle processes a slash command and returns the response text.
 // Returns (response, handled, error).
 func Handle(text string, userID string, sm SessionManager) (string, bool, error) {
+	return HandleWithPolicy(text, userID, sm, DefaultPolicy())
+}
+
+// HandleWithPolicy processes a slash command with platform-specific command availability.
+func HandleWithPolicy(text string, userID string, sm SessionManager, policy Policy) (string, bool, error) {
 	text = strings.TrimSpace(text)
 
 	if !strings.HasPrefix(text, "/") {
@@ -41,9 +102,13 @@ func Handle(text string, userID string, sm SessionManager) (string, bool, error)
 	cmd := parts[0]
 	args := parts[1:]
 
+	if !policy.Allows(cmd) {
+		return fmt.Sprintf("此平台暂不支持 %s。", cmd), true, nil
+	}
+
 	switch cmd {
 	case "/help":
-		return handleHelp()
+		return handleHelp(policy)
 	case "/current":
 		return handleCurrent(userID, sm)
 	case "/new":
@@ -65,19 +130,14 @@ func Handle(text string, userID string, sm SessionManager) (string, bool, error)
 	}
 }
 
-func handleHelp() (string, bool, error) {
-	return strings.Join([]string{
-		"可用命令：",
-		"/help - 查看命令帮助",
-		"/current - 查看当前会话和模型",
-		"/new [名称] - 创建新会话",
-		"/list - 查看会话列表",
-		"/switch <名称> - 切换会话",
-		"/rename <名称> - 重命名当前会话",
-		"/archive [名称] - 归档会话",
-		"/clear - 清空当前会话并开始新会话",
-		"/model [名称] - 查看或切换模型",
-	}, "\n"), true, nil
+func handleHelp(policy Policy) (string, bool, error) {
+	lines := []string{"可用命令："}
+	for _, spec := range commandSpecs {
+		if policy.Allows(spec.Name) {
+			lines = append(lines, spec.Help)
+		}
+	}
+	return strings.Join(lines, "\n"), true, nil
 }
 
 func handleCurrent(userID string, sm SessionManager) (string, bool, error) {

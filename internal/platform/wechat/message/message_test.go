@@ -3,7 +3,7 @@ package message
 import (
 	"testing"
 
-	"wechatbox/internal/wechat/api"
+	"wechatbox/internal/platform/wechat/api"
 )
 
 func TestExtractLLMText(t *testing.T) {

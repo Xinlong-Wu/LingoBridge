@@ -154,5 +154,5 @@ func (s *Supervisor) startLocked(parent context.Context, acc store.Account) {
 }
 
 func accountSignature(acc store.Account) string {
-	return acc.ID + "\x00" + acc.Name + "\x00" + acc.Token + "\x00" + acc.BaseURL + "\x00" + acc.UserID
+	return acc.ID + "\x00" + acc.Name + "\x00" + acc.Platform + "\x00" + acc.Token + "\x00" + acc.BaseURL + "\x00" + acc.UserID + "\x00" + acc.CredentialsJSON
 }

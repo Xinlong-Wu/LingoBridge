@@ -131,6 +131,42 @@ func TestSupervisorRestartsChangedAccount(t *testing.T) {
 	}
 }
 
+func TestSupervisorRestartsChangedFeishuCredentials(t *testing.T) {
+	st := &fakeAccountStore{accounts: []store.Account{{
+		ID:              "feishu:cli_xxx",
+		Name:            "fsbot",
+		Platform:        store.PlatformFeishu,
+		BaseURL:         "https://open.feishu.cn",
+		CredentialsJSON: `{"app_id":"cli_xxx","app_secret":"old"}`,
+		Enabled:         true,
+	}}}
+	runner := newRecordingRunner()
+	supervisor := NewSupervisor(st, runner.run, "")
+	defer supervisor.Stop()
+
+	ctx := context.Background()
+	if err := supervisor.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	first := waitStart(t, runner.starts)
+
+	st.accounts = []store.Account{{
+		ID:              "feishu:cli_xxx",
+		Name:            "fsbot",
+		Platform:        store.PlatformFeishu,
+		BaseURL:         "https://open.feishu.cn",
+		CredentialsJSON: `{"app_id":"cli_xxx","app_secret":"new"}`,
+		Enabled:         true,
+	}}
+	if err := supervisor.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile after credentials change returned error: %v", err)
+	}
+	second := waitStart(t, runner.starts)
+	if first.CredentialsJSON == second.CredentialsJSON {
+		t.Fatalf("credentials did not change: %q", second.CredentialsJSON)
+	}
+}
+
 func TestSupervisorTargetAccountFilter(t *testing.T) {
 	st := &fakeAccountStore{accounts: []store.Account{
 		{ID: "a1", Name: "wanted", Token: "t", Enabled: true},

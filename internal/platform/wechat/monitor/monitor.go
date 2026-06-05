@@ -14,14 +14,13 @@ import (
 	"unicode"
 
 	"wechatbox/internal/config"
+	"wechatbox/internal/core"
 	"wechatbox/internal/llm"
+	"wechatbox/internal/platform/wechat/api"
+	"wechatbox/internal/platform/wechat/cdn"
+	"wechatbox/internal/platform/wechat/message"
 	"wechatbox/internal/session"
 	"wechatbox/internal/store"
-	"wechatbox/internal/wechat/api"
-	"wechatbox/internal/wechat/cdn"
-	"wechatbox/internal/wechat/commands"
-	"wechatbox/internal/wechat/markdown"
-	"wechatbox/internal/wechat/message"
 )
 
 const (
@@ -57,7 +56,7 @@ type wechatClient interface {
 }
 
 type conversationManager interface {
-	commands.SessionManager
+	core.ConversationManager
 	GetOrCreateCurrentSession(userID string) (*store.Session, error)
 	LoadHistory(userID, sessionID string) (*store.Conversation, error)
 	SaveHistory(userID, sessionID string, conv *store.Conversation) error
@@ -80,6 +79,7 @@ type bot struct {
 	uploadImage   imageUploader
 	downloadImage imageDownloader
 	saveMedia     mediaSaver
+	handler       core.Handler
 }
 
 // Run starts the single-threaded monitor loop for an account.
@@ -89,17 +89,41 @@ func Run(st *store.Store, sm *session.Manager, cfg config.LLMConfig, acc store.A
 
 // RunContext starts the monitor loop for an account until ctx is canceled.
 func RunContext(ctx context.Context, st *store.Store, sm *session.Manager, cfg config.LLMConfig, acc store.Account) error {
+	return NewPlatform(st, sm, cfg, acc).Run(ctx, core.New(sm, cfg))
+}
+
+type Platform struct {
+	store    *store.Store
+	sessions *session.Manager
+	cfg      config.LLMConfig
+	account  store.Account
+}
+
+var _ core.Platform = (*Platform)(nil)
+
+func NewPlatform(st *store.Store, sm *session.Manager, cfg config.LLMConfig, acc store.Account) *Platform {
+	return &Platform{
+		store:    st,
+		sessions: sm,
+		cfg:      cfg,
+		account:  acc,
+	}
+}
+
+func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
+	acc := p.account
 	client := api.NewClient(acc.BaseURL, acc.Token)
 	client.Debug = false
 
 	b := &bot{
 		client:     client,
-		cursors:    st,
-		sessions:   sm,
-		cfg:        cfg,
+		cursors:    p.store,
+		sessions:   p.sessions,
+		cfg:        p.cfg,
 		llmClients: map[string]llm.Client{},
 		newLLM:     defaultLLMFactory,
 		cdnBaseURL: defaultWeixinCDNBaseURL,
+		handler:    handler,
 	}
 	return b.runAccount(ctx, acc)
 }
@@ -208,14 +232,13 @@ func (b *bot) processOne(msg *api.WeixinMessage) error {
 	llmText := message.ExtractLLMText(msg)
 	log.Printf("[monitor] msg from=%s len=%d", fromUserID, len(llmText))
 
-	if resp, handled, err := commands.Handle(commandText, fromUserID, b.sessions); handled {
-		if err != nil {
-			log.Printf("[monitor] command error: %v", err)
-			b.sendText(fromUserID, fmt.Sprintf("❌ 错误：%v", err), contextToken)
-			return nil
-		}
-		b.sendText(fromUserID, resp, contextToken)
-		return nil
+	if strings.HasPrefix(strings.TrimSpace(commandText), "/") {
+		return b.coreHandler().Handle(context.Background(), core.InboundMessage{
+			Platform:    store.PlatformWeChat,
+			UserKey:     fromUserID,
+			CommandText: commandText,
+			LLMText:     llmText,
+		}, wechatSender{bot: b, toUserID: fromUserID, contextToken: contextToken})
 	}
 
 	var stop bool
@@ -399,105 +422,88 @@ func detectImageMIME(data []byte) string {
 }
 
 func (b *bot) replyWithLLM(fromUserID, contextToken, text string, msg *api.WeixinMessage) error {
-	sess, err := b.sessions.GetOrCreateCurrentSession(fromUserID)
-	if err != nil {
-		log.Printf("[monitor] get session: %v", err)
-		b.sendText(fromUserID, "❌ 会话加载失败，请重试。", contextToken)
-		return err
+	in := core.InboundMessage{
+		Platform:       store.PlatformWeChat,
+		UserKey:        fromUserID,
+		CommandText:    text,
+		LLMText:        text,
+		MutateResponse: b.persistResponseImages,
+		ErrorNotice: func(err error) string {
+			if errors.Is(err, llm.ErrUnsupportedAttachment) {
+				return imageInputErrorText(err)
+			}
+			return aiErrorNotice(err)
+		},
 	}
-
-	conv, err := b.sessions.LoadHistory(fromUserID, sess.ID)
-	if err != nil {
-		log.Printf("[monitor] load history: %v", err)
-		conv = &store.Conversation{}
-	}
-
-	modelName, llmClient, err := b.llmForUser(fromUserID)
-	if err != nil {
-		log.Printf("[monitor] resolve LLM: %v", err)
-		b.sendText(fromUserID, "❌ 模型配置不可用，请检查配置。", contextToken)
-		return err
-	}
-
-	userMsg := store.Message{Role: "user", Content: text}
 	if len(imageItems(msg)) > 0 {
-		if text == "" {
-			text = defaultImagePrompt
-		}
-		attachments, err := b.imageInputAttachments(fromUserID, sess.ID, msg)
-		if err != nil {
-			log.Printf("[monitor] image download failed model=%s: %v", modelName, err)
-			b.sendText(fromUserID, imageInputErrorText(err), contextToken)
-			return err
-		}
-		userMsg, err = llmClient.PrepareUserMessage(text, attachments)
-		if err != nil {
-			log.Printf("[monitor] image input failed model=%s: %v", modelName, err)
-			b.sendText(fromUserID, imageInputErrorText(err), contextToken)
-			return err
-		}
-	} else {
-		userMsg, err = llmClient.PrepareUserMessage(text, nil)
-		if err != nil {
-			log.Printf("[monitor] prepare user message failed model=%s: %v", modelName, err)
-			b.sendText(fromUserID, aiErrorNotice(err), contextToken)
-			return err
+		in.PrepareErrorNotice = imageInputErrorText
+		in.PrepareUserMessage = func(ctx context.Context, userID, sessionID string, client llm.Client) (store.Message, error) {
+			prompt := text
+			if prompt == "" {
+				prompt = defaultImagePrompt
+			}
+			attachments, err := b.imageInputAttachments(userID, sessionID, msg)
+			if err != nil {
+				return store.Message{}, err
+			}
+			return client.PrepareUserMessage(prompt, attachments)
 		}
 	}
-	if userMsg.Content == "" && len(userMsg.Attachments) == 0 {
-		return nil
+	return b.coreHandler().Handle(context.Background(), in, wechatSender{
+		bot:          b,
+		toUserID:     fromUserID,
+		contextToken: contextToken,
+	})
+}
+
+type wechatSender struct {
+	bot          *bot
+	toUserID     string
+	contextToken string
+}
+
+func (s wechatSender) Send(ctx context.Context, msg core.OutboundMessage) error {
+	if msg.Text != "" {
+		return s.bot.sendText(s.toUserID, msg.Text, s.contextToken)
 	}
-
-	msgs := message.ToLLMMessagesWithUserMessage(b.cfg.SystemPrompt, conv, userMsg, b.cfg.MaxHistory)
-
-	stopTyping := b.startTypingKeepalive(fromUserID, contextToken)
-	llmResponse, err := llmClient.ChatStream(b.cfg.SystemPrompt, msgs, nil)
-	stopTyping()
-
-	if err != nil {
-		log.Printf("[monitor] LLM error model=%s: %v", modelName, err)
-		if errors.Is(err, llm.ErrUnsupportedAttachment) {
-			b.sendText(fromUserID, imageInputErrorText(err), contextToken)
-		} else {
-			b.sendText(fromUserID, aiErrorNotice(err), contextToken)
-		}
-		return err
+	if len(msg.Image.Data) > 0 || msg.Image.Filename != "" || msg.Image.LocalPath != "" {
+		return s.bot.sendImage(s.toUserID, s.contextToken, msg.Image)
 	}
-
-	llmResponse = b.persistResponseImages(fromUserID, sess.ID, llmResponse)
-
-	assistantHistory, err := llmClient.AssistantMessage(llmResponse)
-	if err != nil {
-		log.Printf("[monitor] prepare assistant history failed model=%s: %v", modelName, err)
-		b.sendText(fromUserID, aiErrorNotice(err), contextToken)
-		return err
-	}
-	conv.Messages = append(conv.Messages,
-		userMsg,
-		assistantHistory,
-	)
-
-	if err := b.sessions.SaveHistory(fromUserID, sess.ID, conv); err != nil {
-		log.Printf("[monitor] save history: %v", err)
-	}
-
-	if llmResponse.Text != "" {
-		filtered := markdown.FilterText(llmResponse.Text)
-		if err := b.sendText(fromUserID, filtered, contextToken); err != nil {
-			return err
-		}
-	}
-
-	for i, image := range llmResponse.Images {
-		if err := b.sendImage(fromUserID, contextToken, image); err != nil {
-			log.Printf("[monitor] send image failed image=%d/%d: %v", i+1, len(llmResponse.Images), err)
-			b.sendText(fromUserID, aiErrorNotice(err), contextToken)
-			return err
-		}
-	}
-
-	log.Printf("[monitor] reply to=%s model=%s len=%d images=%d", fromUserID, modelName, len(llmResponse.Text), len(llmResponse.Images))
 	return nil
+}
+
+func (s wechatSender) StartTyping(ctx context.Context) func() {
+	return s.bot.startTypingKeepalive(s.toUserID, s.contextToken)
+}
+
+func (b *bot) coreHandler() core.Handler {
+	if b.handler != nil {
+		return b.handler
+	}
+	return b.coreBot()
+}
+
+func (b *bot) coreBot() *core.Bot {
+	if b.llmClients == nil {
+		b.llmClients = map[string]llm.Client{}
+	}
+	br := core.New(b.sessions, b.cfg)
+	br.LLMClients = b.llmClients
+	br.NewLLM = func(model config.ResolvedModel) llm.Client {
+		if b.newLLM != nil {
+			return b.newLLM(model)
+		}
+		return defaultLLMFactory(model)
+	}
+	br.TextChunkLimit = -1
+	br.MutateResponse = b.persistResponseImages
+	br.ErrorNotice = func(err error) string {
+		if errors.Is(err, llm.ErrUnsupportedAttachment) {
+			return imageInputErrorText(err)
+		}
+		return aiErrorNotice(err)
+	}
+	return br
 }
 
 func aiErrorNotice(err error) string {

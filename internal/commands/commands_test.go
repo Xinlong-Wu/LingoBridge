@@ -121,6 +121,36 @@ func TestHandleHelp(t *testing.T) {
 	}
 }
 
+func TestHandleWithPolicyDisabledCommand(t *testing.T) {
+	manager := &fakeSessionManager{}
+	resp, handled, err := HandleWithPolicy("/model", "user", manager, PolicyWithDisabled("/model"))
+	if err != nil {
+		t.Fatalf("HandleWithPolicy returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleWithPolicy did not handle disabled /model")
+	}
+	if !strings.Contains(resp, "暂不支持 /model") {
+		t.Fatalf("response = %q, want unsupported command message", resp)
+	}
+}
+
+func TestHandleHelpUsesPolicy(t *testing.T) {
+	resp, handled, err := HandleWithPolicy("/help", "user", &fakeSessionManager{}, PolicyWithDisabled("/model"))
+	if err != nil {
+		t.Fatalf("HandleWithPolicy returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleWithPolicy did not handle /help")
+	}
+	if strings.Contains(resp, "/model") {
+		t.Fatalf("response = %q, want /model hidden", resp)
+	}
+	if !strings.Contains(resp, "/current") {
+		t.Fatalf("response = %q, want other shared commands visible", resp)
+	}
+}
+
 func TestHandleSwitchMissingSession(t *testing.T) {
 	manager := &fakeSessionManager{
 		switchErr: fmt.Errorf("%w: missing", store.ErrSessionNotFound),

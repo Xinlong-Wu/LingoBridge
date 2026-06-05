@@ -17,11 +17,11 @@ import (
 
 	"wechatbox/internal/config"
 	"wechatbox/internal/control"
+	"wechatbox/internal/core"
+	"wechatbox/internal/platform"
 	"wechatbox/internal/runner"
 	"wechatbox/internal/session"
 	"wechatbox/internal/store"
-	"wechatbox/internal/wechat/login"
-	"wechatbox/internal/wechat/monitor"
 )
 
 var errUsage = errors.New("usage")
@@ -115,17 +115,21 @@ func cmdAccount(args []string) error {
 }
 
 func printUsage() {
-	fmt.Println("WeChatBox - WeChat Bot → LLM Direct Bridge")
+	fmt.Println("WeChatBox - WeChat/Feishu Bot → LLM Direct Bridge")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  wechatbox account new [--name <name>]   Add a WeChat bot account via QR login")
+	fmt.Println("  wechatbox account new <weixin|feishu> [platform options]")
+	fmt.Println("                                           Add a bot account")
 	fmt.Println("  wechatbox account list                   List all accounts")
 	fmt.Println("  wechatbox account delete <name>          Delete an account")
 	fmt.Println("  wechatbox run [--account <name>]         Start the bot loop")
 }
 
 func printAccountUsage() {
-	fmt.Println("Usage: wechatbox account <new|list|delete> [--name <name>]")
+	fmt.Println("Usage:")
+	fmt.Println("  wechatbox account new <weixin|feishu> [platform options]")
+	fmt.Println("  wechatbox account list")
+	fmt.Println("  wechatbox account delete <name>")
 }
 
 func newFlagSet(name string) *flag.FlagSet {
@@ -143,14 +147,26 @@ func openStore() (*store.Store, error) {
 }
 
 func cmdAccountNew(args []string) error {
-	fs := newFlagSet("account new")
-	accountName := fs.String("name", "default", "account name")
-	if err := fs.Parse(args); err != nil {
-		fmt.Println("Usage: wechatbox account new [--name <name>]")
+	registry, err := platform.NewDefaultRegistry()
+	if err != nil {
+		return err
+	}
+	return cmdAccountNewWithRegistry(args, registry)
+}
+
+func cmdAccountNewWithRegistry(args []string, registry *platform.Registry) error {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Println("Usage: wechatbox account new <weixin|feishu> [platform options]")
 		return errUsage
 	}
-	if *accountName == "" {
-		*accountName = "default"
+	def, ok := registry.Lookup(args[0])
+	if !ok {
+		return fmt.Errorf("unsupported platform %q; use one of: %s", args[0], strings.Join(registry.PlatformNames(), ", "))
+	}
+	opts, err := def.ParseAccountNewFlags(args[1:])
+	if err != nil {
+		fmt.Println("Usage:", def.AccountNewUsage)
+		return errUsage
 	}
 
 	st, err := openStore()
@@ -172,18 +188,18 @@ func cmdAccountNew(args []string) error {
 		return false
 	}
 
-	originalName := *accountName
+	originalName := opts.Name
 	suffix := 2
-	for exists(*accountName) {
-		*accountName = fmt.Sprintf("%s-%d", originalName, suffix)
+	for exists(opts.Name) {
+		opts.Name = fmt.Sprintf("%s-%d", originalName, suffix)
 		suffix++
 	}
-	if *accountName != originalName {
-		fmt.Printf("Name %q already exists, using %q instead.\n", originalName, *accountName)
+	if opts.Name != originalName {
+		fmt.Printf("Name %q already exists, using %q instead.\n", originalName, opts.Name)
 	}
 
-	if err := login.Login(st, *accountName); err != nil {
-		return fmt.Errorf("login failed: %w", err)
+	if err := def.CreateAccount(platform.AccountNewContext{Store: st}, opts); err != nil {
+		return err
 	}
 	notifyRunningProcess()
 	return nil
@@ -222,6 +238,11 @@ func cmdRun(args []string) error {
 	}
 
 	sm := session.NewManager(st, cfg.LLM)
+	coreHandler := core.New(sm, cfg.LLM)
+	registry, err := platform.NewDefaultRegistry()
+	if err != nil {
+		return err
+	}
 
 	log.Printf("LLM default_model: %s", cfg.LLM.DefaultModel)
 	log.Printf("LLM models: %s", strings.Join(cfg.LLM.ModelNames(), ", "))
@@ -232,7 +253,20 @@ func cmdRun(args []string) error {
 	defer stopSignals()
 
 	supervisor := runner.NewSupervisor(st, func(ctx context.Context, acc store.Account) error {
-		return monitor.RunContext(ctx, st, sm, cfg.LLM, acc)
+		def, ok := registry.LookupAccountPlatform(acc.Platform)
+		if !ok {
+			return fmt.Errorf("unsupported account platform %q for account %s", acc.Platform, acc.Name)
+		}
+		runtimePlatform, err := def.RuntimePlatform(platform.RuntimeContext{
+			Store:     st,
+			Sessions:  sm,
+			LLMConfig: cfg.LLM,
+			Account:   acc,
+		})
+		if err != nil {
+			return err
+		}
+		return runtimePlatform.Run(ctx, coreHandler)
 	}, *targetAccount)
 
 	controlServer, err := control.StartServer(runCtx, func(context.Context) error {
@@ -287,7 +321,11 @@ func cmdAccountList(args []string) error {
 		if !a.Enabled {
 			status = "✗"
 		}
-		fmt.Printf("  %s %s (id: %s)\n", status, a.Name, a.ID)
+		platform := a.Platform
+		if platform == "" {
+			platform = store.PlatformWeChat
+		}
+		fmt.Printf("  %s %s [%s] (id: %s)\n", status, a.Name, platform, a.ID)
 	}
 	return nil
 }

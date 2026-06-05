@@ -10,8 +10,8 @@ import (
 
 	"github.com/skip2/go-qrcode"
 
+	"wechatbox/internal/platform/wechat/api"
 	"wechatbox/internal/store"
-	"wechatbox/internal/wechat/api"
 )
 
 const (
@@ -143,12 +143,14 @@ func Login(st *store.Store, accountName string) error {
 			}
 
 			acc := store.Account{
-				ID:      statusResp.ILinkBotID,
-				Name:    accountName,
-				Token:   statusResp.BotToken,
-				BaseURL: baseURL,
-				UserID:  statusResp.ILinkUserID,
-				Enabled: true,
+				ID:              statusResp.ILinkBotID,
+				Name:            accountName,
+				Platform:        store.PlatformWeChat,
+				Token:           statusResp.BotToken,
+				BaseURL:         baseURL,
+				UserID:          statusResp.ILinkUserID,
+				CredentialsJSON: "{}",
+				Enabled:         true,
 			}
 
 			if err := st.SaveAccount(acc); err != nil {

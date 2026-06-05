@@ -156,6 +156,98 @@ func TestResetUnavailableUserModels(t *testing.T) {
 	}
 }
 
+func TestSaveAccountDefaultsToWeChat(t *testing.T) {
+	st := openTestStore(t)
+
+	if err := st.SaveAccount(Account{ID: "a1", Name: "bot", Token: "token", BaseURL: "https://wechat.test", Enabled: true}); err != nil {
+		t.Fatalf("SaveAccount returned error: %v", err)
+	}
+	got, err := st.GetAccount("a1")
+	if err != nil {
+		t.Fatalf("GetAccount returned error: %v", err)
+	}
+	if got.Platform != PlatformWeChat {
+		t.Fatalf("platform = %q, want %q", got.Platform, PlatformWeChat)
+	}
+	if got.CredentialsJSON != "{}" {
+		t.Fatalf("credentials_json = %q, want {}", got.CredentialsJSON)
+	}
+}
+
+func TestSaveFeishuAccountCredentials(t *testing.T) {
+	st := openTestStore(t)
+
+	account := Account{
+		ID:              "feishu:cli_xxx",
+		Name:            "fsbot",
+		Platform:        PlatformFeishu,
+		BaseURL:         "https://open.feishu.cn",
+		UserID:          "cli_xxx",
+		CredentialsJSON: `{"app_id":"cli_xxx","app_secret":"secret"}`,
+		Enabled:         true,
+	}
+	if err := st.SaveAccount(account); err != nil {
+		t.Fatalf("SaveAccount returned error: %v", err)
+	}
+	got, err := st.GetAccount(account.ID)
+	if err != nil {
+		t.Fatalf("GetAccount returned error: %v", err)
+	}
+	if got.Platform != PlatformFeishu || got.CredentialsJSON != account.CredentialsJSON || got.UserID != account.UserID {
+		t.Fatalf("account = %#v, want feishu credentials preserved", got)
+	}
+}
+
+func TestMigrateLegacyAccountsDefaultToWeChat(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dataDir, err := config.EnsureDataDir()
+	if err != nil {
+		t.Fatalf("EnsureDataDir returned error: %v", err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dataDir, "wechatbox.db"))
+	if err != nil {
+		t.Fatalf("sql.Open returned error: %v", err)
+	}
+	_, err = db.Exec(`CREATE TABLE accounts (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		token TEXT NOT NULL,
+		base_url TEXT NOT NULL DEFAULT 'https://ilinkai.weixin.qq.com',
+		user_id TEXT NOT NULL DEFAULT '',
+		enabled INTEGER NOT NULL DEFAULT 1
+	)`)
+	if err != nil {
+		t.Fatalf("create old accounts returned error: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO accounts (id, name, token, base_url, user_id, enabled) VALUES ('a1', 'bot', 'token', 'base', 'user', 1)`); err != nil {
+		t.Fatalf("insert old account returned error: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("db.Close returned error: %v", err)
+	}
+
+	st, err := Open()
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
+
+	got, err := st.GetAccount("a1")
+	if err != nil {
+		t.Fatalf("GetAccount returned error: %v", err)
+	}
+	if got.Platform != PlatformWeChat {
+		t.Fatalf("platform = %q, want %q", got.Platform, PlatformWeChat)
+	}
+	if got.CredentialsJSON != "{}" {
+		t.Fatalf("credentials_json = %q, want {}", got.CredentialsJSON)
+	}
+}
+
 func TestMigrateActiveSessionToUserPreference(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dataDir, err := config.EnsureDataDir()

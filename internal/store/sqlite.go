@@ -27,14 +27,32 @@ type Store struct {
 	mu sync.Mutex // serializes writes across goroutines
 }
 
-// Account represents a WeChat bot account saved during login.
+const (
+	// PlatformWeChat identifies accounts backed by the WeChat bot API.
+	PlatformWeChat = "wechat"
+	// PlatformFeishu identifies accounts backed by the Feishu Open Platform.
+	PlatformFeishu = "feishu"
+)
+
+// Account represents a bot account saved during login or configuration.
 type Account struct {
-	ID      string
-	Name    string
-	Token   string
-	BaseURL string
-	UserID  string
-	Enabled bool
+	ID              string
+	Name            string
+	Platform        string
+	Token           string
+	BaseURL         string
+	UserID          string
+	CredentialsJSON string
+	Enabled         bool
+}
+
+func (a *Account) applyDefaults() {
+	if a.Platform == "" {
+		a.Platform = PlatformWeChat
+	}
+	if a.CredentialsJSON == "" {
+		a.CredentialsJSON = "{}"
+	}
 }
 
 // Session represents a named conversation session for a user.
@@ -91,9 +109,11 @@ func (s *Store) migrate() error {
 		`CREATE TABLE IF NOT EXISTS accounts (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
+			platform TEXT NOT NULL DEFAULT 'wechat',
 			token TEXT NOT NULL,
 			base_url TEXT NOT NULL DEFAULT 'https://ilinkai.weixin.qq.com',
 			user_id TEXT NOT NULL DEFAULT '',
+			credentials_json TEXT NOT NULL DEFAULT '{}',
 			enabled INTEGER NOT NULL DEFAULT 1
 		)`,
 		`CREATE TABLE IF NOT EXISTS sync_cursors (
@@ -121,6 +141,9 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
+	if err := s.migrateAccounts(); err != nil {
+		return err
+	}
 	if err := s.migrateSessions(); err != nil {
 		return err
 	}
@@ -131,6 +154,24 @@ func (s *Store) migrate() error {
 	for _, q := range indexes {
 		if _, err := s.db.Exec(q); err != nil {
 			return fmt.Errorf("migrate indexes: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) migrateAccounts() error {
+	columns, err := tableColumns(s.db, "accounts")
+	if err != nil {
+		return err
+	}
+	if !columns["platform"] {
+		if _, err := s.db.Exec(`ALTER TABLE accounts ADD COLUMN platform TEXT NOT NULL DEFAULT 'wechat'`); err != nil {
+			return fmt.Errorf("add accounts platform column: %w", err)
+		}
+	}
+	if !columns["credentials_json"] {
+		if _, err := s.db.Exec(`ALTER TABLE accounts ADD COLUMN credentials_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
+			return fmt.Errorf("add accounts credentials_json column: %w", err)
 		}
 	}
 	return nil
@@ -242,15 +283,21 @@ func (s *Store) Close() error {
 
 // SaveAccount inserts or updates a bot account.
 func (s *Store) SaveAccount(a Account) error {
+	if a.Platform == "" {
+		a.Platform = PlatformWeChat
+	}
+	if a.CredentialsJSON == "" {
+		a.CredentialsJSON = "{}"
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(
-		`INSERT INTO accounts (id, name, token, base_url, user_id, enabled)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO accounts (id, name, platform, token, base_url, user_id, credentials_json, enabled)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
-		   name=excluded.name, token=excluded.token, base_url=excluded.base_url,
-		   user_id=excluded.user_id, enabled=excluded.enabled`,
-		a.ID, a.Name, a.Token, a.BaseURL, a.UserID, boolToInt(a.Enabled),
+		   name=excluded.name, platform=excluded.platform, token=excluded.token, base_url=excluded.base_url,
+		   user_id=excluded.user_id, credentials_json=excluded.credentials_json, enabled=excluded.enabled`,
+		a.ID, a.Name, a.Platform, a.Token, a.BaseURL, a.UserID, a.CredentialsJSON, boolToInt(a.Enabled),
 	)
 	return err
 }
@@ -259,17 +306,18 @@ func (s *Store) SaveAccount(a Account) error {
 func (s *Store) GetAccount(id string) (Account, error) {
 	var a Account
 	err := s.db.QueryRow(
-		`SELECT id, name, token, base_url, user_id, enabled FROM accounts WHERE id=?`, id,
-	).Scan(&a.ID, &a.Name, &a.Token, &a.BaseURL, &a.UserID, &a.Enabled)
+		`SELECT id, name, platform, token, base_url, user_id, credentials_json, enabled FROM accounts WHERE id=?`, id,
+	).Scan(&a.ID, &a.Name, &a.Platform, &a.Token, &a.BaseURL, &a.UserID, &a.CredentialsJSON, &a.Enabled)
 	if err != nil {
 		return a, err
 	}
+	a.applyDefaults()
 	return a, nil
 }
 
 // ListAccounts returns all accounts.
 func (s *Store) ListAccounts() ([]Account, error) {
-	rows, err := s.db.Query(`SELECT id, name, token, base_url, user_id, enabled FROM accounts`)
+	rows, err := s.db.Query(`SELECT id, name, platform, token, base_url, user_id, credentials_json, enabled FROM accounts`)
 	if err != nil {
 		return nil, err
 	}
@@ -278,9 +326,10 @@ func (s *Store) ListAccounts() ([]Account, error) {
 	var accounts []Account
 	for rows.Next() {
 		var a Account
-		if err := rows.Scan(&a.ID, &a.Name, &a.Token, &a.BaseURL, &a.UserID, &a.Enabled); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Platform, &a.Token, &a.BaseURL, &a.UserID, &a.CredentialsJSON, &a.Enabled); err != nil {
 			return nil, err
 		}
+		a.applyDefaults()
 		accounts = append(accounts, a)
 	}
 	return accounts, rows.Err()
