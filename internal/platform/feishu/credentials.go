@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"lingobridge/internal/core"
 	"lingobridge/internal/store"
 )
@@ -19,6 +21,7 @@ type Credentials struct {
 // Config holds Feishu platform-private configuration.
 type Config struct {
 	Accounts map[string]AccountConfig `yaml:"accounts"`
+	Events   []EventConfig            `yaml:"events,omitempty"`
 }
 
 // AccountConfig holds one Feishu self-built app account config.
@@ -26,6 +29,42 @@ type AccountConfig struct {
 	AppID     string `yaml:"app_id"`
 	AppSecret string `yaml:"app_secret"`
 	BaseURL   string `yaml:"base_url"`
+}
+
+// EventConfig holds one configured Feishu event shell hook.
+type EventConfig struct {
+	Name string   `yaml:"name"`
+	Run  ShellRun `yaml:"run"`
+}
+
+// ShellRun is one shell script or a sequence of shell scripts.
+type ShellRun []string
+
+func (r *ShellRun) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		if strings.TrimSpace(value.Value) == "" {
+			*r = nil
+			return nil
+		}
+		*r = ShellRun{value.Value}
+		return nil
+	case yaml.SequenceNode:
+		var commands []string
+		for _, item := range value.Content {
+			var command string
+			if err := item.Decode(&command); err != nil {
+				return fmt.Errorf("decode run command: %w", err)
+			}
+			if strings.TrimSpace(command) != "" {
+				commands = append(commands, command)
+			}
+		}
+		*r = ShellRun(commands)
+		return nil
+	default:
+		return fmt.Errorf("run must be a string or a list of strings")
+	}
 }
 
 func NewAccount(name, appID, appSecret, baseURL string) (store.Account, error) {
@@ -131,6 +170,11 @@ func (c *Config) ApplyDefaults() {
 	for name, account := range c.Accounts {
 		c.Accounts[name] = normalizeAccountConfig(account)
 	}
+	for i, event := range c.Events {
+		event.Name = strings.TrimSpace(event.Name)
+		event.Run = normalizeShellRun(event.Run)
+		c.Events[i] = event
+	}
 }
 
 func normalizeAccountConfig(account AccountConfig) AccountConfig {
@@ -141,4 +185,14 @@ func normalizeAccountConfig(account AccountConfig) AccountConfig {
 		account.BaseURL = DefaultBaseURL
 	}
 	return account
+}
+
+func normalizeShellRun(run ShellRun) ShellRun {
+	normalized := ShellRun{}
+	for _, command := range run {
+		if strings.TrimSpace(command) != "" {
+			normalized = append(normalized, command)
+		}
+	}
+	return normalized
 }

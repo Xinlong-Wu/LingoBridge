@@ -46,3 +46,13 @@ platforms:
         app_secret: "your-app-secret"
         # Optional. Defaults to https://open.feishu.cn.
         base_url: "https://open.feishu.cn"
+
+    # Optional event shell hooks for Feishu events other than
+    # im.message.receive_v1, which is always handled by LingoBridge.
+    # Each command runs with event details in LINGOBRIDGE_* env vars.
+    # Non-empty stdout from each command is sent back to the event chat.
+    events:
+      - name: "p2p_chat_create"
+        run:
+          - "printf '你好，我是 LingoBridge。直接发送问题即可开始对话。'"
+          - "printf '%s' \"$LINGOBRIDGE_COMMAND_HELP\""

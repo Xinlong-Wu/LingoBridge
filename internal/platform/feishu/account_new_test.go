@@ -8,6 +8,8 @@ import (
 	"lingobridge/internal/config"
 	"lingobridge/internal/core"
 	"lingobridge/internal/store"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestParseAccountNewFlagsPromptsForMissingCredentials(t *testing.T) {
@@ -101,5 +103,44 @@ func TestUpsertAndResolveAccountConfig(t *testing.T) {
 	}
 	if account.AppID != "cli_xxx" || account.AppSecret != "secret" || account.BaseURL != DefaultBaseURL {
 		t.Fatalf("account = %#v", account)
+	}
+}
+
+func TestLoadConfigParsesEventRuns(t *testing.T) {
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(`accounts:
+  fsbot:
+    app_id: cli_xxx
+    app_secret: secret
+events:
+  - name: p2p_chat_create
+    run: echo hello
+  - name: p2p_chat_create
+    run:
+      - echo first
+      - echo second
+`), &node); err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Platforms = map[string]yaml.Node{}
+	cfg.Platforms[store.PlatformFeishu] = *node.Content[0]
+	platformCtx, err := core.NewPlatformContext(store.PlatformFeishu, &cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+
+	feishuConfig, err := LoadConfig(platformCtx)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if len(feishuConfig.Events) != 2 {
+		t.Fatalf("events = %#v, want two events", feishuConfig.Events)
+	}
+	if got := []string(feishuConfig.Events[0].Run); len(got) != 1 || got[0] != "echo hello" {
+		t.Fatalf("first run = %#v, want scalar command", got)
+	}
+	if got := []string(feishuConfig.Events[1].Run); len(got) != 2 || got[0] != "echo first" || got[1] != "echo second" {
+		t.Fatalf("second run = %#v, want sequence commands", got)
 	}
 }

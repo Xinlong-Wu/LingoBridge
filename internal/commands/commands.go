@@ -80,6 +80,17 @@ func normalizeCommand(cmd string) string {
 	return cmd
 }
 
+// HelpText returns the available in-chat commands for a platform policy.
+func HelpText(policy Policy) string {
+	lines := []string{"可用命令："}
+	for _, spec := range commandSpecs {
+		if policy.Allows(spec.Name) {
+			lines = append(lines, spec.Help)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // Handle processes a slash command and returns the response text.
 // Returns (response, handled, error).
 func Handle(text string, userID string, sm SessionManager) (string, bool, error) {
@@ -131,13 +142,7 @@ func HandleWithPolicy(text string, userID string, sm SessionManager, policy Poli
 }
 
 func handleHelp(policy Policy) (string, bool, error) {
-	lines := []string{"可用命令："}
-	for _, spec := range commandSpecs {
-		if policy.Allows(spec.Name) {
-			lines = append(lines, spec.Help)
-		}
-	}
-	return strings.Join(lines, "\n"), true, nil
+	return HelpText(policy), true, nil
 }
 
 func handleCurrent(userID string, sm SessionManager) (string, bool, error) {

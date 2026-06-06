@@ -121,6 +121,15 @@ func TestHandleHelp(t *testing.T) {
 	}
 }
 
+func TestHelpTextIncludesDefaultCommands(t *testing.T) {
+	resp := HelpText(DefaultPolicy())
+	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/clear", "/model"} {
+		if !strings.Contains(resp, want) {
+			t.Fatalf("response = %q, want %s", resp, want)
+		}
+	}
+}
+
 func TestHandleWithPolicyDisabledCommand(t *testing.T) {
 	manager := &fakeSessionManager{}
 	resp, handled, err := HandleWithPolicy("/model", "user", manager, PolicyWithDisabled("/model"))
@@ -132,6 +141,16 @@ func TestHandleWithPolicyDisabledCommand(t *testing.T) {
 	}
 	if !strings.Contains(resp, "暂不支持 /model") {
 		t.Fatalf("response = %q, want unsupported command message", resp)
+	}
+}
+
+func TestHelpTextUsesPolicy(t *testing.T) {
+	resp := HelpText(PolicyWithDisabled("/model"))
+	if strings.Contains(resp, "/model") {
+		t.Fatalf("response = %q, want /model hidden", resp)
+	}
+	if !strings.Contains(resp, "/current") {
+		t.Fatalf("response = %q, want other shared commands visible", resp)
 	}
 }
 

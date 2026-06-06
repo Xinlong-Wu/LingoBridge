@@ -258,14 +258,11 @@ func feishuDefinition() Definition {
 			return nil
 		},
 		NewRuntimePlatform: func(ctx RuntimeContext) (core.Platform, error) {
-			accountConfig, ok, err := feishu.ResolveAccountConfig(ctx.Platform, ctx.Account.Name)
+			feishuConfig, err := feishu.LoadConfig(ctx.Platform)
 			if err != nil {
 				return nil, err
 			}
-			if !ok {
-				return nil, fmt.Errorf("platforms.feishu.accounts.%s is required", ctx.Account.Name)
-			}
-			return feishumonitor.NewPlatform(ctx.Account, accountConfig), nil
+			return feishumonitor.NewPlatform(ctx.Account, feishuConfig), nil
 		},
 		CommandPolicy: commands.DefaultPolicy(),
 	}

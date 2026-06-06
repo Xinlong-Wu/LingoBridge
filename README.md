@@ -70,9 +70,10 @@ shared `~/.lingobridge/config.yaml`. The Feishu platform defines the schema
 inside its own `platforms.feishu` config block.
 
 For Feishu, enable bot capability and long-connection event subscription for
-`im.message.receive_v1` in the Feishu Open Platform app console. The first
-version supports text messages in 1:1 chats and group messages that mention the
-bot.
+`im.message.receive_v1` in the Feishu Open Platform app console. Add any
+extra event subscriptions, such as `p2p_chat_create`, only when they are listed
+under `platforms.feishu.events`. The first version supports text messages in
+1:1 chats and group messages that mention the bot.
 
 ### 4. Run
 
@@ -169,6 +170,27 @@ sending.
 Feishu support uses a self-built app long connection. In 1:1 chats, all text
 messages are processed. In group chats, only messages that mention the bot are
 processed, and the mention token is removed before sending text to the LLM.
+Extra Feishu events are registered from `platforms.feishu.events`. Each event
+item has `name` and `run`; `run` may be one shell command string or a list of
+shell command strings. Non-empty stdout from each command is sent back to the
+event chat as a Feishu text message.
+Event commands receive environment variables including
+`LINGOBRIDGE_EVENT_NAME`, `LINGOBRIDGE_EVENT_JSON`,
+`LINGOBRIDGE_COMMAND_HELP`, and Feishu-specific fields such as
+`LINGOBRIDGE_FEISHU_CHAT_ID`.
+
+For example, a configured `p2p_chat_create` hook can send a first-chat greeting
+followed by the in-chat command help:
+
+```yaml
+platforms:
+  feishu:
+    events:
+      - name: p2p_chat_create
+        run:
+          - "printf '你好，我是 LingoBridge。直接发送问题即可开始对话。'"
+          - "printf '%s' \"$LINGOBRIDGE_COMMAND_HELP\""
+```
 
 Feishu conversation history is isolated per user in 1:1 chats and per
 `chat_id + user` in group chats, so multiple people in the same group do not
@@ -196,6 +218,8 @@ are not sent back to Feishu yet.
 | `platforms.feishu.accounts.<name>.app_id` | — | Feishu app ID for account `<name>` |
 | `platforms.feishu.accounts.<name>.app_secret` | — | Feishu app secret for account `<name>` |
 | `platforms.feishu.accounts.<name>.base_url` | `https://open.feishu.cn` | Feishu Open Platform base URL |
+| `platforms.feishu.events[].name` | — | Extra Feishu event to register; currently supports `p2p_chat_create` |
+| `platforms.feishu.events[].run` | — | Shell command string or list of shell command strings to run for the event |
 Each model profile is independent. `provider`, `base_url`, `api_key`, and `id` are required; `endpoint` is optional and defaults to `chat`.
 For Anthropic model profiles, an omitted `endpoint` defaults to `messages`.
 Top-level `llm.model`, `llm.provider`, `llm.base_url`, `llm.api_key`, and `llm.endpoint` are no longer supported.
