@@ -129,7 +129,7 @@ func newRESTClient(creds feishu.Credentials, baseURL string, level larkcore.LogL
 
 func feishuSDKLogLevel(level logging.Level) larkcore.LogLevel {
 	switch level {
-	case logging.Debug:
+	case logging.All:
 		return larkcore.LogLevelDebug
 	case logging.Warn:
 		return larkcore.LogLevelWarn

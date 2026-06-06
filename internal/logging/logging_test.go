@@ -31,6 +31,13 @@ func TestLevelFiltering(t *testing.T) {
 	buf := captureLogs(t)
 	log := For("test")
 
+	SetLevel(All)
+	log.Debug(context.Background(), "visible debug")
+	if got := buf.String(); !strings.Contains(got, "[DEBUG] - [test] visible debug") {
+		t.Fatalf("all filtering output = %q", got)
+	}
+
+	buf.Reset()
 	SetLevel(Info)
 	log.Debug(context.Background(), "hidden")
 	log.Info(context.Background(), "visible")
@@ -52,6 +59,7 @@ func TestParseLevel(t *testing.T) {
 		in   string
 		want Level
 	}{
+		{in: "all", want: All},
 		{in: "debug", want: Debug},
 		{in: "INFO", want: Info},
 		{in: "warn", want: Warn},
@@ -68,6 +76,12 @@ func TestParseLevel(t *testing.T) {
 
 	if _, err := ParseLevel("noisy"); err == nil {
 		t.Fatal("ParseLevel returned nil error for invalid level")
+	}
+}
+
+func TestLevelStringAll(t *testing.T) {
+	if got := All.String(); got != "all" {
+		t.Fatalf("All.String() = %q, want all", got)
 	}
 }
 

@@ -15,7 +15,8 @@ var shared = log.Default()
 type Level int32
 
 const (
-	Debug Level = iota + 1
+	All Level = iota
+	Debug
 	Info
 	Warn
 	Error
@@ -44,6 +45,8 @@ func init() {
 // ParseLevel parses a user-facing log level.
 func ParseLevel(level string) (Level, error) {
 	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "all":
+		return All, nil
 	case "debug":
 		return Debug, nil
 	case "info", "":
@@ -59,7 +62,7 @@ func ParseLevel(level string) (Level, error) {
 
 // SetLevel sets the process-wide log threshold.
 func SetLevel(level Level) {
-	if level < Debug || level > Error {
+	if level < All || level > Error {
 		level = Info
 	}
 	currentLevel.Store(int32(level))
@@ -68,7 +71,7 @@ func SetLevel(level Level) {
 // GetLevel returns the process-wide log threshold.
 func GetLevel() Level {
 	level := Level(currentLevel.Load())
-	if level < Debug || level > Error {
+	if level < All || level > Error {
 		return Info
 	}
 	return level
@@ -76,6 +79,8 @@ func GetLevel() Level {
 
 func (l Level) String() string {
 	switch l {
+	case All:
+		return "all"
 	case Debug:
 		return "debug"
 	case Info:

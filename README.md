@@ -84,8 +84,8 @@ supports text messages in 1:1 chats and group messages that mention the bot.
 
 Listens to all enabled accounts concurrently. If no enabled accounts exist yet,
 it stays running and waits for a later account reload. Use `--account` to run a
-specific one, and `--verbose` to set the log level (`debug`, `info`, `warn`, or
-`error`; default `info`):
+specific one, and `--verbose` to set the log level (`all`, `debug`, `info`,
+`warn`, or `error`; default `info`). Use `all` to include Feishu SDK debug logs:
 
 If all active account monitors exit because of a non-cancellation error, such as
 invalid account or platform config, `run` exits and prints the monitor error.
@@ -112,7 +112,7 @@ when relevant config changes.
 | `account list` | List all accounts with their platform |
 | `account delete <name>` | Delete an account from its platform data domain and reload a running bot process |
 | `model add <name> [--provider <openai\|anthropic>] [--base-url <url>] [--api-key <key>] [--id <model-id>] [--endpoint <mode>] [--default]` | Add an LLM model profile to config and optionally make it the default |
-| `run [--account <name>] [--verbose <debug\|info\|warn\|error>]` | Start the bot loop with optional log level, default `info` |
+| `run [--account <name>] [--verbose <all\|debug\|info\|warn\|error>]` | Start the bot loop with optional log level, default `info` |
 
 ## In-Chat Commands
 

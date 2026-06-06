@@ -177,7 +177,7 @@ func printUsage() {
 	fmt.Println("  lingobridge account delete <name>          Delete an account")
 	fmt.Println("  lingobridge model add <name> [model options]")
 	fmt.Println("                                           Add an LLM model profile")
-	fmt.Println("  lingobridge run [--account <name>] [--verbose <debug|info|warn|error>]")
+	fmt.Println("  lingobridge run [--account <name>] [--verbose <all|debug|info|warn|error>]")
 	fmt.Println("                                           Start the bot loop")
 }
 
@@ -565,7 +565,7 @@ type runOptions struct {
 func parseRunOptions(args []string) (runOptions, error) {
 	fs := newFlagSet("run")
 	targetAccount := fs.String("account", "", "account name")
-	verbose := fs.String("verbose", logging.Info.String(), "log level: debug, info, warn, error")
+	verbose := fs.String("verbose", logging.Info.String(), "log level: all, debug, info, warn, error")
 	if err := fs.Parse(args); err != nil {
 		return runOptions{}, errUsage
 	}
@@ -579,7 +579,7 @@ func parseRunOptions(args []string) (runOptions, error) {
 func cmdRun(args []string) error {
 	opts, err := parseRunOptions(args)
 	if err != nil {
-		fmt.Println("Usage: lingobridge run [--account <name>] [--verbose <debug|info|warn|error>]")
+		fmt.Println("Usage: lingobridge run [--account <name>] [--verbose <all|debug|info|warn|error>]")
 		return err
 	}
 	logging.SetLevel(opts.logLevel)

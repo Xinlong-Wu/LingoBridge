@@ -531,7 +531,8 @@ func TestFeishuSDKLogLevel(t *testing.T) {
 		level logging.Level
 		want  larkcore.LogLevel
 	}{
-		{level: logging.Debug, want: larkcore.LogLevelDebug},
+		{level: logging.All, want: larkcore.LogLevelDebug},
+		{level: logging.Debug, want: larkcore.LogLevelInfo},
 		{level: logging.Info, want: larkcore.LogLevelInfo},
 		{level: logging.Warn, want: larkcore.LogLevelWarn},
 		{level: logging.Error, want: larkcore.LogLevelError},

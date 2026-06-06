@@ -164,6 +164,16 @@ func TestParseRunOptionsAcceptsVerboseDebug(t *testing.T) {
 	}
 }
 
+func TestParseRunOptionsAcceptsVerboseAll(t *testing.T) {
+	opts, err := parseRunOptions([]string{"--verbose", "all"})
+	if err != nil {
+		t.Fatalf("parseRunOptions returned error: %v", err)
+	}
+	if opts.logLevel != logging.All {
+		t.Fatalf("logLevel = %v, want all", opts.logLevel)
+	}
+}
+
 func TestParseRunOptionsRejectsInvalidVerbose(t *testing.T) {
 	if _, err := parseRunOptions([]string{"--verbose", "noisy"}); err == nil {
 		t.Fatal("parseRunOptions returned nil error, want invalid verbose error")
