@@ -73,7 +73,7 @@ func (c *Client) buildHeaders() http.Header {
 func getBaseInfo() *BaseInfo {
 	return &BaseInfo{
 		ChannelVersion: "1.0.0",
-		BotAgent:       "WeChatBox/1.0.0",
+		BotAgent:       "LingoBridge/1.0.0",
 	}
 }
 

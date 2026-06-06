@@ -12,9 +12,9 @@ import (
 	"net/url"
 	"strings"
 
-	"wechatbox/internal/llm"
-	"wechatbox/internal/platform/wechat/api"
-	"wechatbox/internal/platform/wechat/cdn"
+	"lingobridge/internal/llm"
+	"lingobridge/internal/platform/wechat/api"
+	"lingobridge/internal/platform/wechat/cdn"
 )
 
 const defaultWeixinCDNBaseURL = "https://novac2c.cdn.weixin.qq.com/c2c"

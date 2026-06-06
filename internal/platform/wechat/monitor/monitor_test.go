@@ -13,11 +13,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"wechatbox/internal/config"
-	"wechatbox/internal/llm"
-	"wechatbox/internal/platform/wechat/api"
-	"wechatbox/internal/platform/wechat/cdn"
-	"wechatbox/internal/store"
+	"lingobridge/internal/config"
+	"lingobridge/internal/llm"
+	"lingobridge/internal/platform/wechat/api"
+	"lingobridge/internal/platform/wechat/cdn"
+	"lingobridge/internal/store"
 )
 
 type fakeWechatClient struct {

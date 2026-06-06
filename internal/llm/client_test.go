@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"wechatbox/internal/store"
+	"lingobridge/internal/store"
 )
 
 func TestParseSSE(t *testing.T) {

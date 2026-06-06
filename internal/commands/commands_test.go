@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"wechatbox/internal/session"
-	"wechatbox/internal/store"
+	"lingobridge/internal/session"
+	"lingobridge/internal/store"
 )
 
 type fakeSessionManager struct {

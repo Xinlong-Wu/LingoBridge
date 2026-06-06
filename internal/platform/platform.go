@@ -5,23 +5,29 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 
-	"wechatbox/internal/commands"
-	"wechatbox/internal/config"
-	"wechatbox/internal/core"
-	"wechatbox/internal/platform/feishu"
-	feishumonitor "wechatbox/internal/platform/feishu/monitor"
-	"wechatbox/internal/platform/wechat/login"
-	wechatmonitor "wechatbox/internal/platform/wechat/monitor"
-	"wechatbox/internal/session"
-	"wechatbox/internal/store"
+	"lingobridge/internal/commands"
+	"lingobridge/internal/config"
+	"lingobridge/internal/core"
+	"lingobridge/internal/platform/feishu"
+	feishumonitor "lingobridge/internal/platform/feishu/monitor"
+	"lingobridge/internal/platform/wechat/login"
+	wechatmonitor "lingobridge/internal/platform/wechat/monitor"
+	"lingobridge/internal/session"
+	"lingobridge/internal/store"
 )
 
 type AccountNewOptions struct {
 	Name   string
 	Values any
+}
+
+type AccountNewIO struct {
+	In  io.Reader
+	Out io.Writer
 }
 
 type AccountNewContext struct {
@@ -39,10 +45,14 @@ type Definition struct {
 	ID                   string
 	Aliases              []string
 	AccountNewUsage      string
-	ParseAccountNewFlags func(args []string) (AccountNewOptions, error)
+	ParseAccountNewFlags func(args []string, io AccountNewIO) (AccountNewOptions, error)
 	CreateAccount        func(ctx AccountNewContext, opts AccountNewOptions) error
 	NewRuntimePlatform   func(ctx RuntimeContext) (core.Platform, error)
 	CommandPolicy        commands.Policy
+}
+
+func DefaultAccountNewIO() AccountNewIO {
+	return AccountNewIO{In: os.Stdin, Out: os.Stdout}
 }
 
 type Registry struct {
@@ -171,12 +181,22 @@ func normalizeAccountName(name string) string {
 	return name
 }
 
+func normalizeAccountNewIO(io AccountNewIO) AccountNewIO {
+	if io.In == nil {
+		io.In = os.Stdin
+	}
+	if io.Out == nil {
+		io.Out = os.Stdout
+	}
+	return io
+}
+
 func wechatDefinition() Definition {
 	return Definition{
 		ID:              store.PlatformWeChat,
 		Aliases:         []string{"weixin", "微信"},
-		AccountNewUsage: "wechatbox account new weixin [--name <name>]",
-		ParseAccountNewFlags: func(args []string) (AccountNewOptions, error) {
+		AccountNewUsage: "lingobridge account new weixin [--name <name>]",
+		ParseAccountNewFlags: func(args []string, io AccountNewIO) (AccountNewOptions, error) {
 			fs := newAccountFlagSet("account new weixin")
 			name := fs.String("name", "default", "account name")
 			if err := fs.Parse(args); err != nil {
@@ -200,40 +220,24 @@ func wechatDefinition() Definition {
 	}
 }
 
-type feishuAccountNewOptions struct {
-	AppID     string
-	AppSecret string
-	BaseURL   string
-}
-
 func feishuDefinition() Definition {
 	return Definition{
 		ID:              store.PlatformFeishu,
 		Aliases:         []string{"飞书"},
-		AccountNewUsage: "wechatbox account new feishu --name <name> --app-id <id> --app-secret <secret> [--base-url <url>]",
-		ParseAccountNewFlags: func(args []string) (AccountNewOptions, error) {
-			fs := newAccountFlagSet("account new feishu")
-			name := fs.String("name", "default", "account name")
-			appID := fs.String("app-id", "", "Feishu app ID")
-			appSecret := fs.String("app-secret", "", "Feishu app secret")
-			baseURL := fs.String("base-url", "", "platform API base URL")
-			if err := fs.Parse(args); err != nil {
+		AccountNewUsage: "lingobridge account new feishu [--name <name>] [--app-id <id>] [--app-secret <secret>] [--base-url <url>]",
+		ParseAccountNewFlags: func(args []string, io AccountNewIO) (AccountNewOptions, error) {
+			accountIO := normalizeAccountNewIO(io)
+			values, err := feishu.ParseAccountNewFlags(args, accountIO.In, accountIO.Out)
+			if err != nil {
 				return AccountNewOptions{}, err
 			}
-			if fs.NArg() > 0 {
-				return AccountNewOptions{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
-			}
 			return AccountNewOptions{
-				Name: normalizeAccountName(*name),
-				Values: feishuAccountNewOptions{
-					AppID:     *appID,
-					AppSecret: *appSecret,
-					BaseURL:   *baseURL,
-				},
+				Name:   normalizeAccountName(values.Name),
+				Values: values,
 			}, nil
 		},
 		CreateAccount: func(ctx AccountNewContext, opts AccountNewOptions) error {
-			values, ok := opts.Values.(feishuAccountNewOptions)
+			values, ok := opts.Values.(feishu.AccountNewOptions)
 			if !ok {
 				return fmt.Errorf("invalid feishu account options")
 			}

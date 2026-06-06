@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"wechatbox/internal/config"
+	"lingobridge/internal/config"
 )
 
 func TestSaveMediaFileSeparatesUserAndSession(t *testing.T) {

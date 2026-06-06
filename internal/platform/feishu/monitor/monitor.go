@@ -13,11 +13,11 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
-	"wechatbox/internal/config"
-	"wechatbox/internal/core"
-	"wechatbox/internal/platform/feishu"
-	"wechatbox/internal/session"
-	"wechatbox/internal/store"
+	"lingobridge/internal/config"
+	"lingobridge/internal/core"
+	"lingobridge/internal/platform/feishu"
+	"lingobridge/internal/session"
+	"lingobridge/internal/store"
 )
 
 const unsupportedMessageText = "暂不支持此类飞书消息，请发送文字。"

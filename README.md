@@ -1,4 +1,4 @@
-# WeChatBox
+# LingoBridge
 
 WeChat/Feishu Bot → LLM direct bridge. Connects chat bot accounts to OpenAI/Anthropic-compatible LLM APIs.
 
@@ -7,14 +7,14 @@ WeChat/Feishu Bot → LLM direct bridge. Connects chat bot accounts to OpenAI/An
 ### 1. Build
 
 ```bash
-go build -o wechatbox ./cmd/wechatbox/
+go build -o lingobridge ./cmd/lingobridge/
 ```
 
 ### 2. Configure
 
 ```bash
-cp config.yaml.example ~/.wechatbox/config.yaml
-# Edit ~/.wechatbox/config.yaml with your LLM API key and settings
+cp config.yaml.example ~/.lingobridge/config.yaml
+# Edit ~/.lingobridge/config.yaml with your LLM API key and settings
 ```
 
 Minimal config:
@@ -35,13 +35,19 @@ llm:
 Scan the QR code with your WeChat app:
 
 ```bash
-./wechatbox account new weixin --name mybot
+./lingobridge account new weixin --name mybot
 ```
 
 Or add a Feishu self-built app account:
 
 ```bash
-./wechatbox account new feishu --name fsbot --app-id cli_xxx --app-secret your-app-secret
+./lingobridge account new feishu --name fsbot --app-id cli_xxx --app-secret your-app-secret
+```
+
+If Feishu credentials are omitted, LingoBridge prompts for them interactively:
+
+```bash
+./lingobridge account new feishu --name fsbot
 ```
 
 For Feishu, enable bot capability and long-connection event subscription for
@@ -52,13 +58,13 @@ bot.
 ### 4. Run
 
 ```bash
-./wechatbox run
+./lingobridge run
 ```
 
 Listens to all enabled accounts concurrently. If no enabled accounts exist yet, it stays running and waits for a later account reload. Use `--account` to run a specific one:
 
 ```bash
-./wechatbox run --account mybot
+./lingobridge run --account mybot
 ```
 
 While `run` is active, `account new` and `account delete` notify it over a local Unix socket so account changes are applied without restarting the bot loop.
@@ -68,7 +74,7 @@ While `run` is active, `account new` and `account delete` notify it over a local
 | Command | Description |
 |---|---|
 | `account new weixin [--name <name>]` | Add a WeChat bot account via QR login and reload a running bot process |
-| `account new feishu --name <name> --app-id <id> --app-secret <secret> [--base-url <url>]` | Add a Feishu self-built app account and reload a running bot process |
+| `account new feishu [--name <name>] [--app-id <id>] [--app-secret <secret>] [--base-url <url>]` | Add a Feishu self-built app account and prompt for missing credentials |
 | `account list` | List all accounts with their platform |
 | `account delete <name>` | Delete an account and reload a running bot process |
 | `run [--account <name>]` | Start the bot loop |
@@ -97,7 +103,7 @@ shared commands listed above.
 
 ### WeChat
 
-When a user replies to a quoted WeChat text message, WeChatBox includes the
+When a user replies to a quoted WeChat text message, LingoBridge includes the
 quoted context in the message sent to the LLM:
 
 ```text
@@ -108,7 +114,7 @@ current message
 Quoted media is not downloaded or interpreted; only the current text is sent.
 
 Current image messages are downloaded from WeChat media/CDN and passed to the
-selected model through WeChatBox's provider-neutral attachment interface. With
+selected model through LingoBridge's provider-neutral attachment interface. With
 OpenAI Responses model profiles, images are first saved under
 `data/media/{user}/{session}/`, then uploaded to the OpenAI Files API with
 `purpose=vision` and sent as `input_image` parts. The JSONL history stores both
@@ -129,7 +135,7 @@ context. Non-Responses model profiles keep the legacy text history format for
 generated images.
 
 Image understanding currently requires an OpenAI-compatible model profile with
-`endpoint: "responses"`. If a user sends only an image, WeChatBox uses
+`endpoint: "responses"`. If a user sends only an image, LingoBridge uses
 `请描述这张图片。` as the user prompt.
 
 Long text replies are automatically split into multiple WeChat messages before
@@ -151,7 +157,7 @@ are not sent back to Feishu yet.
 
 ## Configuration
 
-`~/.wechatbox/config.yaml`:
+`~/.lingobridge/config.yaml`:
 
 | Field | Default | Description |
 |---|---|---|
@@ -171,11 +177,11 @@ On startup, `run` validates the default model profile and resets any saved per-u
 ## Storage
 
 ```
-~/.wechatbox/
+~/.lingobridge/
   config.yaml                          # User configuration
-  wechatbox.sock                       # Local control socket used by a running process
+  lingobridge.sock                       # Local control socket used by a running process
   data/
-    wechatbox.db                       # SQLite: platform accounts, credentials, sessions, user preferences, sync cursors
+    lingobridge.db                       # SQLite: platform accounts, credentials, sessions, user preferences, sync cursors
     sessions/{userId}/{sessionId}.jsonl # Conversation history; image attachments may store provider refs
     media/{safeUserId}/{safeSessionId}/ # Local copies of user and generated images
 ```
@@ -186,7 +192,7 @@ accounts migrate automatically with `platform='wechat'`.
 
 ## Internal Architecture
 
-WeChatBox uses a three-layer adapter structure:
+LingoBridge uses a three-layer adapter structure:
 
 ```
 internal/platform/wechat/   # WeChat adapter: native events/API <-> core messages

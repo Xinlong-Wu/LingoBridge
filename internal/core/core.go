@@ -9,11 +9,11 @@ import (
 	"strings"
 	"sync"
 
-	"wechatbox/internal/commands"
-	"wechatbox/internal/config"
-	"wechatbox/internal/llm"
-	"wechatbox/internal/markdown"
-	"wechatbox/internal/store"
+	"lingobridge/internal/commands"
+	"lingobridge/internal/config"
+	"lingobridge/internal/llm"
+	"lingobridge/internal/markdown"
+	"lingobridge/internal/store"
 )
 
 const (

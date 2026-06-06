@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"wechatbox/internal/session"
-	"wechatbox/internal/store"
+	"lingobridge/internal/session"
+	"lingobridge/internal/store"
 )
 
 // SessionManager is the session behavior needed by in-chat commands.

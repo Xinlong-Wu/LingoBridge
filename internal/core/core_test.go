@@ -5,10 +5,10 @@ import (
 	"errors"
 	"testing"
 
-	"wechatbox/internal/commands"
-	"wechatbox/internal/config"
-	"wechatbox/internal/llm"
-	"wechatbox/internal/store"
+	"lingobridge/internal/commands"
+	"lingobridge/internal/config"
+	"lingobridge/internal/llm"
+	"lingobridge/internal/store"
 )
 
 type fakeSessions struct {

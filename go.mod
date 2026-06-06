@@ -1,4 +1,4 @@
-module wechatbox
+module lingobridge
 
 go 1.25.1
 

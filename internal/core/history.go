@@ -1,6 +1,6 @@
 package core
 
-import "wechatbox/internal/store"
+import "lingobridge/internal/store"
 
 // ToLLMMessages converts a session conversation and a new user message into
 // the messages array format for the LLM API. It includes the system prompt

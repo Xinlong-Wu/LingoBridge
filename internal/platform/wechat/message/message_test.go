@@ -3,7 +3,7 @@ package message
 import (
 	"testing"
 
-	"wechatbox/internal/platform/wechat/api"
+	"lingobridge/internal/platform/wechat/api"
 )
 
 func TestExtractLLMText(t *testing.T) {

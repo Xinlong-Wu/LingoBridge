@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"wechatbox/internal/store"
+	"lingobridge/internal/store"
 )
 
 type fakeAccountStore struct {

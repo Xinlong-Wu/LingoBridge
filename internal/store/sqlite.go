@@ -11,7 +11,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"wechatbox/internal/config"
+	"lingobridge/internal/config"
 )
 
 var (
@@ -72,14 +72,14 @@ type ArchiveResult struct {
 	CurrentChanged bool
 }
 
-// Open creates or opens the SQLite database at ~/.wechatbox/data/wechatbox.db.
+// Open creates or opens the SQLite database at ~/.lingobridge/data/lingobridge.db.
 func Open() (*Store, error) {
 	dataDir, err := config.EnsureDataDir()
 	if err != nil {
 		return nil, err
 	}
 
-	dbPath := filepath.Join(dataDir, "wechatbox.db")
+	dbPath := filepath.Join(dataDir, "lingobridge.db")
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)

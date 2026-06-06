@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"wechatbox/internal/store"
+	"lingobridge/internal/store"
 )
 
 type openaiChatClient struct {

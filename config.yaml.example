@@ -1,6 +1,6 @@
-# WeChatBox configuration
-# Copy this file to ~/.wechatbox/config.yaml and fill in your values.
-#   cp config.yaml.example ~/.wechatbox/config.yaml
+# LingoBridge configuration
+# Copy this file to ~/.lingobridge/config.yaml and fill in your values.
+#   cp config.yaml.example ~/.lingobridge/config.yaml
 
 llm:
   # Default model profile used for users without a model preference.

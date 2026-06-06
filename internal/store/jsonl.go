@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"wechatbox/internal/config"
+	"lingobridge/internal/config"
 )
 
 // Attachment represents non-text content associated with a chat message.

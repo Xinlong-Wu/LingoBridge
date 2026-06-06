@@ -7,15 +7,15 @@ import (
 	"strings"
 	"time"
 
-	"wechatbox/internal/platform/wechat/api"
+	"lingobridge/internal/platform/wechat/api"
 )
 
 func generateClientID() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
-		return "wechatbox-" + strconv.FormatInt(time.Now().UnixNano(), 16)
+		return "lingobridge-" + strconv.FormatInt(time.Now().UnixNano(), 16)
 	}
-	return "wechatbox-" + hex.EncodeToString(b)
+	return "lingobridge-" + hex.EncodeToString(b)
 }
 
 // ExtractText extracts the text content from a WeChat message.

@@ -1,7 +1,7 @@
 # AGENTS.md
 
 When you add, remove, or rename:
-- CLI commands (`cmd/wechatbox/main.go`)
+- CLI commands (`cmd/lingobridge/main.go`)
 - In-chat slash commands (`internal/commands/`)
 - Config fields (`internal/config/config.go`)
 - File/directory layout (`internal/config/`, `internal/store/`, `internal/platform/`)

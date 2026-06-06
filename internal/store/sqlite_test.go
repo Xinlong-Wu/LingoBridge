@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"wechatbox/internal/config"
+	"lingobridge/internal/config"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -204,7 +204,7 @@ func TestMigrateLegacyAccountsDefaultToWeChat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureDataDir returned error: %v", err)
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dataDir, "wechatbox.db"))
+	db, err := sql.Open("sqlite", filepath.Join(dataDir, "lingobridge.db"))
 	if err != nil {
 		t.Fatalf("sql.Open returned error: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestMigrateActiveSessionToUserPreference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureDataDir returned error: %v", err)
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dataDir, "wechatbox.db"))
+	db, err := sql.Open("sqlite", filepath.Join(dataDir, "lingobridge.db"))
 	if err != nil {
 		t.Fatalf("sql.Open returned error: %v", err)
 	}

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"wechatbox/internal/store"
+	"lingobridge/internal/store"
 )
 
 const DefaultBaseURL = "https://open.feishu.cn"

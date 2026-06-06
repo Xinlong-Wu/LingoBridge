@@ -31,7 +31,7 @@ func testResponse(req *http.Request, status int, body string) *http.Response {
 }
 
 func TestSendMessageSetsHeadersAndBaseInfo(t *testing.T) {
-	client := NewClient("https://wechatbox.test", "token")
+	client := NewClient("https://lingobridge.test", "token")
 	client.HTTPClient = testHTTPClient(func(r *http.Request) (*http.Response, error) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want POST", r.Method)
@@ -66,7 +66,7 @@ func TestSendMessageSetsHeadersAndBaseInfo(t *testing.T) {
 }
 
 func TestSendMessageReturnsRetError(t *testing.T) {
-	client := NewClient("https://wechatbox.test", "")
+	client := NewClient("https://lingobridge.test", "")
 	client.HTTPClient = testHTTPClient(func(r *http.Request) (*http.Response, error) {
 		return testResponse(r, http.StatusOK, `{"ret":1,"errmsg":"too long"}`), nil
 	})
@@ -78,7 +78,7 @@ func TestSendMessageReturnsRetError(t *testing.T) {
 }
 
 func TestSendMessageReturnsErrcodeError(t *testing.T) {
-	client := NewClient("https://wechatbox.test", "")
+	client := NewClient("https://lingobridge.test", "")
 	client.HTTPClient = testHTTPClient(func(r *http.Request) (*http.Response, error) {
 		return testResponse(r, http.StatusOK, `{"errcode":123,"errmsg":"bad"}`), nil
 	})
@@ -90,7 +90,7 @@ func TestSendMessageReturnsErrcodeError(t *testing.T) {
 }
 
 func TestDoRequestTimeout(t *testing.T) {
-	client := NewClient("https://wechatbox.test", "")
+	client := NewClient("https://lingobridge.test", "")
 	client.HTTPClient = testHTTPClient(func(r *http.Request) (*http.Response, error) {
 		<-r.Context().Done()
 		return nil, r.Context().Err()
@@ -103,7 +103,7 @@ func TestDoRequestTimeout(t *testing.T) {
 }
 
 func TestGetUpdatesContextCancel(t *testing.T) {
-	client := NewClient("https://wechatbox.test", "")
+	client := NewClient("https://lingobridge.test", "")
 	client.HTTPClient = testHTTPClient(func(r *http.Request) (*http.Response, error) {
 		<-r.Context().Done()
 		return nil, r.Context().Err()
@@ -119,7 +119,7 @@ func TestGetUpdatesContextCancel(t *testing.T) {
 }
 
 func TestDoRequestHTTPError(t *testing.T) {
-	client := NewClient("https://wechatbox.test", "")
+	client := NewClient("https://lingobridge.test", "")
 	client.HTTPClient = testHTTPClient(func(r *http.Request) (*http.Response, error) {
 		return testResponse(r, http.StatusInternalServerError, "bad"), nil
 	})
@@ -131,7 +131,7 @@ func TestDoRequestHTTPError(t *testing.T) {
 }
 
 func TestGetConfigInvalidJSON(t *testing.T) {
-	client := NewClient("https://wechatbox.test", "")
+	client := NewClient("https://lingobridge.test", "")
 	client.HTTPClient = testHTTPClient(func(r *http.Request) (*http.Response, error) {
 		return testResponse(r, http.StatusOK, `{not-json`), nil
 	})

@@ -3,10 +3,10 @@ package platform
 import (
 	"testing"
 
-	"wechatbox/internal/config"
-	"wechatbox/internal/core"
-	"wechatbox/internal/session"
-	"wechatbox/internal/store"
+	"lingobridge/internal/config"
+	"lingobridge/internal/core"
+	"lingobridge/internal/session"
+	"lingobridge/internal/store"
 )
 
 func TestDefaultRegistryLookupAliases(t *testing.T) {

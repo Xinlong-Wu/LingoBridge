@@ -29,6 +29,35 @@ func validLLMConfig() LLMConfig {
 	}
 }
 
+func TestPathsUseLingoBridgeHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	configDir, err := ConfigDir()
+	if err != nil {
+		t.Fatalf("ConfigDir returned error: %v", err)
+	}
+	if configDir != filepath.Join(home, ".lingobridge") {
+		t.Fatalf("ConfigDir = %q, want ~/.lingobridge", configDir)
+	}
+
+	socketPath, err := ControlSocketPath()
+	if err != nil {
+		t.Fatalf("ControlSocketPath returned error: %v", err)
+	}
+	if socketPath != filepath.Join(home, ".lingobridge", "lingobridge.sock") {
+		t.Fatalf("ControlSocketPath = %q, want lingobridge socket", socketPath)
+	}
+
+	dataDir, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir returned error: %v", err)
+	}
+	if dataDir != filepath.Join(home, ".lingobridge", "data") {
+		t.Fatalf("DataDir = %q, want ~/.lingobridge/data", dataDir)
+	}
+}
+
 func TestLLMConfigValidateFullProfiles(t *testing.T) {
 	cfg := validLLMConfig()
 	if err := cfg.Validate(); err != nil {

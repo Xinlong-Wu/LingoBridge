@@ -10,8 +10,8 @@ import (
 
 	"github.com/skip2/go-qrcode"
 
-	"wechatbox/internal/platform/wechat/api"
-	"wechatbox/internal/store"
+	"lingobridge/internal/platform/wechat/api"
+	"lingobridge/internal/store"
 )
 
 const (
@@ -121,7 +121,7 @@ func Login(st *store.Store, accountName string) error {
 			scannedPrinted = false
 
 		case "binded_redirect":
-			fmt.Println("\n✅ 已连接过此 WeChatBox，无需重复连接。")
+			fmt.Println("\n✅ 已连接过此 LingoBridge，无需重复连接。")
 			return nil
 
 		case "scaned_but_redirect":

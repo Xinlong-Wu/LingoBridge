@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"wechatbox/internal/config"
-	"wechatbox/internal/store"
+	"lingobridge/internal/config"
+	"lingobridge/internal/store"
 )
 
 // ErrModelNotFound is returned when a user selects an unknown model profile.

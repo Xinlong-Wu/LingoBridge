@@ -10,14 +10,14 @@ import (
 	"path/filepath"
 	"time"
 
-	"wechatbox/internal/config"
+	"lingobridge/internal/config"
 )
 
 var (
 	// ErrUnavailable means no running control server could be reached.
 	ErrUnavailable = errors.New("control server unavailable")
-	// ErrAlreadyRunning means another live wechatbox run process owns the socket.
-	ErrAlreadyRunning = errors.New("wechatbox run already active")
+	// ErrAlreadyRunning means another live lingobridge run process owns the socket.
+	ErrAlreadyRunning = errors.New("lingobridge run already active")
 
 	socketActive = defaultSocketActive
 )
@@ -111,7 +111,7 @@ func (s *Server) Close(ctx context.Context) error {
 	return err
 }
 
-// NotifyReload asks a running wechatbox process to reload accounts.
+// NotifyReload asks a running lingobridge process to reload accounts.
 func NotifyReload(ctx context.Context) error {
 	path, err := config.ControlSocketPath()
 	if err != nil {
@@ -130,7 +130,7 @@ func NotifyReloadAt(ctx context.Context, socketPath string) error {
 	}
 
 	client := unixHTTPClient(socketPath)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://wechatbox/reload", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://lingobridge/reload", nil)
 	if err != nil {
 		return err
 	}

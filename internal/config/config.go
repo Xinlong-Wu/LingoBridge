@@ -64,13 +64,13 @@ func DefaultConfig() Config {
 	}
 }
 
-// ConfigDir returns the config directory (~/.wechatbox).
+// ConfigDir returns the config directory (~/.lingobridge).
 func ConfigDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("get home dir: %w", err)
 	}
-	return filepath.Join(home, ".wechatbox"), nil
+	return filepath.Join(home, ".lingobridge"), nil
 }
 
 // ConfigPath returns the path to config.yaml.
@@ -88,10 +88,10 @@ func ControlSocketPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "wechatbox.sock"), nil
+	return filepath.Join(dir, "lingobridge.sock"), nil
 }
 
-// DataDir returns the data directory (~/.wechatbox/data).
+// DataDir returns the data directory (~/.lingobridge/data).
 func DataDir() (string, error) {
 	dir, err := ConfigDir()
 	if err != nil {
@@ -100,7 +100,7 @@ func DataDir() (string, error) {
 	return filepath.Join(dir, "data"), nil
 }
 
-// SessionsDir returns the sessions directory (~/.wechatbox/data/sessions).
+// SessionsDir returns the sessions directory (~/.lingobridge/data/sessions).
 func SessionsDir() (string, error) {
 	dir, err := DataDir()
 	if err != nil {

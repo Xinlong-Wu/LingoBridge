@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"wechatbox/internal/config"
+	"lingobridge/internal/config"
 )
 
 // MediaFile describes a locally persisted media file.

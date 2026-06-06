@@ -5,10 +5,10 @@ import (
 	"errors"
 	"testing"
 
-	"wechatbox/internal/core"
-	"wechatbox/internal/platform"
-	"wechatbox/internal/platform/feishu"
-	"wechatbox/internal/store"
+	"lingobridge/internal/core"
+	"lingobridge/internal/platform"
+	"lingobridge/internal/platform/feishu"
+	"lingobridge/internal/store"
 )
 
 func TestCmdAccountNewFeishuSavesAccount(t *testing.T) {
@@ -137,8 +137,8 @@ func newFakeAccountNewRegistry(t *testing.T) *platform.Registry {
 	err := registry.Register(platform.Definition{
 		ID:              store.PlatformWeChat,
 		Aliases:         []string{"weixin", "微信"},
-		AccountNewUsage: "wechatbox account new weixin [--name <name>]",
-		ParseAccountNewFlags: func(args []string) (platform.AccountNewOptions, error) {
+		AccountNewUsage: "lingobridge account new weixin [--name <name>]",
+		ParseAccountNewFlags: func(args []string, io platform.AccountNewIO) (platform.AccountNewOptions, error) {
 			name := "default"
 			for i := 0; i < len(args); i++ {
 				if args[i] == "--name" && i+1 < len(args) {

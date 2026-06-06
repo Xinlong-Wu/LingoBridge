@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"strings"
 
-	"wechatbox/internal/store"
+	"lingobridge/internal/store"
 )
 
 // Client is the common LLM client interface.

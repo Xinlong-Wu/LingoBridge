@@ -5,7 +5,7 @@ import (
 	"log"
 	"sync"
 
-	"wechatbox/internal/store"
+	"lingobridge/internal/store"
 )
 
 // AccountStore is the account metadata needed by Supervisor.

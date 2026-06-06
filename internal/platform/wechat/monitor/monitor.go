@@ -13,14 +13,14 @@ import (
 	"time"
 	"unicode"
 
-	"wechatbox/internal/config"
-	"wechatbox/internal/core"
-	"wechatbox/internal/llm"
-	"wechatbox/internal/platform/wechat/api"
-	"wechatbox/internal/platform/wechat/cdn"
-	"wechatbox/internal/platform/wechat/message"
-	"wechatbox/internal/session"
-	"wechatbox/internal/store"
+	"lingobridge/internal/config"
+	"lingobridge/internal/core"
+	"lingobridge/internal/llm"
+	"lingobridge/internal/platform/wechat/api"
+	"lingobridge/internal/platform/wechat/cdn"
+	"lingobridge/internal/platform/wechat/message"
+	"lingobridge/internal/session"
+	"lingobridge/internal/store"
 )
 
 const (

@@ -3,8 +3,8 @@ package session
 import (
 	"testing"
 
-	"wechatbox/internal/config"
-	"wechatbox/internal/store"
+	"lingobridge/internal/config"
+	"lingobridge/internal/store"
 )
 
 func newTestManager(t *testing.T) (*Manager, *store.Store) {

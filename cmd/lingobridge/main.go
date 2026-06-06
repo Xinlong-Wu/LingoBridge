@@ -15,13 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"wechatbox/internal/config"
-	"wechatbox/internal/control"
-	"wechatbox/internal/core"
-	"wechatbox/internal/platform"
-	"wechatbox/internal/runner"
-	"wechatbox/internal/session"
-	"wechatbox/internal/store"
+	"lingobridge/internal/config"
+	"lingobridge/internal/control"
+	"lingobridge/internal/core"
+	"lingobridge/internal/platform"
+	"lingobridge/internal/runner"
+	"lingobridge/internal/session"
+	"lingobridge/internal/store"
 )
 
 var errUsage = errors.New("usage")
@@ -29,7 +29,7 @@ var errUsage = errors.New("usage")
 func logBuildInfo() {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
-		log.Printf("WeChatBox dev go/%s", runtime.Version()[2:])
+		log.Printf("LingoBridge dev go/%s", runtime.Version()[2:])
 		return
 	}
 
@@ -63,9 +63,9 @@ func logBuildInfo() {
 	}
 
 	if vcsTime != "" {
-		log.Printf("WeChatBox %s (%s) go/%s", version, vcsTime, runtime.Version()[2:])
+		log.Printf("LingoBridge %s (%s) go/%s", version, vcsTime, runtime.Version()[2:])
 	} else {
-		log.Printf("WeChatBox %s go/%s", version, runtime.Version()[2:])
+		log.Printf("LingoBridge %s go/%s", version, runtime.Version()[2:])
 	}
 }
 
@@ -115,21 +115,21 @@ func cmdAccount(args []string) error {
 }
 
 func printUsage() {
-	fmt.Println("WeChatBox - WeChat/Feishu Bot → LLM Direct Bridge")
+	fmt.Println("LingoBridge - WeChat/Feishu Bot → LLM Direct Bridge")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  wechatbox account new <weixin|feishu> [platform options]")
+	fmt.Println("  lingobridge account new <weixin|feishu> [platform options]")
 	fmt.Println("                                           Add a bot account")
-	fmt.Println("  wechatbox account list                   List all accounts")
-	fmt.Println("  wechatbox account delete <name>          Delete an account")
-	fmt.Println("  wechatbox run [--account <name>]         Start the bot loop")
+	fmt.Println("  lingobridge account list                   List all accounts")
+	fmt.Println("  lingobridge account delete <name>          Delete an account")
+	fmt.Println("  lingobridge run [--account <name>]         Start the bot loop")
 }
 
 func printAccountUsage() {
 	fmt.Println("Usage:")
-	fmt.Println("  wechatbox account new <weixin|feishu> [platform options]")
-	fmt.Println("  wechatbox account list")
-	fmt.Println("  wechatbox account delete <name>")
+	fmt.Println("  lingobridge account new <weixin|feishu> [platform options]")
+	fmt.Println("  lingobridge account list")
+	fmt.Println("  lingobridge account delete <name>")
 }
 
 func newFlagSet(name string) *flag.FlagSet {
@@ -156,14 +156,14 @@ func cmdAccountNew(args []string) error {
 
 func cmdAccountNewWithRegistry(args []string, registry *platform.Registry) error {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		fmt.Println("Usage: wechatbox account new <weixin|feishu> [platform options]")
+		fmt.Println("Usage: lingobridge account new <weixin|feishu> [platform options]")
 		return errUsage
 	}
 	def, ok := registry.Lookup(args[0])
 	if !ok {
 		return fmt.Errorf("unsupported platform %q; use one of: %s", args[0], strings.Join(registry.PlatformNames(), ", "))
 	}
-	opts, err := def.ParseAccountNewFlags(args[1:])
+	opts, err := def.ParseAccountNewFlags(args[1:], platform.DefaultAccountNewIO())
 	if err != nil {
 		fmt.Println("Usage:", def.AccountNewUsage)
 		return errUsage
@@ -209,7 +209,7 @@ func cmdRun(args []string) error {
 	fs := newFlagSet("run")
 	targetAccount := fs.String("account", "", "account name")
 	if err := fs.Parse(args); err != nil {
-		fmt.Println("Usage: wechatbox run [--account <name>]")
+		fmt.Println("Usage: lingobridge run [--account <name>]")
 		return errUsage
 	}
 
@@ -274,7 +274,7 @@ func cmdRun(args []string) error {
 	})
 	if err != nil {
 		if errors.Is(err, control.ErrAlreadyRunning) {
-			return fmt.Errorf("another wechatbox run process is already active")
+			return fmt.Errorf("another lingobridge run process is already active")
 		}
 		return fmt.Errorf("start control server: %w", err)
 	}
@@ -311,7 +311,7 @@ func cmdAccountList(args []string) error {
 	}
 
 	if len(accounts) == 0 {
-		fmt.Println("No accounts. Run 'wechatbox account new' to add one.")
+		fmt.Println("No accounts. Run 'lingobridge account new' to add one.")
 		return nil
 	}
 
@@ -332,7 +332,7 @@ func cmdAccountList(args []string) error {
 
 func cmdAccountDelete(args []string) error {
 	if len(args) < 1 {
-		fmt.Println("Usage: wechatbox account delete <name>")
+		fmt.Println("Usage: lingobridge account delete <name>")
 		return errUsage
 	}
 	name := strings.Join(args, " ")
@@ -375,9 +375,9 @@ func notifyRunningProcess() {
 	err := control.NotifyReload(ctx)
 	switch {
 	case err == nil:
-		fmt.Println("Reloaded running wechatbox process.")
+		fmt.Println("Reloaded running lingobridge process.")
 	case errors.Is(err, control.ErrUnavailable):
-		fmt.Println("No running wechatbox process found; start or restart 'wechatbox run' to pick up changes.")
+		fmt.Println("No running lingobridge process found; start or restart 'lingobridge run' to pick up changes.")
 	default:
 		fmt.Printf("Warning: notify running process failed: %v\n", err)
 	}

@@ -54,7 +54,7 @@ func TestNotifyReloadMissingSocket(t *testing.T) {
 }
 
 func TestPrepareSocketDetectsActiveSocket(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "wechatbox.sock")
+	socketPath := filepath.Join(t.TempDir(), "lingobridge.sock")
 	if err := os.WriteFile(socketPath, []byte("socket placeholder"), 0600); err != nil {
 		t.Fatalf("write placeholder: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestPrepareSocketDetectsActiveSocket(t *testing.T) {
 }
 
 func TestPrepareSocketRemovesStaleSocket(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "wechatbox.sock")
+	socketPath := filepath.Join(t.TempDir(), "lingobridge.sock")
 	if err := os.WriteFile(socketPath, []byte("stale"), 0600); err != nil {
 		t.Fatalf("write placeholder: %v", err)
 	}

@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"wechatbox/internal/store"
+	"lingobridge/internal/store"
 )
 
 type openaiResponsesClient struct {
