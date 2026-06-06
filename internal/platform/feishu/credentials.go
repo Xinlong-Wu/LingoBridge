@@ -33,8 +33,9 @@ type AccountConfig struct {
 
 // EventConfig holds one configured Feishu event shell hook.
 type EventConfig struct {
-	Name string   `yaml:"name"`
-	Run  ShellRun `yaml:"run"`
+	Name    string   `yaml:"name"`
+	Version string   `yaml:"version"`
+	Run     ShellRun `yaml:"run"`
 }
 
 // ShellRun is one shell script or a sequence of shell scripts.
@@ -172,6 +173,7 @@ func (c *Config) ApplyDefaults() {
 	}
 	for i, event := range c.Events {
 		event.Name = strings.TrimSpace(event.Name)
+		event.Version = strings.TrimSpace(event.Version)
 		event.Run = normalizeShellRun(event.Run)
 		c.Events[i] = event
 	}

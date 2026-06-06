@@ -114,8 +114,10 @@ func TestLoadConfigParsesEventRuns(t *testing.T) {
     app_secret: secret
 events:
   - name: p2p_chat_create
+    version: " 1.0 "
     run: echo hello
   - name: p2p_chat_create
+    version: "1.0"
     run:
       - echo first
       - echo second
@@ -136,6 +138,9 @@ events:
 	}
 	if len(feishuConfig.Events) != 2 {
 		t.Fatalf("events = %#v, want two events", feishuConfig.Events)
+	}
+	if feishuConfig.Events[0].Version != "1.0" || feishuConfig.Events[1].Version != "1.0" {
+		t.Fatalf("event versions = %#v, want trimmed 1.0", feishuConfig.Events)
 	}
 	if got := []string(feishuConfig.Events[0].Run); len(got) != 1 || got[0] != "echo hello" {
 		t.Fatalf("first run = %#v, want scalar command", got)

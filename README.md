@@ -71,9 +71,10 @@ inside its own `platforms.feishu` config block.
 
 For Feishu, enable bot capability and long-connection event subscription for
 `im.message.receive_v1` in the Feishu Open Platform app console. Add any
-extra event subscriptions, such as `p2p_chat_create`, only when they are listed
-under `platforms.feishu.events`. The first version supports text messages in
-1:1 chats and group messages that mention the bot.
+extra event subscriptions, such as `p2p_chat_create` or
+`im.chat.access_event.bot_p2p_chat_entered_v1`, only when they are listed under
+`platforms.feishu.events` with an explicit `version`. The first version
+supports text messages in 1:1 chats and group messages that mention the bot.
 
 ### 4. Run
 
@@ -178,9 +179,13 @@ Feishu support uses a self-built app long connection. In 1:1 chats, all text
 messages are processed. In group chats, only messages that mention the bot are
 processed, and the mention token is removed before sending text to the LLM.
 Extra Feishu events are registered from `platforms.feishu.events`. Each event
-item has `name` and `run`; `run` may be one shell command string or a list of
-shell command strings. Non-empty stdout from each command is sent back to the
-event chat as a Feishu text message.
+item has `name`, `version`, and `run`; `run` may be one shell command string or
+a list of shell command strings. `version: "1.0"` events are registered with
+Feishu SDK `OnCustomizedEvent`; `version: "2.0"` events are registered through
+LingoBridge's built-in event-name to `OnP2...` mapping. Configured v2.0 events
+currently support `im.chat.access_event.bot_p2p_chat_entered_v1`. Non-empty
+stdout from each command is sent back as a Feishu text message only when the
+event contains a `chat_id`.
 Event commands receive environment variables including
 `LINGOBRIDGE_EVENT_NAME`, `LINGOBRIDGE_EVENT_JSON`,
 `LINGOBRIDGE_COMMAND_HELP`, and Feishu-specific fields such as
@@ -194,6 +199,7 @@ platforms:
   feishu:
     events:
       - name: p2p_chat_create
+        version: "1.0"
         run:
           - "printf '你好，我是 LingoBridge。直接发送问题即可开始对话。'"
           - "printf '%s' \"$LINGOBRIDGE_COMMAND_HELP\""
@@ -225,7 +231,8 @@ are not sent back to Feishu yet.
 | `platforms.feishu.accounts.<name>.app_id` | — | Feishu app ID for account `<name>` |
 | `platforms.feishu.accounts.<name>.app_secret` | — | Feishu app secret for account `<name>` |
 | `platforms.feishu.accounts.<name>.base_url` | `https://open.feishu.cn` | Feishu Open Platform base URL |
-| `platforms.feishu.events[].name` | — | Extra Feishu event to register; currently supports `p2p_chat_create` |
+| `platforms.feishu.events[].name` | — | Extra Feishu event to register; v1.0 supports customized event names such as `p2p_chat_create`, and v2.0 currently supports `im.chat.access_event.bot_p2p_chat_entered_v1` |
+| `platforms.feishu.events[].version` | — | Required Feishu event protocol version: `"1.0"` uses `OnCustomizedEvent`; `"2.0"` uses a built-in `OnP2...` mapping |
 | `platforms.feishu.events[].run` | — | Shell command string or list of shell command strings to run for the event |
 Each model profile is independent. `provider`, `base_url`, `api_key`, and `id` are required; `endpoint` is optional and defaults to `chat`.
 For Anthropic model profiles, an omitted `endpoint` defaults to `messages`.
@@ -275,6 +282,7 @@ internal/config/            # Shared config file, generic platforms.<platform> Y
 internal/platform/          # Platform registry and parameter/runtime handler registration
 internal/platform/wechat/   # WeChat frontend adapter: native events/API <-> core messages
 internal/platform/feishu/   # Feishu frontend adapter and its private config schema
+internal/platform/feishu/monitor/ # Feishu long-connection monitor, message adapter, and event hooks
 internal/core/              # Middle layer: scoped platform config/data APIs, commands, sessions, LLM orchestration
 internal/store/             # Platform-scoped SQLite/history/media persistence
 internal/llm/               # Backend provider adapters: OpenAI-compatible and Anthropic APIs

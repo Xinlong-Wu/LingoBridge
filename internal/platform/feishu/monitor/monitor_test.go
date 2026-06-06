@@ -132,7 +132,7 @@ func TestConfigureP2PChatCreatedSendsCommandOutput(t *testing.T) {
 	b := &bot{handler: processor, sender: sender, eventCommands: map[string][]string{}}
 
 	d, registered, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), []feishu.EventConfig{
-		{Name: "p2p_chat_create", Run: feishu.ShellRun{
+		{Name: "p2p_chat_create", Version: "1.0", Run: feishu.ShellRun{
 			`printf 'hello %s' "$LINGOBRIDGE_FEISHU_CHAT_ID"`,
 			`printf '%s' "$LINGOBRIDGE_COMMAND_HELP"`,
 		}},
@@ -147,8 +147,17 @@ func TestConfigureP2PChatCreatedSendsCommandOutput(t *testing.T) {
 		t.Fatalf("registered events = %q, want %q", got, want)
 	}
 
-	if err := b.handleP2PChatCreated(context.Background(), p2pChatCreatedEvent("oc_chat")); err != nil {
-		t.Fatalf("handleP2PChatCreated returned error: %v", err)
+	_, err = d.Do(context.Background(), []byte(`{
+		"type":"event_callback",
+		"event":{
+			"type":"p2p_chat_create",
+			"app_id":"cli_xxx",
+			"chat_id":"oc_chat",
+			"tenant_key":"tenant_xxx"
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("dispatcher.Do returned error: %v", err)
 	}
 	if processor.called {
 		t.Fatal("processor was called for p2p_chat_create")
@@ -164,6 +173,44 @@ func TestConfigureP2PChatCreatedSendsCommandOutput(t *testing.T) {
 	}
 	if !strings.Contains(sender.messages[1].text, "/help") || !strings.Contains(sender.messages[1].text, "/model") {
 		t.Fatalf("help message = %q, want command help", sender.messages[1].text)
+	}
+}
+
+func TestConfigureBotP2PChatEnteredV2SendsCommandOutput(t *testing.T) {
+	sender := &fakeSender{}
+	b := &bot{handler: &fakeProcessor{}, sender: sender, eventCommands: map[string][]string{}}
+
+	d, registered, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), []feishu.EventConfig{
+		{Name: "im.chat.access_event.bot_p2p_chat_entered_v1", Version: "2.0", Run: feishu.ShellRun{
+			`printf 'entered %s %s' "$LINGOBRIDGE_FEISHU_CHAT_ID" "$LINGOBRIDGE_FEISHU_OPERATOR_OPEN_ID"`,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("configureEventHandlers returned error: %v", err)
+	}
+	if got, want := strings.Join(registered, ", "), "im.message.receive_v1, im.chat.access_event.bot_p2p_chat_entered_v1"; got != want {
+		t.Fatalf("registered events = %q, want %q", got, want)
+	}
+
+	_, err = d.Do(context.Background(), []byte(`{
+		"schema":"2.0",
+		"header":{
+			"event_type":"im.chat.access_event.bot_p2p_chat_entered_v1",
+			"tenant_key":"tenant_xxx"
+		},
+		"event":{
+			"chat_id":"oc_chat",
+			"operator_id":{"open_id":"ou_operator","user_id":"user_operator"}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("dispatcher.Do returned error: %v", err)
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("messages = %#v, want one message", sender.messages)
+	}
+	if sender.messages[0].chatID != "oc_chat" || sender.messages[0].text != "entered oc_chat ou_operator" {
+		t.Fatalf("message = %#v, want v2 greeting", sender.messages[0])
 	}
 }
 
@@ -184,41 +231,54 @@ func TestConfigureEventHandlersReportsBuiltInMessageEvent(t *testing.T) {
 func TestConfigureEventHandlersRejectsBuiltInMessageEvent(t *testing.T) {
 	b := &bot{eventCommands: map[string][]string{}}
 	_, _, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), []feishu.EventConfig{
-		{Name: "im.message.receive_v1", Run: feishu.ShellRun{"echo nope"}},
+		{Name: "im.message.receive_v1", Version: "2.0", Run: feishu.ShellRun{"echo nope"}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "built in") {
 		t.Fatalf("configureEventHandlers error = %v, want built in event error", err)
 	}
 }
 
-func TestConfigureEventHandlersRejectsUnsupportedEvent(t *testing.T) {
+func TestConfigureEventHandlersRejectsMissingVersion(t *testing.T) {
 	b := &bot{eventCommands: map[string][]string{}}
 	_, _, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), []feishu.EventConfig{
 		{Name: "unknown", Run: feishu.ShellRun{"echo nope"}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "unsupported feishu event") {
-		t.Fatalf("configureEventHandlers error = %v, want unsupported event error", err)
+	if err == nil || !strings.Contains(err.Error(), "version is required") {
+		t.Fatalf("configureEventHandlers error = %v, want missing version error", err)
 	}
 }
 
-func TestHandleP2PChatCreatedIgnoresMalformedEvents(t *testing.T) {
-	tests := []*larkim.P1P2PChatCreatedV1{
-		nil,
-		{},
-		p2pChatCreatedEvent(""),
+func TestConfigureEventHandlersRejectsUnsupportedVersion(t *testing.T) {
+	b := &bot{eventCommands: map[string][]string{}}
+	_, _, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), []feishu.EventConfig{
+		{Name: "p2p_chat_create", Version: "3.0", Run: feishu.ShellRun{"echo nope"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("configureEventHandlers error = %v, want unsupported version error", err)
 	}
+}
 
-	for _, event := range tests {
-		sender := &fakeSender{}
-		b := &bot{handler: &fakeProcessor{}, sender: sender, eventCommands: map[string][]string{
-			"p2p_chat_create": {"printf 'hello'"},
-		}}
-		if err := b.handleP2PChatCreated(context.Background(), event); err != nil {
-			t.Fatalf("handleP2PChatCreated returned error: %v", err)
-		}
-		if len(sender.messages) != 0 {
-			t.Fatalf("messages = %#v, want none", sender.messages)
-		}
+func TestConfigureEventHandlersRejectsUnsupportedV2Event(t *testing.T) {
+	b := &bot{eventCommands: map[string][]string{}}
+	_, _, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), []feishu.EventConfig{
+		{Name: "unknown", Version: "2.0", Run: feishu.ShellRun{"echo nope"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported feishu v2 event") {
+		t.Fatalf("configureEventHandlers error = %v, want unsupported v2 event error", err)
+	}
+}
+
+func TestRunFeishuEventCommandsSkipsStdoutWithoutChatID(t *testing.T) {
+	sender := &fakeSender{}
+	env := map[string]string{
+		"LINGOBRIDGE_PLATFORM":   store.PlatformFeishu,
+		"LINGOBRIDGE_EVENT_NAME": "event_without_chat",
+	}
+	if err := runFeishuEventCommands(context.Background(), sender, "event_without_chat", "", []string{"printf 'hello'"}, env); err != nil {
+		t.Fatalf("runFeishuEventCommands returned error: %v", err)
+	}
+	if len(sender.messages) != 0 {
+		t.Fatalf("messages = %#v, want none", sender.messages)
 	}
 }
 
@@ -310,14 +370,6 @@ func (b *blockingClient) Close() {
 	case <-b.closed:
 	default:
 		close(b.closed)
-	}
-}
-
-func p2pChatCreatedEvent(chatID string) *larkim.P1P2PChatCreatedV1 {
-	return &larkim.P1P2PChatCreatedV1{
-		Event: &larkim.P1P2PChatCreatedV1Data{
-			ChatID: chatID,
-		},
 	}
 }
 
