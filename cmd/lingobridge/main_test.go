@@ -12,6 +12,7 @@ import (
 	"lingobridge/internal/logging"
 	"lingobridge/internal/platform"
 	"lingobridge/internal/platform/feishu"
+	"lingobridge/internal/runner"
 	"lingobridge/internal/store"
 )
 
@@ -166,6 +167,38 @@ func TestParseRunOptionsAcceptsVerboseDebug(t *testing.T) {
 func TestParseRunOptionsRejectsInvalidVerbose(t *testing.T) {
 	if _, err := parseRunOptions([]string{"--verbose", "noisy"}); err == nil {
 		t.Fatal("parseRunOptions returned nil error, want invalid verbose error")
+	}
+}
+
+func TestWaitRunDoneReturnsFatalMonitorError(t *testing.T) {
+	wantErr := errors.New("bad config")
+	fatal := make(chan error, 1)
+	fatal <- formatMonitorExitError(runner.MonitorExit{
+		Account: store.Account{
+			ID:       "feishu:cli_xxx",
+			Name:     "default",
+			Platform: store.PlatformFeishu,
+		},
+		Err: wantErr,
+	})
+
+	err := waitRunDone(context.Background(), fatal)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("waitRunDone error = %v, want wrapped fatal monitor error", err)
+	}
+	for _, want := range []string{"monitor exited", "platform=feishu", "name=default", "id=feishu:cli_xxx"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("waitRunDone error = %q, want %q", err.Error(), want)
+		}
+	}
+}
+
+func TestWaitRunDoneReturnsNilOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := waitRunDone(ctx, make(chan error)); err != nil {
+		t.Fatalf("waitRunDone returned error: %v", err)
 	}
 }
 

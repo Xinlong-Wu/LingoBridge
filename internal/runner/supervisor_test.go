@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -48,6 +49,17 @@ func waitStart(t *testing.T, ch <-chan store.Account) store.Account {
 	}
 }
 
+func waitStartID(t *testing.T, ch <-chan string) string {
+	t.Helper()
+	select {
+	case id := <-ch:
+		return id
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for start")
+		return ""
+	}
+}
+
 func waitStop(t *testing.T, ch <-chan string) string {
 	t.Helper()
 	select {
@@ -56,6 +68,17 @@ func waitStop(t *testing.T, ch <-chan string) string {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for stop")
 		return ""
+	}
+}
+
+func waitMonitorExit(t *testing.T, ch <-chan MonitorExit) MonitorExit {
+	t.Helper()
+	select {
+	case exit := <-ch:
+		return exit
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for monitor exit")
+		return MonitorExit{}
 	}
 }
 
@@ -209,4 +232,73 @@ func TestSupervisorTargetAccountFilter(t *testing.T) {
 		t.Fatalf("started account = %q, want a1", got)
 	}
 	assertNoStart(t, runner.starts)
+}
+
+func TestSupervisorReportsSingleMonitorFailure(t *testing.T) {
+	wantErr := errors.New("bad config")
+	st := &fakeAccountStore{accounts: []store.Account{{ID: "a1", Name: "bot", Platform: store.PlatformFeishu, Enabled: true}}}
+	exits := make(chan MonitorExit, 1)
+	s := NewSupervisor(st, func(context.Context, store.Account) error {
+		return wantErr
+	}, "")
+	s.SetMonitorExitHandler(func(exit MonitorExit) {
+		exits <- exit
+	})
+	defer s.Stop()
+
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	exit := waitMonitorExit(t, exits)
+	if !errors.Is(exit.Err, wantErr) {
+		t.Fatalf("exit.Err = %v, want %v", exit.Err, wantErr)
+	}
+	if exit.Account.ID != "a1" || exit.RemainingRunning != 0 {
+		t.Fatalf("exit = %#v, want account a1 and no remaining monitors", exit)
+	}
+	if got := s.RunningCount(); got != 0 {
+		t.Fatalf("RunningCount = %d, want 0", got)
+	}
+}
+
+func TestSupervisorReportsRemainingRunningOnMonitorFailure(t *testing.T) {
+	wantErr := errors.New("bad config")
+	st := &fakeAccountStore{accounts: []store.Account{
+		{ID: "fail", Name: "bad", Platform: store.PlatformFeishu, Enabled: true},
+		{ID: "live", Name: "good", Platform: store.PlatformWeChat, Enabled: true},
+	}}
+	starts := make(chan string, 2)
+	stops := make(chan string, 1)
+	exits := make(chan MonitorExit, 1)
+	s := NewSupervisor(st, func(ctx context.Context, acc store.Account) error {
+		starts <- acc.ID
+		if acc.ID == "fail" {
+			return wantErr
+		}
+		<-ctx.Done()
+		stops <- acc.ID
+		return nil
+	}, "")
+	s.SetMonitorExitHandler(func(exit MonitorExit) {
+		exits <- exit
+	})
+	defer s.Stop()
+
+	if err := s.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	waitStartID(t, starts)
+	waitStartID(t, starts)
+	exit := waitMonitorExit(t, exits)
+	if !errors.Is(exit.Err, wantErr) || exit.Account.ID != "fail" || exit.RemainingRunning != 1 {
+		t.Fatalf("exit = %#v, want failed account with one remaining monitor", exit)
+	}
+	if got := s.RunningCount(); got != 1 {
+		t.Fatalf("RunningCount = %d, want 1", got)
+	}
+
+	s.Stop()
+	if got := waitStop(t, stops); got != "live" {
+		t.Fatalf("stopped account = %q, want live", got)
+	}
 }

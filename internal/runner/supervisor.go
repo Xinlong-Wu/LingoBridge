@@ -21,12 +21,23 @@ type MonitorRunner func(ctx context.Context, acc store.Account) error
 // AccountSignatureExtra returns extra state that should restart an account when changed.
 type AccountSignatureExtra func(acc store.Account) string
 
+// MonitorExit describes a monitor that exited with a non-cancellation error.
+type MonitorExit struct {
+	Account          store.Account
+	Err              error
+	RemainingRunning int
+}
+
+// MonitorExitHandler receives non-cancellation monitor exits.
+type MonitorExitHandler func(MonitorExit)
+
 // Supervisor keeps running monitors reconciled with enabled accounts in storage.
 type Supervisor struct {
 	store          AccountStore
 	runMonitor     MonitorRunner
 	targetAccount  string
 	signatureExtra AccountSignatureExtra
+	exitHandler    MonitorExitHandler
 
 	mu      sync.Mutex
 	wg      sync.WaitGroup
@@ -55,6 +66,13 @@ func (s *Supervisor) SetSignatureExtra(extra AccountSignatureExtra) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.signatureExtra = extra
+}
+
+// SetMonitorExitHandler adds a callback for non-cancellation monitor exits.
+func (s *Supervisor) SetMonitorExitHandler(handler MonitorExitHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.exitHandler = handler
 }
 
 // Reconcile starts, stops, or restarts account monitors to match current store state.
@@ -154,15 +172,31 @@ func (s *Supervisor) startLocked(parent context.Context, acc store.Account) {
 	go func() {
 		defer s.wg.Done()
 		runnerLog.Info(ctx, "starting account platform=%s name=%s id=%s", acc.Platform, acc.Name, acc.ID)
+		var monitorErr error
 		if err := s.runMonitor(ctx, acc); err != nil && ctx.Err() == nil {
+			monitorErr = err
 			runnerLog.Error(ctx, "monitor exited platform=%s name=%s id=%s: %v", acc.Platform, acc.Name, acc.ID, err)
 		}
 
+		var exit MonitorExit
+		var handler MonitorExitHandler
 		s.mu.Lock()
 		if s.running[acc.ID] == current {
 			delete(s.running, acc.ID)
+			if monitorErr != nil {
+				exit = MonitorExit{
+					Account:          acc,
+					Err:              monitorErr,
+					RemainingRunning: len(s.running),
+				}
+				handler = s.exitHandler
+			}
 		}
 		s.mu.Unlock()
+
+		if handler != nil {
+			handler(exit)
+		}
 	}()
 }
 

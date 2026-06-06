@@ -608,6 +608,7 @@ func cmdRun(args []string) error {
 
 	runCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
+	fatalMonitorErr := make(chan error, 1)
 
 	supervisor := runner.NewSupervisor(catalog, func(ctx context.Context, acc store.Account) error {
 		cfg, rt, ok := state.snapshot(acc.Platform)
@@ -637,6 +638,15 @@ func cmdRun(args []string) error {
 		return runtimePlatform.Run(ctx, rt.handler)
 	}, opts.targetAccount)
 	supervisor.SetSignatureExtra(state.signatureExtra)
+	supervisor.SetMonitorExitHandler(func(exit runner.MonitorExit) {
+		if exit.RemainingRunning != 0 {
+			return
+		}
+		select {
+		case fatalMonitorErr <- formatMonitorExitError(exit):
+		default:
+		}
+	})
 
 	controlServer, err := control.StartServer(runCtx, func(context.Context) error {
 		cfg, err := config.Load()
@@ -668,10 +678,23 @@ func cmdRun(args []string) error {
 	}
 
 	runtimeLog.Info(runCtx, "listening on %d account(s)...", supervisor.RunningCount())
-	<-runCtx.Done()
+	err = waitRunDone(runCtx, fatalMonitorErr)
 	runtimeLog.Info(runCtx, "shutting down...")
 	supervisor.Stop()
-	return nil
+	return err
+}
+
+func waitRunDone(ctx context.Context, fatalMonitorErr <-chan error) error {
+	select {
+	case err := <-fatalMonitorErr:
+		return err
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+func formatMonitorExitError(exit runner.MonitorExit) error {
+	return fmt.Errorf("monitor exited platform=%s name=%s id=%s: %w", exit.Account.Platform, exit.Account.Name, exit.Account.ID, exit.Err)
 }
 
 func cmdAccountList(args []string) error {

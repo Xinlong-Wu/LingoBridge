@@ -87,6 +87,9 @@ it stays running and waits for a later account reload. Use `--account` to run a
 specific one, and `--verbose` to set the log level (`debug`, `info`, `warn`, or
 `error`; default `info`):
 
+If all active account monitors exit because of a non-cancellation error, such as
+invalid account or platform config, `run` exits and prints the monitor error.
+
 ```bash
 ./lingobridge run --account mybot
 ./lingobridge run --verbose debug
