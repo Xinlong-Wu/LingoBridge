@@ -80,13 +80,14 @@ func RunContext(ctx context.Context, st *store.Store, sm *session.Manager, cfg c
 type Platform struct {
 	account store.Account
 	config  feishu.Config
+	level   logging.Level
 }
 
 var _ core.Platform = (*Platform)(nil)
 
-func NewPlatform(acc store.Account, cfg feishu.Config) *Platform {
+func NewPlatform(acc store.Account, cfg feishu.Config, level logging.Level) *Platform {
 	cfg.ApplyDefaults()
-	return &Platform{account: acc, config: cfg}
+	return &Platform{account: acc, config: cfg, level: level}
 }
 
 func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
@@ -104,32 +105,34 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 	}
 	baseURL := accountConfig.BaseURL
 
-	restClient := newRESTClient(creds, baseURL)
+	sdkLogLevel := feishuSDKLogLevel(p.level)
+	restClient := newRESTClient(creds, baseURL, sdkLogLevel)
 	b := &bot{
 		handler:       handler,
 		sender:        &sdkSender{client: restClient},
 		eventCommands: map[string][]string{},
 	}
 
-	d, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", "").OnP2MessageReceiveV1(b.handleMessage), p.config.Events)
+	d, registeredEvents, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", "").OnP2MessageReceiveV1(b.handleMessage), p.config.Events)
 	if err != nil {
 		return err
 	}
 	opts := []larkws.ClientOption{
 		larkws.WithEventHandler(d),
-		larkws.WithLogLevel(larkcore.LogLevelError),
+		larkws.WithLogLevel(sdkLogLevel),
 		larkws.WithOnReady(func() {
-			feishuLog.Printf("long connection ready for account %s (%s)", acc.Name, acc.ID)
+			feishuLog.Info("long connection ready for account %s (%s)", acc.Name, acc.ID)
 		}),
 		larkws.WithOnError(func(err error) {
-			feishuLog.Printf("long connection error account=%s: %v", acc.Name, err)
+			feishuLog.Error("long connection error account=%s: %v", acc.Name, err)
 		}),
 	}
 	if domain := strings.TrimRight(strings.TrimSpace(baseURL), "/"); domain != "" {
 		opts = append(opts, larkws.WithDomain(domain))
 	}
 	wsClient := larkws.NewClient(creds.AppID, creds.AppSecret, opts...)
-	feishuLog.Printf("starting for account %s (%s)", acc.Name, acc.ID)
+	feishuLog.Info("registered events for account %s (%s): %s", acc.Name, acc.ID, strings.Join(registeredEvents, ", "))
+	feishuLog.Info("starting for account %s (%s)", acc.Name, acc.ID)
 	return runClient(ctx, wsClient)
 }
 
@@ -150,41 +153,56 @@ func runClient(ctx context.Context, client interface {
 	}
 }
 
-func newRESTClient(creds feishu.Credentials, baseURL string) *lark.Client {
-	opts := []lark.ClientOptionFunc{lark.WithLogLevel(larkcore.LogLevelError)}
+func newRESTClient(creds feishu.Credentials, baseURL string, level larkcore.LogLevel) *lark.Client {
+	opts := []lark.ClientOptionFunc{lark.WithLogLevel(level)}
 	if baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/"); baseURL != "" {
 		opts = append(opts, lark.WithOpenBaseUrl(baseURL))
 	}
 	return lark.NewClient(creds.AppID, creds.AppSecret, opts...)
 }
 
-func (b *bot) configureEventHandlers(d *dispatcher.EventDispatcher, events []feishu.EventConfig) (*dispatcher.EventDispatcher, error) {
+func feishuSDKLogLevel(level logging.Level) larkcore.LogLevel {
+	switch level {
+	case logging.Debug:
+		return larkcore.LogLevelDebug
+	case logging.Warn:
+		return larkcore.LogLevelWarn
+	case logging.Error:
+		return larkcore.LogLevelError
+	default:
+		return larkcore.LogLevelInfo
+	}
+}
+
+func (b *bot) configureEventHandlers(d *dispatcher.EventDispatcher, events []feishu.EventConfig) (*dispatcher.EventDispatcher, []string, error) {
 	if b.eventCommands == nil {
 		b.eventCommands = map[string][]string{}
 	}
+	registered := []string{"im.message.receive_v1"}
 	for i, event := range events {
 		name := strings.TrimSpace(event.Name)
 		run := feishu.ShellRun(event.Run)
 		if name == "" {
-			return nil, fmt.Errorf("platforms.feishu.events[%d].name is required", i)
+			return nil, nil, fmt.Errorf("platforms.feishu.events[%d].name is required", i)
 		}
 		if name == "im.message.receive_v1" {
-			return nil, fmt.Errorf("platforms.feishu.events[%d].name %q is built in and cannot be configured", i, name)
+			return nil, nil, fmt.Errorf("platforms.feishu.events[%d].name %q is built in and cannot be configured", i, name)
 		}
 		if len(run) == 0 {
-			return nil, fmt.Errorf("platforms.feishu.events[%d].run is required", i)
+			return nil, nil, fmt.Errorf("platforms.feishu.events[%d].run is required", i)
 		}
 		switch name {
 		case "p2p_chat_create":
 			b.eventCommands[name] = append(b.eventCommands[name], run...)
 		default:
-			return nil, fmt.Errorf("unsupported feishu event %q", name)
+			return nil, nil, fmt.Errorf("unsupported feishu event %q", name)
 		}
 	}
 	if len(b.eventCommands["p2p_chat_create"]) > 0 {
 		d = d.OnP1P2PChatCreatedV1(b.handleP2PChatCreated)
+		registered = append(registered, "p2p_chat_create")
 	}
-	return d, nil
+	return d, registered, nil
 }
 
 func (b *bot) handleMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
@@ -251,7 +269,7 @@ func normalizeEvent(event *larkim.P2MessageReceiveV1) (incomingMessage, bool) {
 
 	text, err := extractText(deref(msg.Content), msg.Mentions)
 	if err != nil {
-		feishuLog.Printf("parse text message: %v", err)
+		feishuLog.Warn("parse text message: %v", err)
 		return incomingMessage{UserID: userKey, ChatID: chatID, Unsupported: true}, true
 	}
 	return incomingMessage{UserID: userKey, ChatID: chatID, Text: text}, true
@@ -334,7 +352,7 @@ func runShellScript(ctx context.Context, script string, env map[string]string) (
 		return stdout.String(), err
 	}
 	if msg := strings.TrimSpace(stderr.String()); msg != "" {
-		feishuLog.Printf("event command stderr: %s", msg)
+		feishuLog.Warn("event command stderr: %s", msg)
 	}
 	return stdout.String(), nil
 }

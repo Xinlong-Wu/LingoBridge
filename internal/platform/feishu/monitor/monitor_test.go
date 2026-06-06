@@ -8,9 +8,11 @@ import (
 
 	"lingobridge/internal/commands"
 	"lingobridge/internal/core"
+	"lingobridge/internal/logging"
 	"lingobridge/internal/platform/feishu"
 	"lingobridge/internal/store"
 
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -129,7 +131,7 @@ func TestConfigureP2PChatCreatedSendsCommandOutput(t *testing.T) {
 	sender := &fakeSender{}
 	b := &bot{handler: processor, sender: sender, eventCommands: map[string][]string{}}
 
-	d, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), []feishu.EventConfig{
+	d, registered, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), []feishu.EventConfig{
 		{Name: "p2p_chat_create", Run: feishu.ShellRun{
 			`printf 'hello %s' "$LINGOBRIDGE_FEISHU_CHAT_ID"`,
 			`printf '%s' "$LINGOBRIDGE_COMMAND_HELP"`,
@@ -140,6 +142,9 @@ func TestConfigureP2PChatCreatedSendsCommandOutput(t *testing.T) {
 	}
 	if d == nil {
 		t.Fatal("configureEventHandlers returned nil dispatcher")
+	}
+	if got, want := strings.Join(registered, ", "), "im.message.receive_v1, p2p_chat_create"; got != want {
+		t.Fatalf("registered events = %q, want %q", got, want)
 	}
 
 	if err := b.handleP2PChatCreated(context.Background(), p2pChatCreatedEvent("oc_chat")); err != nil {
@@ -162,9 +167,23 @@ func TestConfigureP2PChatCreatedSendsCommandOutput(t *testing.T) {
 	}
 }
 
+func TestConfigureEventHandlersReportsBuiltInMessageEvent(t *testing.T) {
+	b := &bot{eventCommands: map[string][]string{}}
+	d, registered, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), nil)
+	if err != nil {
+		t.Fatalf("configureEventHandlers returned error: %v", err)
+	}
+	if d == nil {
+		t.Fatal("configureEventHandlers returned nil dispatcher")
+	}
+	if got, want := strings.Join(registered, ", "), "im.message.receive_v1"; got != want {
+		t.Fatalf("registered events = %q, want %q", got, want)
+	}
+}
+
 func TestConfigureEventHandlersRejectsBuiltInMessageEvent(t *testing.T) {
 	b := &bot{eventCommands: map[string][]string{}}
-	_, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), []feishu.EventConfig{
+	_, _, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), []feishu.EventConfig{
 		{Name: "im.message.receive_v1", Run: feishu.ShellRun{"echo nope"}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "built in") {
@@ -174,7 +193,7 @@ func TestConfigureEventHandlersRejectsBuiltInMessageEvent(t *testing.T) {
 
 func TestConfigureEventHandlersRejectsUnsupportedEvent(t *testing.T) {
 	b := &bot{eventCommands: map[string][]string{}}
-	_, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), []feishu.EventConfig{
+	_, _, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", ""), []feishu.EventConfig{
 		{Name: "unknown", Run: feishu.ShellRun{"echo nope"}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "unsupported feishu event") {
@@ -215,7 +234,7 @@ func TestPlatformRunRequiresAccountCredentials(t *testing.T) {
 		Accounts: map[string]feishu.AccountConfig{
 			"fsbot": {},
 		},
-	}).Run(context.Background(), &fakeProcessor{})
+	}, logging.Info).Run(context.Background(), &fakeProcessor{})
 	if err == nil || !strings.Contains(err.Error(), "app_id is required") {
 		t.Fatalf("Run error = %v, want missing credentials error", err)
 	}
@@ -229,9 +248,27 @@ func TestPlatformRunRequiresConfiguredAccount(t *testing.T) {
 		CredentialsJSON: `{}`,
 	}
 
-	err := NewPlatform(acc, feishu.Config{}).Run(context.Background(), &fakeProcessor{})
+	err := NewPlatform(acc, feishu.Config{}, logging.Info).Run(context.Background(), &fakeProcessor{})
 	if err == nil || !strings.Contains(err.Error(), "platforms.feishu.accounts.fsbot is required") {
 		t.Fatalf("Run error = %v, want missing account config error", err)
+	}
+}
+
+func TestFeishuSDKLogLevel(t *testing.T) {
+	tests := []struct {
+		level logging.Level
+		want  larkcore.LogLevel
+	}{
+		{level: logging.Debug, want: larkcore.LogLevelDebug},
+		{level: logging.Info, want: larkcore.LogLevelInfo},
+		{level: logging.Warn, want: larkcore.LogLevelWarn},
+		{level: logging.Error, want: larkcore.LogLevelError},
+	}
+
+	for _, tc := range tests {
+		if got := feishuSDKLogLevel(tc.level); got != tc.want {
+			t.Fatalf("feishuSDKLogLevel(%v) = %v, want %v", tc.level, got, tc.want)
+		}
 	}
 }
 

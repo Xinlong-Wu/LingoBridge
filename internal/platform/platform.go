@@ -12,6 +12,7 @@ import (
 	"lingobridge/internal/commands"
 	"lingobridge/internal/config"
 	"lingobridge/internal/core"
+	"lingobridge/internal/logging"
 	"lingobridge/internal/platform/feishu"
 	feishumonitor "lingobridge/internal/platform/feishu/monitor"
 	"lingobridge/internal/platform/wechat/login"
@@ -41,6 +42,7 @@ type RuntimeContext struct {
 	Config    config.Config
 	LLMConfig config.LLMConfig
 	Account   store.Account
+	LogLevel  logging.Level
 }
 
 type Definition struct {
@@ -262,7 +264,7 @@ func feishuDefinition() Definition {
 			if err != nil {
 				return nil, err
 			}
-			return feishumonitor.NewPlatform(ctx.Account, feishuConfig), nil
+			return feishumonitor.NewPlatform(ctx.Account, feishuConfig, ctx.LogLevel), nil
 		},
 		CommandPolicy: commands.DefaultPolicy(),
 	}

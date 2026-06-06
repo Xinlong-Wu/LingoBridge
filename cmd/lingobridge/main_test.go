@@ -9,6 +9,7 @@ import (
 
 	"lingobridge/internal/config"
 	"lingobridge/internal/core"
+	"lingobridge/internal/logging"
 	"lingobridge/internal/platform"
 	"lingobridge/internal/platform/feishu"
 	"lingobridge/internal/store"
@@ -139,6 +140,32 @@ func TestCmdAccountNewUnknownPlatform(t *testing.T) {
 	err := cmdAccountNew([]string{"unknown"})
 	if err == nil {
 		t.Fatal("cmdAccountNew returned nil error, want unsupported platform error")
+	}
+}
+
+func TestParseRunOptionsDefaultsLogLevelToInfo(t *testing.T) {
+	opts, err := parseRunOptions(nil)
+	if err != nil {
+		t.Fatalf("parseRunOptions returned error: %v", err)
+	}
+	if opts.logLevel != logging.Info {
+		t.Fatalf("logLevel = %v, want info", opts.logLevel)
+	}
+}
+
+func TestParseRunOptionsAcceptsVerboseDebug(t *testing.T) {
+	opts, err := parseRunOptions([]string{"--verbose", "debug", "--account", "fsbot"})
+	if err != nil {
+		t.Fatalf("parseRunOptions returned error: %v", err)
+	}
+	if opts.logLevel != logging.Debug || opts.targetAccount != "fsbot" {
+		t.Fatalf("options = %#v, want debug level and target account", opts)
+	}
+}
+
+func TestParseRunOptionsRejectsInvalidVerbose(t *testing.T) {
+	if _, err := parseRunOptions([]string{"--verbose", "noisy"}); err == nil {
+		t.Fatal("parseRunOptions returned nil error, want invalid verbose error")
 	}
 }
 

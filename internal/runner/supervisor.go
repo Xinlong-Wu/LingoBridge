@@ -114,7 +114,7 @@ func (s *Supervisor) Reconcile(ctx context.Context) error {
 	runningCount := len(s.running)
 	s.mu.Unlock()
 
-	runnerLog.Printf("reconciled accounts: running=%d", runningCount)
+	runnerLog.Debug("reconciled accounts: running=%d", runningCount)
 	return nil
 }
 
@@ -153,9 +153,9 @@ func (s *Supervisor) startLocked(parent context.Context, acc store.Account) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		runnerLog.Printf("starting account platform=%s name=%s id=%s", acc.Platform, acc.Name, acc.ID)
+		runnerLog.Info("starting account platform=%s name=%s id=%s", acc.Platform, acc.Name, acc.ID)
 		if err := s.runMonitor(ctx, acc); err != nil && ctx.Err() == nil {
-			runnerLog.Printf("monitor exited platform=%s name=%s id=%s: %v", acc.Platform, acc.Name, acc.ID, err)
+			runnerLog.Error("monitor exited platform=%s name=%s id=%s: %v", acc.Platform, acc.Name, acc.ID, err)
 		}
 
 		s.mu.Lock()

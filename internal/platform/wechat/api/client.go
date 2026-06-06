@@ -134,9 +134,9 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, body in
 
 	if c.Debug {
 		if method == http.MethodPost {
-			apiLog.Printf("%s %s body=%s", method, reqURL, truncate(string(bodyBytes), 500))
+			apiLog.Debug("%s %s body=%s", method, reqURL, truncate(string(bodyBytes), 500))
 		} else {
-			apiLog.Printf("%s %s", method, reqURL)
+			apiLog.Debug("%s %s", method, reqURL)
 		}
 	}
 
@@ -155,7 +155,7 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, body in
 	}
 
 	if c.Debug {
-		apiLog.Printf("%s %s status=%d body=%s", method, reqURL, resp.StatusCode, truncate(string(respBody), 500))
+		apiLog.Debug("%s %s status=%d body=%s", method, reqURL, resp.StatusCode, truncate(string(respBody), 500))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

@@ -66,7 +66,7 @@ func Login(st *store.Store, accountName string) error {
 	for time.Now().Before(deadline) {
 		statusResp, err := client.PollQRStatus(qrcode, pendingVerifyCode)
 		if err != nil {
-			loginLog.Printf("poll error: %v", err)
+			loginLog.Warn("poll error: %v", err)
 			time.Sleep(qrPollInterval)
 			continue
 		}
@@ -130,7 +130,7 @@ func Login(st *store.Store, accountName string) error {
 			if statusResp.RedirectHost != "" {
 				pollBaseURL = "https://" + statusResp.RedirectHost
 				client.BaseURL = pollBaseURL
-				loginLog.Printf("IDC redirect: %s", statusResp.RedirectHost)
+				loginLog.Info("IDC redirect: %s", statusResp.RedirectHost)
 			}
 
 		case "confirmed":

@@ -81,10 +81,14 @@ under `platforms.feishu.events`. The first version supports text messages in
 ./lingobridge run
 ```
 
-Listens to all enabled accounts concurrently. If no enabled accounts exist yet, it stays running and waits for a later account reload. Use `--account` to run a specific one:
+Listens to all enabled accounts concurrently. If no enabled accounts exist yet,
+it stays running and waits for a later account reload. Use `--account` to run a
+specific one, and `--verbose` to set the log level (`debug`, `info`, `warn`, or
+`error`; default `info`):
 
 ```bash
 ./lingobridge run --account mybot
+./lingobridge run --verbose debug
 ```
 
 While `run` is active, `account new` and `account delete` notify it over a local Unix socket so account changes are applied without restarting the bot loop.
@@ -101,7 +105,7 @@ when relevant config changes.
 | `account list` | List all accounts with their platform |
 | `account delete <name>` | Delete an account from its platform data domain and reload a running bot process |
 | `model add <name> [--provider <openai\|anthropic>] [--base-url <url>] [--api-key <key>] [--id <model-id>] [--endpoint <mode>] [--default]` | Add an LLM model profile to config and optionally make it the default |
-| `run [--account <name>]` | Start the bot loop |
+| `run [--account <name>] [--verbose <debug\|info\|warn\|error>]` | Start the bot loop with optional log level, default `info` |
 
 ## In-Chat Commands
 
