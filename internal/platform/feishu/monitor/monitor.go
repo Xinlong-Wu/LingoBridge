@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -15,12 +14,15 @@ import (
 
 	"lingobridge/internal/config"
 	"lingobridge/internal/core"
+	"lingobridge/internal/logging"
 	"lingobridge/internal/platform/feishu"
 	"lingobridge/internal/session"
 	"lingobridge/internal/store"
 )
 
 const unsupportedMessageText = "暂不支持此类飞书消息，请发送文字。"
+
+var feishuLog = logging.For("feishu")
 
 type starter interface {
 	Start(ctx context.Context) error
@@ -103,17 +105,17 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 		larkws.WithEventHandler(d),
 		larkws.WithLogLevel(larkcore.LogLevelError),
 		larkws.WithOnReady(func() {
-			log.Printf("[feishu] long connection ready for account %s (%s)", acc.Name, acc.ID)
+			feishuLog.Printf("long connection ready for account %s (%s)", acc.Name, acc.ID)
 		}),
 		larkws.WithOnError(func(err error) {
-			log.Printf("[feishu] long connection error account=%s: %v", acc.Name, err)
+			feishuLog.Printf("long connection error account=%s: %v", acc.Name, err)
 		}),
 	}
 	if domain := strings.TrimRight(strings.TrimSpace(baseURL), "/"); domain != "" {
 		opts = append(opts, larkws.WithDomain(domain))
 	}
 	wsClient := larkws.NewClient(creds.AppID, creds.AppSecret, opts...)
-	log.Printf("[feishu] Starting for account %s (%s)", acc.Name, acc.ID)
+	feishuLog.Printf("starting for account %s (%s)", acc.Name, acc.ID)
 	return runClient(ctx, wsClient)
 }
 
@@ -199,7 +201,7 @@ func normalizeEvent(event *larkim.P2MessageReceiveV1) (incomingMessage, bool) {
 
 	text, err := extractText(deref(msg.Content), msg.Mentions)
 	if err != nil {
-		log.Printf("[feishu] parse text message: %v", err)
+		feishuLog.Printf("parse text message: %v", err)
 		return incomingMessage{UserID: userKey, ChatID: chatID, Unsupported: true}, true
 	}
 	return incomingMessage{UserID: userKey, ChatID: chatID, Text: text}, true

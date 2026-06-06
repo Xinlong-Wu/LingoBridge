@@ -10,13 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"lingobridge/internal/logging"
 )
 
 const (
@@ -27,6 +28,8 @@ const (
 
 // ErrTimeout marks API calls that timed out.
 var ErrTimeout = errors.New("wechat api timeout")
+
+var apiLog = logging.For("wechat-api")
 
 // Client is the HTTP client for the WeChat Bot API.
 type Client struct {
@@ -131,9 +134,9 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, body in
 
 	if c.Debug {
 		if method == http.MethodPost {
-			log.Printf("[wechat-api] %s %s body=%s", method, reqURL, truncate(string(bodyBytes), 500))
+			apiLog.Printf("%s %s body=%s", method, reqURL, truncate(string(bodyBytes), 500))
 		} else {
-			log.Printf("[wechat-api] %s %s", method, reqURL)
+			apiLog.Printf("%s %s", method, reqURL)
 		}
 	}
 
@@ -152,7 +155,7 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, body in
 	}
 
 	if c.Debug {
-		log.Printf("[wechat-api] %s %s status=%d body=%s", method, reqURL, resp.StatusCode, truncate(string(respBody), 500))
+		apiLog.Printf("%s %s status=%d body=%s", method, reqURL, resp.StatusCode, truncate(string(respBody), 500))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

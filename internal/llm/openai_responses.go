@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 
+	"lingobridge/internal/logging"
 	"lingobridge/internal/store"
 )
+
+var openAILog = logging.For("openai")
 
 type openaiResponsesClient struct {
 	openaiBase
@@ -54,7 +56,7 @@ func (c *openaiResponsesClient) AssistantMessage(resp Response) (store.Message, 
 		mimeType, filename := imageHistoryMetadata(image)
 		fileID, err := c.uploadVisionFile(filename, image.Data)
 		if err != nil {
-			log.Printf("[llm] generated image file upload failed filename=%s: %v", filename, err)
+			openAILog.Printf("responses image upload failed model=%s filename=%s: %v", c.cfg.Model, filename, err)
 			fileID = ""
 		}
 		msg.Attachments = append(msg.Attachments, store.Attachment{

@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/signal"
 	"runtime"
@@ -20,6 +19,7 @@ import (
 	"lingobridge/internal/config"
 	"lingobridge/internal/control"
 	"lingobridge/internal/core"
+	"lingobridge/internal/logging"
 	"lingobridge/internal/platform"
 	"lingobridge/internal/runner"
 	"lingobridge/internal/session"
@@ -28,10 +28,17 @@ import (
 
 var errUsage = errors.New("usage")
 
+var (
+	cliLog     = logging.For("cli")
+	configLog  = logging.For("config")
+	controlLog = logging.For("control")
+	runtimeLog = logging.For("runtime")
+)
+
 func logBuildInfo() {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
-		log.Printf("LingoBridge dev go/%s", runtime.Version()[2:])
+		cliLog.Printf("LingoBridge dev go/%s", runtime.Version()[2:])
 		return
 	}
 
@@ -65,9 +72,9 @@ func logBuildInfo() {
 	}
 
 	if vcsTime != "" {
-		log.Printf("LingoBridge %s (%s) go/%s", version, vcsTime, runtime.Version()[2:])
+		cliLog.Printf("LingoBridge %s (%s) go/%s", version, vcsTime, runtime.Version()[2:])
 	} else {
-		log.Printf("LingoBridge %s go/%s", version, runtime.Version()[2:])
+		cliLog.Printf("LingoBridge %s go/%s", version, runtime.Version()[2:])
 	}
 }
 
@@ -364,7 +371,7 @@ func promptModelProfile(name string, model config.LLMModelConfig, in io.Reader, 
 
 func promptEndpoint(reader *bufio.Reader, out io.Writer, provider, defaultEndpoint string) (string, error) {
 	choices := strings.Join(config.EndpointChoicesForProvider(provider), "/")
-	prompt := fmt.Sprintf("Endpoint（%s, default [%s]): ", choices, defaultEndpoint)
+	prompt := fmt.Sprintf("Endpoint（%s；直接回车使用 %s。OpenAI 图像/Responses API 请填 responses，注意不是 response）: ", choices, defaultEndpoint)
 	for {
 		endpoint, err := promptCLIValue(reader, out, prompt, false, defaultEndpoint)
 		if err != nil {
@@ -435,7 +442,7 @@ func (r *runtimeState) updateConfig(cfg config.Config) error {
 			return fmt.Errorf("reset %s user models: %w", platformID, err)
 		}
 		if resetCount > 0 {
-			log.Printf("Reset %d %s user model preference(s) to default model %q", resetCount, platformID, cfg.LLM.DefaultModel)
+			runtimeLog.Printf("reset %d %s user model preference(s) to default model %q", resetCount, platformID, cfg.LLM.DefaultModel)
 		}
 		sm := session.NewManager(st, cfg.LLM)
 		runtimes[platformID] = platformRuntime{
@@ -474,10 +481,10 @@ func (r *runtimeState) signatureExtra(acc store.Account) string {
 }
 
 func logConfig(cfg config.Config) {
-	log.Printf("LLM default_model: %s", cfg.LLM.DefaultModel)
-	log.Printf("LLM models: %s", strings.Join(cfg.LLM.ModelNames(), ", "))
-	log.Printf("LLM max_history: %d", cfg.LLM.MaxHistory)
-	log.Printf("LLM system_prompt: %s", cfg.LLM.SystemPrompt)
+	configLog.Printf("llm default_model: %s", cfg.LLM.DefaultModel)
+	configLog.Printf("llm models: %s", strings.Join(cfg.LLM.ModelNames(), ", "))
+	configLog.Printf("llm max_history: %d", cfg.LLM.MaxHistory)
+	configLog.Printf("llm system_prompt: %s", cfg.LLM.SystemPrompt)
 }
 
 func cmdAccountNew(args []string) error {
@@ -629,7 +636,7 @@ func cmdRun(args []string) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := controlServer.Close(shutdownCtx); err != nil {
-			log.Printf("control server shutdown: %v", err)
+			controlLog.Printf("server shutdown: %v", err)
 		}
 	}()
 
@@ -637,9 +644,9 @@ func cmdRun(args []string) error {
 		return fmt.Errorf("reconcile accounts: %w", err)
 	}
 
-	log.Printf("Listening on %d account(s)...", supervisor.RunningCount())
+	runtimeLog.Printf("listening on %d account(s)...", supervisor.RunningCount())
 	<-runCtx.Done()
-	log.Println("Shutting down...")
+	runtimeLog.Println("shutting down...")
 	supervisor.Stop()
 	return nil
 }

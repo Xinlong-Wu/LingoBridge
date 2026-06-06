@@ -3,13 +3,13 @@ package login
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/skip2/go-qrcode"
 
+	"lingobridge/internal/logging"
 	"lingobridge/internal/platform/wechat/api"
 	"lingobridge/internal/store"
 )
@@ -21,6 +21,8 @@ const (
 	loginTimeout      = 5 * time.Minute
 	qrPollInterval    = 1 * time.Second
 )
+
+var loginLog = logging.For("wechat-login")
 
 // Login performs the QR code login flow and saves the account.
 func Login(st *store.Store, accountName string) error {
@@ -64,7 +66,7 @@ func Login(st *store.Store, accountName string) error {
 	for time.Now().Before(deadline) {
 		statusResp, err := client.PollQRStatus(qrcode, pendingVerifyCode)
 		if err != nil {
-			log.Printf("轮询错误: %v", err)
+			loginLog.Printf("poll error: %v", err)
 			time.Sleep(qrPollInterval)
 			continue
 		}
@@ -128,7 +130,7 @@ func Login(st *store.Store, accountName string) error {
 			if statusResp.RedirectHost != "" {
 				pollBaseURL = "https://" + statusResp.RedirectHost
 				client.BaseURL = pollBaseURL
-				log.Printf("IDC 重定向: %s", statusResp.RedirectHost)
+				loginLog.Printf("IDC redirect: %s", statusResp.RedirectHost)
 			}
 
 		case "confirmed":

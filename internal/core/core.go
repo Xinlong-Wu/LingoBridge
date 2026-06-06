@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"regexp"
 	"strings"
 	"sync"
@@ -12,6 +11,7 @@ import (
 	"lingobridge/internal/commands"
 	"lingobridge/internal/config"
 	"lingobridge/internal/llm"
+	"lingobridge/internal/logging"
 	"lingobridge/internal/markdown"
 	"lingobridge/internal/store"
 )
@@ -25,6 +25,7 @@ var (
 	bearerTokenPattern = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]+`)
 	openAIKeyPattern   = regexp.MustCompile(`sk-[A-Za-z0-9_-]{8,}`)
 	hexTokenPattern    = regexp.MustCompile(`\b[0-9a-fA-F]{32,}\b`)
+	coreLog            = logging.For("core")
 )
 
 type Platform interface {
@@ -108,7 +109,7 @@ func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) err
 	}
 	if resp, handled, err := commands.HandleWithPolicy(msg.CommandText, msg.UserKey, b.Sessions, msg.CommandPolicy); handled {
 		if err != nil {
-			log.Printf("[core] command error: %v", err)
+			coreLog.Printf("command error: %v", err)
 			_ = sender.Send(ctx, OutboundMessage{Text: fmt.Sprintf("❌ 错误：%v", err)})
 			return nil
 		}
@@ -123,21 +124,21 @@ func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) err
 func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) error {
 	sess, err := b.Sessions.GetOrCreateCurrentSession(msg.UserKey)
 	if err != nil {
-		log.Printf("[core] get session: %v", err)
+		coreLog.Printf("get session: %v", err)
 		_ = sender.Send(ctx, OutboundMessage{Text: "❌ 会话加载失败，请重试。"})
 		return err
 	}
 
-	modelName, llmClient, err := b.llmForUser(msg.UserKey)
+	modelName, provider, llmClient, err := b.llmForUser(msg.UserKey)
 	if err != nil {
-		log.Printf("[core] resolve LLM: %v", err)
+		coreLog.Printf("resolve LLM: %v", err)
 		_ = sender.Send(ctx, OutboundMessage{Text: "❌ 模型配置不可用，请检查配置。"})
 		return err
 	}
 
 	userMsg, err := b.prepareUserMessage(ctx, msg, sess.ID, llmClient)
 	if err != nil {
-		log.Printf("[core] prepare user message failed model=%s: %v", modelName, err)
+		coreLog.Printf("prepare user message failed provider=%s model=%s: %v", provider, modelName, err)
 		_ = sender.Send(ctx, OutboundMessage{Text: b.prepareErrorNotice(msg, err)})
 		return err
 	}
@@ -147,7 +148,7 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 
 	conv, err := b.Sessions.LoadHistory(msg.UserKey, sess.ID)
 	if err != nil {
-		log.Printf("[core] load history: %v", err)
+		coreLog.Printf("load history: %v", err)
 		conv = &store.Conversation{}
 	}
 
@@ -157,7 +158,7 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 	llmResponse, err := llmClient.ChatStream(b.LLMConfig.SystemPrompt, msgs, nil)
 	stopTyping()
 	if err != nil {
-		log.Printf("[core] LLM error model=%s: %v", modelName, err)
+		coreLog.Printf("LLM error provider=%s model=%s: %v", provider, modelName, err)
 		_ = sender.Send(ctx, OutboundMessage{Text: b.errorNotice(msg, err)})
 		return err
 	}
@@ -169,14 +170,14 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 
 	assistantHistory, err := llmClient.AssistantMessage(llmResponse)
 	if err != nil {
-		log.Printf("[core] prepare assistant history failed model=%s: %v", modelName, err)
+		coreLog.Printf("prepare assistant history failed provider=%s model=%s: %v", provider, modelName, err)
 		_ = sender.Send(ctx, OutboundMessage{Text: b.errorNotice(msg, err)})
 		return err
 	}
 	conv.Messages = append(conv.Messages, userMsg, assistantHistory)
 
 	if err := b.Sessions.SaveHistory(msg.UserKey, sess.ID, conv); err != nil {
-		log.Printf("[core] save history: %v", err)
+		coreLog.Printf("save history: %v", err)
 	}
 
 	if llmResponse.Text != "" {
@@ -190,13 +191,13 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 
 	for i, image := range llmResponse.Images {
 		if err := sender.Send(ctx, OutboundMessage{Image: image}); err != nil {
-			log.Printf("[core] send image failed image=%d/%d: %v", i+1, len(llmResponse.Images), err)
+			coreLog.Printf("send image failed image=%d/%d: %v", i+1, len(llmResponse.Images), err)
 			_ = sender.Send(ctx, OutboundMessage{Text: b.errorNotice(msg, err)})
 			return err
 		}
 	}
 
-	log.Printf("[core] reply to=%s model=%s len=%d images=%d", msg.UserKey, modelName, len(llmResponse.Text), len(llmResponse.Images))
+	coreLog.Printf("reply to=%s provider=%s model=%s len=%d images=%d", msg.UserKey, provider, modelName, len(llmResponse.Text), len(llmResponse.Images))
 	return nil
 }
 
@@ -207,16 +208,16 @@ func (b *Bot) prepareUserMessage(ctx context.Context, msg InboundMessage, sessio
 	return llmClient.PrepareUserMessage(msg.LLMText, nil)
 }
 
-func (b *Bot) llmForUser(userID string) (string, llm.Client, error) {
+func (b *Bot) llmForUser(userID string) (string, string, llm.Client, error) {
 	modelName, err := b.Sessions.CurrentModel(userID)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	model, err := b.LLMConfig.ResolveModel(modelName)
 	if err != nil {
 		model, err = b.LLMConfig.ResolveModel(b.LLMConfig.DefaultModel)
 		if err != nil {
-			return "", nil, err
+			return "", "", nil, err
 		}
 	}
 	newLLM := b.NewLLM
@@ -233,7 +234,7 @@ func (b *Bot) llmForUser(userID string) (string, llm.Client, error) {
 		client = newLLM(model)
 		b.LLMClients[model.Name] = client
 	}
-	return model.Name, client, nil
+	return model.Name, model.Provider, client, nil
 }
 
 func (b *Bot) chunkLimit() int {

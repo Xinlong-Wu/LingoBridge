@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	// "log"
 	"net/http"
 	"strings"
 
@@ -171,8 +170,6 @@ func sendJSON(client *http.Client, reqURL string, headers http.Header, reqBody a
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	// log.Printf("[llm] request body: %s", string(bodyBytes))
-
 	req, err := http.NewRequest("POST", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
@@ -244,11 +241,6 @@ func readSSEData(body io.Reader, handle func(data string) (done bool, err error)
 }
 
 func logSSERawData(line string) {
-	// if len(line) <= maxSSERawLogLen {
-	// 	log.Printf("[llm] SSE rawdata: %s", line)
-	// 	return
-	// }
-	// log.Printf("[llm] SSE rawdata: %s... (truncated, len=%d)", line[:maxSSERawLogLen], len(line))
 }
 
 func bearerHeaders(apiKey string) http.Header {
