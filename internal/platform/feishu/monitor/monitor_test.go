@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -62,12 +63,26 @@ type sentText struct {
 	text   string
 }
 
+type reactionAdd struct {
+	messageID string
+	emojiType string
+}
+
+type reactionDelete struct {
+	messageID  string
+	reactionID string
+}
+
 type fakeSender struct {
-	mu       sync.Mutex
-	chatID   string
-	text     string
-	called   bool
-	messages []sentText
+	mu                sync.Mutex
+	chatID            string
+	text              string
+	called            bool
+	messages          []sentText
+	reactionAdds      []reactionAdd
+	reactionDeletes   []reactionDelete
+	addReactionErr    error
+	deleteReactionErr error
 }
 
 func (f *fakeSender) SendText(ctx context.Context, chatID, text string) error {
@@ -78,6 +93,23 @@ func (f *fakeSender) SendText(ctx context.Context, chatID, text string) error {
 	f.text = text
 	f.messages = append(f.messages, sentText{chatID: chatID, text: text})
 	return nil
+}
+
+func (f *fakeSender) AddReaction(ctx context.Context, messageID, emojiType string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reactionAdds = append(f.reactionAdds, reactionAdd{messageID: messageID, emojiType: emojiType})
+	if f.addReactionErr != nil {
+		return "", f.addReactionErr
+	}
+	return "reaction-1", nil
+}
+
+func (f *fakeSender) DeleteReaction(ctx context.Context, messageID, reactionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reactionDeletes = append(f.reactionDeletes, reactionDelete{messageID: messageID, reactionID: reactionID})
+	return f.deleteReactionErr
 }
 
 func (f *fakeProcessor) snapshot() fakeProcessor {
@@ -96,11 +128,15 @@ func (f *fakeSender) snapshot() fakeSender {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	messages := append([]sentText(nil), f.messages...)
+	reactionAdds := append([]reactionAdd(nil), f.reactionAdds...)
+	reactionDeletes := append([]reactionDelete(nil), f.reactionDeletes...)
 	return fakeSender{
-		chatID:   f.chatID,
-		text:     f.text,
-		called:   f.called,
-		messages: messages,
+		chatID:          f.chatID,
+		text:            f.text,
+		called:          f.called,
+		messages:        messages,
+		reactionAdds:    reactionAdds,
+		reactionDeletes: reactionDeletes,
 	}
 }
 
@@ -140,12 +176,48 @@ func waitForSentMessages(t *testing.T, sender *fakeSender, want int) fakeSender 
 	}
 }
 
+func waitForReactionAdds(t *testing.T, sender *fakeSender, want int) fakeSender {
+	t.Helper()
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snap := sender.snapshot()
+		if len(snap.reactionAdds) >= want {
+			return snap
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("reaction adds = %d, want at least %d", len(snap.reactionAdds), want)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForReactionDeletes(t *testing.T, sender *fakeSender, want int) fakeSender {
+	t.Helper()
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snap := sender.snapshot()
+		if len(snap.reactionDeletes) >= want {
+			return snap
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("reaction deletes = %d, want at least %d", len(snap.reactionDeletes), want)
+		case <-ticker.C:
+		}
+	}
+}
+
 func TestNormalizeP2PTextMessage(t *testing.T) {
 	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "text", `{"text":"hi"}`, nil))
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
-	if in.UserID != "feishu:ou_user" || in.ChatID != "oc_chat" || in.Text != "hi" || in.Unsupported {
+	if in.UserID != "feishu:ou_user" || in.ChatID != "oc_chat" || in.MessageID != "om_message" || in.Text != "hi" || in.Unsupported {
 		t.Fatalf("incoming = %#v", in)
 	}
 }
@@ -184,6 +256,9 @@ func TestHandleUnsupportedMessageSendsNotice(t *testing.T) {
 	if !senderSnap.called || senderSnap.chatID != "oc_chat" || senderSnap.text != unsupportedMessageText {
 		t.Fatalf("sender = %#v", senderSnap)
 	}
+	if len(sender.snapshot().reactionAdds) != 0 {
+		t.Fatal("reaction was added for unsupported message")
+	}
 }
 
 func TestHandleTextMessageUsesBridgeAndReplies(t *testing.T) {
@@ -202,6 +277,13 @@ func TestHandleTextMessageUsesBridgeAndReplies(t *testing.T) {
 	if !senderSnap.called || senderSnap.chatID != "oc_chat" || senderSnap.text != "ok" {
 		t.Fatalf("sender = %#v", senderSnap)
 	}
+	reactionSnap := waitForReactionDeletes(t, sender, 1)
+	if len(reactionSnap.reactionAdds) != 1 || reactionSnap.reactionAdds[0].messageID != "om_message" || reactionSnap.reactionAdds[0].emojiType != feishuProcessingReactionEmoji {
+		t.Fatalf("reaction adds = %#v, want Typing reaction on om_message", reactionSnap.reactionAdds)
+	}
+	if len(reactionSnap.reactionDeletes) != 1 || reactionSnap.reactionDeletes[0].messageID != "om_message" || reactionSnap.reactionDeletes[0].reactionID != "reaction-1" {
+		t.Fatalf("reaction deletes = %#v, want reaction-1 delete on om_message", reactionSnap.reactionDeletes)
+	}
 }
 
 func TestHandleHelpMessagePassesCommandToBridge(t *testing.T) {
@@ -215,6 +297,9 @@ func TestHandleHelpMessagePassesCommandToBridge(t *testing.T) {
 	processorSnap := waitForProcessorCalls(t, processor, 1)
 	if !processorSnap.called || processorSnap.userID != "feishu:ou_user" || processorSnap.commandText != "/help" || processorSnap.text != "/help" {
 		t.Fatalf("processor = %#v", processorSnap)
+	}
+	if len(sender.snapshot().reactionAdds) != 0 {
+		t.Fatal("reaction was added for slash command")
 	}
 }
 
@@ -239,6 +324,10 @@ func TestHandleDuplicateMessageIDIgnored(t *testing.T) {
 	}
 	if got := len(sender.snapshot().messages); got != 1 {
 		t.Fatalf("sent messages = %d, want one", got)
+	}
+	reactionSnap := waitForReactionDeletes(t, sender, 1)
+	if len(reactionSnap.reactionAdds) != 1 || len(reactionSnap.reactionDeletes) != 1 {
+		t.Fatalf("reaction adds/deletes = %#v/%#v, want one each", reactionSnap.reactionAdds, reactionSnap.reactionDeletes)
 	}
 }
 
@@ -306,6 +395,77 @@ func TestHandleDuplicateUnsupportedMessageSendsOneNotice(t *testing.T) {
 	if len(messages) != 1 || messages[0].text != unsupportedMessageText {
 		t.Fatalf("messages = %#v, want one unsupported notice", messages)
 	}
+}
+
+func TestHandleTextMessageSkipsReactionWithoutMessageID(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender}
+
+	if err := b.handleMessage(context.Background(), feishuEventWithIDs("p2p", "text", `{"text":"hi"}`, nil, "", "event_no_message_id")); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+
+	waitForProcessorCalls(t, processor, 1)
+	waitForSentMessages(t, sender, 1)
+	if len(sender.snapshot().reactionAdds) != 0 {
+		t.Fatal("reaction was added without message_id")
+	}
+}
+
+func TestHandleTextMessageContinuesWhenAddReactionFails(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{addReactionErr: errors.New("reaction denied")}
+	b := &bot{handler: processor, sender: sender}
+
+	if err := b.handleMessage(context.Background(), feishuEvent("p2p", "text", `{"text":"hi"}`, nil)); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+
+	waitForProcessorCalls(t, processor, 1)
+	waitForSentMessages(t, sender, 1)
+	snap := sender.snapshot()
+	if len(snap.reactionAdds) != 1 {
+		t.Fatalf("reaction adds = %#v, want one attempted add", snap.reactionAdds)
+	}
+	if len(snap.reactionDeletes) != 0 {
+		t.Fatalf("reaction deletes = %#v, want none after add failure", snap.reactionDeletes)
+	}
+}
+
+func TestHandleTextMessageContinuesWhenDeleteReactionFails(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{deleteReactionErr: errors.New("delete denied")}
+	b := &bot{handler: processor, sender: sender}
+
+	if err := b.handleMessage(context.Background(), feishuEvent("p2p", "text", `{"text":"hi"}`, nil)); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+
+	waitForProcessorCalls(t, processor, 1)
+	waitForSentMessages(t, sender, 1)
+	reactionSnap := waitForReactionDeletes(t, sender, 1)
+	if len(reactionSnap.reactionAdds) != 1 || len(reactionSnap.reactionDeletes) != 1 {
+		t.Fatalf("reaction adds/deletes = %#v/%#v, want one each", reactionSnap.reactionAdds, reactionSnap.reactionDeletes)
+	}
+}
+
+func TestHandleTextMessageDelaysReactionDeleteAfterReply(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender, reactionDelay: 200 * time.Millisecond}
+
+	if err := b.handleMessage(context.Background(), feishuEvent("p2p", "text", `{"text":"hi"}`, nil)); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+
+	waitForProcessorCalls(t, processor, 1)
+	waitForSentMessages(t, sender, 1)
+	waitForReactionAdds(t, sender, 1)
+	if got := len(sender.snapshot().reactionDeletes); got != 0 {
+		t.Fatalf("reaction deletes immediately after reply = %d, want none", got)
+	}
+	waitForReactionDeletes(t, sender, 1)
 }
 
 func TestHandleMessageReturnsBeforeProcessorFinishes(t *testing.T) {

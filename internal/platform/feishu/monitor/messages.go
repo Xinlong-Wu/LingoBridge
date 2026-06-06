@@ -15,6 +15,7 @@ type textContent struct {
 type incomingMessage struct {
 	UserID      string
 	ChatID      string
+	MessageID   string
 	Text        string
 	Unsupported bool
 }
@@ -25,6 +26,7 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1) (inco
 	}
 	msg := event.Event.Message
 	chatID := deref(msg.ChatId)
+	messageID := deref(msg.MessageId)
 	if chatID == "" {
 		return incomingMessage{}, false
 	}
@@ -47,15 +49,15 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1) (inco
 	}
 
 	if deref(msg.MessageType) != "text" {
-		return incomingMessage{UserID: userKey, ChatID: chatID, Unsupported: true}, true
+		return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, Unsupported: true}, true
 	}
 
 	text, err := extractText(deref(msg.Content), msg.Mentions)
 	if err != nil {
 		feishuLog.Warn(ctx, "parse text message: %v", err)
-		return incomingMessage{UserID: userKey, ChatID: chatID, Unsupported: true}, true
+		return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, Unsupported: true}, true
 	}
-	return incomingMessage{UserID: userKey, ChatID: chatID, Text: text}, true
+	return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, Text: text}, true
 }
 
 func mentionsBot(mentions []*larkim.MentionEvent) bool {

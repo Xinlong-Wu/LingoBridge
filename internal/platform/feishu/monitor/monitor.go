@@ -71,6 +71,7 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 		eventCommands: map[string][]string{},
 		deduper:       newEventDeduper(defaultFeishuDedupeTTL),
 		runCtx:        ctx,
+		reactionDelay: feishuReactionClearDelay,
 	}
 
 	d := dispatcher.NewEventDispatcher("", "")

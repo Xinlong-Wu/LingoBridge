@@ -11,6 +11,8 @@ import (
 
 type textSender interface {
 	SendText(ctx context.Context, chatID, text string) error
+	AddReaction(ctx context.Context, messageID, emojiType string) (string, error)
+	DeleteReaction(ctx context.Context, messageID, reactionID string) error
 }
 
 type sdkSender struct {
@@ -36,6 +38,41 @@ func (s *sdkSender) SendText(ctx context.Context, chatID, text string) error {
 	}
 	if !resp.Success() {
 		return fmt.Errorf("send feishu message code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+func (s *sdkSender) AddReaction(ctx context.Context, messageID, emojiType string) (string, error) {
+	req := larkim.NewCreateMessageReactionReqBuilder().
+		MessageId(messageID).
+		Body(larkim.NewCreateMessageReactionReqBodyBuilder().
+			ReactionType(larkim.NewEmojiBuilder().EmojiType(emojiType).Build()).
+			Build()).
+		Build()
+	resp, err := s.client.Im.MessageReaction.Create(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("add feishu reaction: %w", err)
+	}
+	if !resp.Success() {
+		return "", fmt.Errorf("add feishu reaction code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	if resp.Data == nil || resp.Data.ReactionId == nil || *resp.Data.ReactionId == "" {
+		return "", fmt.Errorf("add feishu reaction missing reaction_id")
+	}
+	return *resp.Data.ReactionId, nil
+}
+
+func (s *sdkSender) DeleteReaction(ctx context.Context, messageID, reactionID string) error {
+	req := larkim.NewDeleteMessageReactionReqBuilder().
+		MessageId(messageID).
+		ReactionId(reactionID).
+		Build()
+	resp, err := s.client.Im.MessageReaction.Delete(ctx, req)
+	if err != nil {
+		return fmt.Errorf("delete feishu reaction: %w", err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("delete feishu reaction code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
 }

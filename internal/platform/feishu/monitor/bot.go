@@ -2,6 +2,8 @@ package monitor
 
 import (
 	"context"
+	"strings"
+	"time"
 
 	"lingobridge/internal/core"
 	"lingobridge/internal/store"
@@ -9,7 +11,11 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
-const unsupportedMessageText = "暂不支持此类飞书消息，请发送文字。"
+const (
+	unsupportedMessageText        = "暂不支持此类飞书消息，请发送文字。"
+	feishuProcessingReactionEmoji = "Typing"
+	feishuReactionClearDelay      = 1500 * time.Millisecond
+)
 
 type textProcessor interface {
 	Handle(ctx context.Context, msg core.InboundMessage, sender core.Sender) error
@@ -21,6 +27,7 @@ type bot struct {
 	eventCommands map[string][]string
 	deduper       *eventDeduper
 	runCtx        context.Context
+	reactionDelay time.Duration
 }
 
 type feishuResponder struct {
@@ -68,6 +75,8 @@ func (b *bot) processMessage(in incomingMessage) {
 		}
 		return
 	}
+	stopReaction := b.startProcessingReaction(ctx, in)
+	defer stopReaction()
 	if err := b.handler.Handle(ctx, core.InboundMessage{
 		Platform:    store.PlatformFeishu,
 		UserKey:     in.UserID,
@@ -75,6 +84,46 @@ func (b *bot) processMessage(in incomingMessage) {
 		LLMText:     in.Text,
 	}, resp); err != nil {
 		feishuLog.Warn(ctx, "process feishu message failed user=%s chat=%s: %v", in.UserID, in.ChatID, err)
+	}
+}
+
+func (b *bot) startProcessingReaction(ctx context.Context, in incomingMessage) func() {
+	if in.MessageID == "" || strings.HasPrefix(strings.TrimSpace(in.Text), "/") {
+		return func() {}
+	}
+	reactionID, err := b.sender.AddReaction(ctx, in.MessageID, feishuProcessingReactionEmoji)
+	if err != nil {
+		feishuLog.Warn(ctx, "add feishu reaction failed message=%s emoji=%s: %v", in.MessageID, feishuProcessingReactionEmoji, err)
+		return func() {}
+	}
+	return func() {
+		if !sleepContext(ctx, b.reactionClearDelay()) {
+			return
+		}
+		if err := b.sender.DeleteReaction(ctx, in.MessageID, reactionID); err != nil {
+			feishuLog.Warn(ctx, "delete feishu reaction failed message=%s reaction=%s: %v", in.MessageID, reactionID, err)
+		}
+	}
+}
+
+func (b *bot) reactionClearDelay() time.Duration {
+	if b.reactionDelay <= 0 {
+		return 0
+	}
+	return b.reactionDelay
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
