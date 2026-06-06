@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,22 +14,46 @@ import (
 	"lingobridge/internal/store"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 type fakeProcessor struct {
+	mu          sync.Mutex
 	userID      string
 	text        string
 	commandText string
 	called      bool
+	calls       int
+	started     chan struct{}
+	release     chan struct{}
 }
 
 func (f *fakeProcessor) Handle(ctx context.Context, msg core.InboundMessage, sender core.Sender) error {
+	f.mu.Lock()
 	f.called = true
 	f.userID = msg.UserKey
 	f.text = msg.LLMText
 	f.commandText = msg.CommandText
+	f.calls++
+	started := f.started
+	release := f.release
+	f.mu.Unlock()
+	if started != nil {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return sender.Send(ctx, core.OutboundMessage{Text: "ok"})
 }
 
@@ -38,6 +63,7 @@ type sentText struct {
 }
 
 type fakeSender struct {
+	mu       sync.Mutex
 	chatID   string
 	text     string
 	called   bool
@@ -45,11 +71,73 @@ type fakeSender struct {
 }
 
 func (f *fakeSender) SendText(ctx context.Context, chatID, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.called = true
 	f.chatID = chatID
 	f.text = text
 	f.messages = append(f.messages, sentText{chatID: chatID, text: text})
 	return nil
+}
+
+func (f *fakeProcessor) snapshot() fakeProcessor {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return fakeProcessor{
+		userID:      f.userID,
+		text:        f.text,
+		commandText: f.commandText,
+		called:      f.called,
+		calls:       f.calls,
+	}
+}
+
+func (f *fakeSender) snapshot() fakeSender {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	messages := append([]sentText(nil), f.messages...)
+	return fakeSender{
+		chatID:   f.chatID,
+		text:     f.text,
+		called:   f.called,
+		messages: messages,
+	}
+}
+
+func waitForProcessorCalls(t *testing.T, processor *fakeProcessor, want int) fakeProcessor {
+	t.Helper()
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snap := processor.snapshot()
+		if snap.calls >= want {
+			return snap
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("processor calls = %d, want at least %d", snap.calls, want)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForSentMessages(t *testing.T, sender *fakeSender, want int) fakeSender {
+	t.Helper()
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snap := sender.snapshot()
+		if len(snap.messages) >= want {
+			return snap
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("sent messages = %d, want at least %d", len(snap.messages), want)
+		case <-ticker.C:
+		}
+	}
 }
 
 func TestNormalizeP2PTextMessage(t *testing.T) {
@@ -89,11 +177,12 @@ func TestHandleUnsupportedMessageSendsNotice(t *testing.T) {
 	if err := b.handleMessage(context.Background(), feishuEvent("p2p", "image", `{}`, nil)); err != nil {
 		t.Fatalf("handleMessage returned error: %v", err)
 	}
-	if processor.called {
+	senderSnap := waitForSentMessages(t, sender, 1)
+	if processor.snapshot().called {
 		t.Fatal("processor was called for unsupported message")
 	}
-	if !sender.called || sender.chatID != "oc_chat" || sender.text != unsupportedMessageText {
-		t.Fatalf("sender = %#v", sender)
+	if !senderSnap.called || senderSnap.chatID != "oc_chat" || senderSnap.text != unsupportedMessageText {
+		t.Fatalf("sender = %#v", senderSnap)
 	}
 }
 
@@ -105,11 +194,13 @@ func TestHandleTextMessageUsesBridgeAndReplies(t *testing.T) {
 	if err := b.handleMessage(context.Background(), feishuEvent("p2p", "text", `{"text":"hi"}`, nil)); err != nil {
 		t.Fatalf("handleMessage returned error: %v", err)
 	}
-	if !processor.called || processor.userID != "feishu:ou_user" || processor.text != "hi" {
-		t.Fatalf("processor = %#v", processor)
+	processorSnap := waitForProcessorCalls(t, processor, 1)
+	senderSnap := waitForSentMessages(t, sender, 1)
+	if !processorSnap.called || processorSnap.userID != "feishu:ou_user" || processorSnap.text != "hi" {
+		t.Fatalf("processor = %#v", processorSnap)
 	}
-	if !sender.called || sender.chatID != "oc_chat" || sender.text != "ok" {
-		t.Fatalf("sender = %#v", sender)
+	if !senderSnap.called || senderSnap.chatID != "oc_chat" || senderSnap.text != "ok" {
+		t.Fatalf("sender = %#v", senderSnap)
 	}
 }
 
@@ -121,9 +212,130 @@ func TestHandleHelpMessagePassesCommandToBridge(t *testing.T) {
 	if err := b.handleMessage(context.Background(), feishuEvent("p2p", "text", `{"text":"/help"}`, nil)); err != nil {
 		t.Fatalf("handleMessage returned error: %v", err)
 	}
-	if !processor.called || processor.userID != "feishu:ou_user" || processor.commandText != "/help" || processor.text != "/help" {
-		t.Fatalf("processor = %#v", processor)
+	processorSnap := waitForProcessorCalls(t, processor, 1)
+	if !processorSnap.called || processorSnap.userID != "feishu:ou_user" || processorSnap.commandText != "/help" || processorSnap.text != "/help" {
+		t.Fatalf("processor = %#v", processorSnap)
 	}
+}
+
+func TestHandleDuplicateMessageIDIgnored(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender}
+	event := feishuEventWithIDs("p2p", "text", `{"text":"hi"}`, nil, "om_same", "event_one")
+
+	if err := b.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("first handleMessage returned error: %v", err)
+	}
+	if err := b.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("second handleMessage returned error: %v", err)
+	}
+
+	waitForProcessorCalls(t, processor, 1)
+	waitForSentMessages(t, sender, 1)
+	time.Sleep(50 * time.Millisecond)
+	if got := processor.snapshot().calls; got != 1 {
+		t.Fatalf("processor calls = %d, want one", got)
+	}
+	if got := len(sender.snapshot().messages); got != 1 {
+		t.Fatalf("sent messages = %d, want one", got)
+	}
+}
+
+func TestHandleDuplicateFallsBackToEventID(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender}
+	event := feishuEventWithIDs("p2p", "text", `{"text":"hi"}`, nil, "", "event_same")
+
+	if err := b.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("first handleMessage returned error: %v", err)
+	}
+	if err := b.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("second handleMessage returned error: %v", err)
+	}
+
+	waitForProcessorCalls(t, processor, 1)
+	time.Sleep(50 * time.Millisecond)
+	if got := processor.snapshot().calls; got != 1 {
+		t.Fatalf("processor calls = %d, want one", got)
+	}
+}
+
+func TestHandleDifferentMessageIDsProcessed(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender}
+
+	if err := b.handleMessage(context.Background(), feishuEventWithIDs("p2p", "text", `{"text":"one"}`, nil, "om_one", "event_one")); err != nil {
+		t.Fatalf("first handleMessage returned error: %v", err)
+	}
+	if err := b.handleMessage(context.Background(), feishuEventWithIDs("p2p", "text", `{"text":"two"}`, nil, "om_two", "event_two")); err != nil {
+		t.Fatalf("second handleMessage returned error: %v", err)
+	}
+
+	waitForProcessorCalls(t, processor, 2)
+	waitForSentMessages(t, sender, 2)
+	if got := processor.snapshot().calls; got != 2 {
+		t.Fatalf("processor calls = %d, want two", got)
+	}
+	if got := len(sender.snapshot().messages); got != 2 {
+		t.Fatalf("sent messages = %d, want two", got)
+	}
+}
+
+func TestHandleDuplicateUnsupportedMessageSendsOneNotice(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender}
+	event := feishuEventWithIDs("p2p", "image", `{}`, nil, "om_image", "event_image")
+
+	if err := b.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("first handleMessage returned error: %v", err)
+	}
+	if err := b.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("second handleMessage returned error: %v", err)
+	}
+
+	waitForSentMessages(t, sender, 1)
+	time.Sleep(50 * time.Millisecond)
+	if processor.snapshot().called {
+		t.Fatal("processor was called for unsupported message")
+	}
+	messages := sender.snapshot().messages
+	if len(messages) != 1 || messages[0].text != unsupportedMessageText {
+		t.Fatalf("messages = %#v, want one unsupported notice", messages)
+	}
+}
+
+func TestHandleMessageReturnsBeforeProcessorFinishes(t *testing.T) {
+	processor := &fakeProcessor{started: make(chan struct{}), release: make(chan struct{})}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender}
+	done := make(chan error, 1)
+
+	go func() {
+		done <- b.handleMessage(context.Background(), feishuEvent("p2p", "text", `{"text":"hi"}`, nil))
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("handleMessage returned error: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("handleMessage did not return before processor finished")
+	}
+	select {
+	case <-processor.started:
+	case <-time.After(time.Second):
+		t.Fatal("processor did not start")
+	}
+	if got := len(sender.snapshot().messages); got != 0 {
+		t.Fatalf("sent messages before release = %d, want none", got)
+	}
+	close(processor.release)
+	waitForSentMessages(t, sender, 1)
 }
 
 func TestConfigureP2PChatCreatedSendsCommandOutput(t *testing.T) {
@@ -374,7 +586,14 @@ func (b *blockingClient) Close() {
 }
 
 func feishuEvent(chatType, messageType, content string, mentions []*larkim.MentionEvent) *larkim.P2MessageReceiveV1 {
+	return feishuEventWithIDs(chatType, messageType, content, mentions, "om_message", "event_message")
+}
+
+func feishuEventWithIDs(chatType, messageType, content string, mentions []*larkim.MentionEvent, messageID, eventID string) *larkim.P2MessageReceiveV1 {
 	return &larkim.P2MessageReceiveV1{
+		EventV2Base: &larkevent.EventV2Base{
+			Header: &larkevent.EventHeader{EventID: eventID},
+		},
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: larkim.NewEventSenderBuilder().
 				SenderId(larkim.NewUserIdBuilder().OpenId("ou_user").Build()).
@@ -383,6 +602,7 @@ func feishuEvent(chatType, messageType, content string, mentions []*larkim.Menti
 			Message: larkim.NewEventMessageBuilder().
 				ChatId("oc_chat").
 				ChatType(chatType).
+				MessageId(messageID).
 				MessageType(messageType).
 				Content(content).
 				Mentions(mentions).

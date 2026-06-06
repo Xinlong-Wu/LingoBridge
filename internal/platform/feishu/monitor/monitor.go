@@ -69,6 +69,8 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 		handler:       handler,
 		sender:        &sdkSender{client: restClient},
 		eventCommands: map[string][]string{},
+		deduper:       newEventDeduper(defaultFeishuDedupeTTL),
+		runCtx:        ctx,
 	}
 
 	d := dispatcher.NewEventDispatcher("", "")
