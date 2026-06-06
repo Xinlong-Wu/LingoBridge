@@ -30,23 +30,6 @@ type LLMModelConfig struct {
 	Endpoint string `yaml:"endpoint"` // Provider endpoint mode
 }
 
-// PlatformsConfig holds platform-specific configuration.
-type PlatformsConfig struct {
-	Feishu FeishuConfig `yaml:"feishu"`
-}
-
-// FeishuConfig holds Feishu Open Platform account configuration.
-type FeishuConfig struct {
-	Accounts map[string]FeishuAccountConfig `yaml:"accounts"`
-}
-
-// FeishuAccountConfig holds one Feishu self-built app account.
-type FeishuAccountConfig struct {
-	AppID     string `yaml:"app_id"`
-	AppSecret string `yaml:"app_secret"`
-	BaseURL   string `yaml:"base_url"`
-}
-
 // ResolvedModel is an effective LLM profile selected for a user.
 type ResolvedModel struct {
 	Name     string
@@ -59,14 +42,13 @@ type ResolvedModel struct {
 
 // Config is the top-level configuration.
 type Config struct {
-	LLM       LLMConfig       `yaml:"llm"`
-	Platforms PlatformsConfig `yaml:"platforms"`
+	LLM       LLMConfig            `yaml:"llm"`
+	Platforms map[string]yaml.Node `yaml:"platforms,omitempty"`
 }
 
 const DefaultSystemPrompt = "You are a helpful assistant."
 const DefaultModelEndpoint = "chat"
 const DefaultAnthropicEndpoint = "messages"
-const DefaultFeishuBaseURL = "https://open.feishu.cn"
 
 var (
 	// ErrConfigNotFound is returned when ~/.lingobridge/config.yaml does not exist.
@@ -82,9 +64,6 @@ func DefaultConfig() Config {
 			Models:       map[string]LLMModelConfig{},
 			SystemPrompt: DefaultSystemPrompt,
 			MaxHistory:   0, // 0 = no limit
-		},
-		Platforms: PlatformsConfig{
-			Feishu: FeishuConfig{Accounts: map[string]FeishuAccountConfig{}},
 		},
 	}
 }
@@ -116,22 +95,58 @@ func ControlSocketPath() (string, error) {
 	return filepath.Join(dir, "lingobridge.sock"), nil
 }
 
-// DataDir returns the data directory (~/.lingobridge/data).
-func DataDir() (string, error) {
+// PlatformDir returns the isolated directory for one platform.
+func PlatformDir(platformID string) (string, error) {
+	if err := ValidatePlatformID(platformID); err != nil {
+		return "", err
+	}
 	dir, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "platforms", platformID), nil
+}
+
+// PlatformDataDir returns the isolated data directory for one platform.
+func PlatformDataDir(platformID string) (string, error) {
+	dir, err := PlatformDir(platformID)
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(dir, "data"), nil
 }
 
-// SessionsDir returns the sessions directory (~/.lingobridge/data/sessions).
-func SessionsDir() (string, error) {
-	dir, err := DataDir()
+// PlatformDBPath returns the SQLite database path for one platform.
+func PlatformDBPath(platformID string) (string, error) {
+	dir, err := PlatformDataDir(platformID)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "sessions"), nil
+	return filepath.Join(dir, "lingobridge.db"), nil
+}
+
+// ValidatePlatformID accepts only registry-style platform identifiers.
+func ValidatePlatformID(platformID string) error {
+	if strings.TrimSpace(platformID) != platformID || platformID == "" {
+		return fmt.Errorf("platform id %q is invalid", platformID)
+	}
+	for _, r := range platformID {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return fmt.Errorf("platform id %q is invalid", platformID)
+	}
+	return nil
+}
+
+// ValidatePlatformIDs checks that all platform config keys are safe registry identifiers.
+func ValidatePlatformIDs(platforms map[string]yaml.Node) error {
+	for platformID := range platforms {
+		if err := ValidatePlatformID(platformID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Load reads and parses the config file.
@@ -169,11 +184,13 @@ func Load() (Config, error) {
 	if cfg.LLM.Models == nil {
 		cfg.LLM.Models = map[string]LLMModelConfig{}
 	}
-	if cfg.Platforms.Feishu.Accounts == nil {
-		cfg.Platforms.Feishu.Accounts = map[string]FeishuAccountConfig{}
+	if cfg.Platforms == nil {
+		cfg.Platforms = map[string]yaml.Node{}
+	}
+	if err := ValidatePlatformIDs(cfg.Platforms); err != nil {
+		return cfg, err
 	}
 	cfg.LLM.ApplyDefaults()
-	cfg.Platforms.Feishu.ApplyDefaults()
 
 	return cfg, nil
 }
@@ -181,7 +198,12 @@ func Load() (Config, error) {
 // Save writes the config to disk, creating directories as needed.
 func Save(cfg Config) error {
 	cfg.LLM.ApplyDefaults()
-	cfg.Platforms.Feishu.ApplyDefaults()
+	if cfg.Platforms == nil {
+		cfg.Platforms = map[string]yaml.Node{}
+	}
+	if err := ValidatePlatformIDs(cfg.Platforms); err != nil {
+		return err
+	}
 
 	path, err := ConfigPath()
 	if err != nil {
@@ -207,7 +229,12 @@ func Save(cfg Config) error {
 // Digest returns a stable hash of the effective config.
 func Digest(cfg Config) (string, error) {
 	cfg.LLM.ApplyDefaults()
-	cfg.Platforms.Feishu.ApplyDefaults()
+	if cfg.Platforms == nil {
+		cfg.Platforms = map[string]yaml.Node{}
+	}
+	if err := ValidatePlatformIDs(cfg.Platforms); err != nil {
+		return "", err
+	}
 	data, err := yaml.Marshal(&cfg)
 	if err != nil {
 		return "", fmt.Errorf("marshal config: %w", err)
@@ -216,26 +243,14 @@ func Digest(cfg Config) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// EnsureDataDir creates the data directory if it doesn't exist.
-func EnsureDataDir() (string, error) {
-	dir, err := DataDir()
+// EnsurePlatformDataDir creates a platform data directory if it doesn't exist.
+func EnsurePlatformDataDir(platformID string) (string, error) {
+	dir, err := PlatformDataDir(platformID)
 	if err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", fmt.Errorf("create data dir: %w", err)
-	}
-	return dir, nil
-}
-
-// EnsureSessionsDir creates the sessions directory if it doesn't exist.
-func EnsureSessionsDir() (string, error) {
-	dir, err := SessionsDir()
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", fmt.Errorf("create sessions dir: %w", err)
+		return "", fmt.Errorf("create platform data dir: %w", err)
 	}
 	return dir, nil
 }
@@ -250,22 +265,6 @@ func (c *LLMConfig) ApplyDefaults() {
 			model.Endpoint = DefaultEndpointForProvider(model.Provider)
 			c.Models[name] = model
 		}
-	}
-}
-
-// ApplyDefaults fills optional Feishu account fields.
-func (c *FeishuConfig) ApplyDefaults() {
-	if c.Accounts == nil {
-		c.Accounts = map[string]FeishuAccountConfig{}
-	}
-	for name, account := range c.Accounts {
-		account.AppID = strings.TrimSpace(account.AppID)
-		account.AppSecret = strings.TrimSpace(account.AppSecret)
-		account.BaseURL = strings.TrimRight(strings.TrimSpace(account.BaseURL), "/")
-		if account.BaseURL == "" {
-			account.BaseURL = DefaultFeishuBaseURL
-		}
-		c.Accounts[name] = account
 	}
 }
 
@@ -366,65 +365,6 @@ func AddModel(cfg *Config, name string, model LLMModelConfig, makeDefault bool) 
 		cfg.LLM.MaxHistory = 0
 	}
 	return nil
-}
-
-// UpsertFeishuAccount writes a Feishu account configuration by account name.
-func UpsertFeishuAccount(cfg *Config, name string, account FeishuAccountConfig) error {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return fmt.Errorf("feishu account name is required")
-	}
-	account.AppID = strings.TrimSpace(account.AppID)
-	account.AppSecret = strings.TrimSpace(account.AppSecret)
-	account.BaseURL = strings.TrimRight(strings.TrimSpace(account.BaseURL), "/")
-	if account.AppID == "" {
-		return fmt.Errorf("platforms.feishu.accounts.%s.app_id is required", name)
-	}
-	if account.AppSecret == "" {
-		return fmt.Errorf("platforms.feishu.accounts.%s.app_secret is required", name)
-	}
-	if account.BaseURL == "" {
-		account.BaseURL = DefaultFeishuBaseURL
-	}
-	if cfg.Platforms.Feishu.Accounts == nil {
-		cfg.Platforms.Feishu.Accounts = map[string]FeishuAccountConfig{}
-	}
-	cfg.Platforms.Feishu.Accounts[name] = account
-	return nil
-}
-
-// RemoveFeishuAccount removes a Feishu account configuration by account name.
-func RemoveFeishuAccount(cfg *Config, name string) {
-	name = strings.TrimSpace(name)
-	if name == "" || cfg.Platforms.Feishu.Accounts == nil {
-		return
-	}
-	delete(cfg.Platforms.Feishu.Accounts, name)
-}
-
-// ResolveFeishuAccount returns a Feishu account configuration by account name.
-func (c Config) ResolveFeishuAccount(name string) (FeishuAccountConfig, bool, error) {
-	name = strings.TrimSpace(name)
-	if name == "" || c.Platforms.Feishu.Accounts == nil {
-		return FeishuAccountConfig{}, false, nil
-	}
-	account, ok := c.Platforms.Feishu.Accounts[name]
-	if !ok {
-		return FeishuAccountConfig{}, false, nil
-	}
-	account.AppID = strings.TrimSpace(account.AppID)
-	account.AppSecret = strings.TrimSpace(account.AppSecret)
-	account.BaseURL = strings.TrimRight(strings.TrimSpace(account.BaseURL), "/")
-	if account.BaseURL == "" {
-		account.BaseURL = DefaultFeishuBaseURL
-	}
-	if account.AppID == "" {
-		return account, true, fmt.Errorf("platforms.feishu.accounts.%s.app_id is required", name)
-	}
-	if account.AppSecret == "" {
-		return account, true, fmt.Errorf("platforms.feishu.accounts.%s.app_secret is required", name)
-	}
-	return account, true, nil
 }
 
 // ModelNames returns sorted model profile names.

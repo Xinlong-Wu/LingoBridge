@@ -190,12 +190,54 @@ func newFlagSet(name string) *flag.FlagSet {
 	return fs
 }
 
-func openStore() (*store.Store, error) {
-	st, err := store.Open()
+func openStore(platformID string) (*store.Store, error) {
+	st, err := store.Open(platformID)
 	if err != nil {
-		return nil, fmt.Errorf("open store: %w", err)
+		return nil, fmt.Errorf("open %s store: %w", platformID, err)
 	}
 	return st, nil
+}
+
+type accountCatalog struct {
+	stores   map[string]*store.Store
+	accounts []store.Account
+}
+
+func openAccountCatalog(registry *platform.Registry) (*accountCatalog, error) {
+	catalog := &accountCatalog{stores: map[string]*store.Store{}}
+	for _, platformID := range registry.PlatformNames() {
+		st, err := openStore(platformID)
+		if err != nil {
+			catalog.Close()
+			return nil, err
+		}
+		catalog.stores[platformID] = st
+		accounts, err := st.ListAccounts()
+		if err != nil {
+			catalog.Close()
+			return nil, fmt.Errorf("list %s accounts: %w", platformID, err)
+		}
+		catalog.accounts = append(catalog.accounts, accounts...)
+	}
+	return catalog, nil
+}
+
+func (c *accountCatalog) Close() {
+	for _, st := range c.stores {
+		_ = st.Close()
+	}
+}
+
+func (c *accountCatalog) ListAccounts() ([]store.Account, error) {
+	accounts := make([]store.Account, 0)
+	for platformID, st := range c.stores {
+		platformAccounts, err := st.ListAccounts()
+		if err != nil {
+			return nil, fmt.Errorf("list %s accounts: %w", platformID, err)
+		}
+		accounts = append(accounts, platformAccounts...)
+	}
+	return accounts, nil
 }
 
 func ensureConfigInitialized(in io.Reader, out io.Writer) error {
@@ -343,16 +385,21 @@ func promptCLIValue(reader *bufio.Reader, out io.Writer, prompt string, required
 }
 
 type runtimeState struct {
-	store   *store.Store
-	mu      sync.RWMutex
-	cfg     config.Config
-	sm      *session.Manager
-	handler *core.Bot
-	digest  string
+	stores   map[string]*store.Store
+	mu       sync.RWMutex
+	cfg      config.Config
+	runtimes map[string]platformRuntime
+	digest   string
 }
 
-func newRuntimeState(st *store.Store, cfg config.Config) (*runtimeState, error) {
-	rs := &runtimeState{store: st}
+type platformRuntime struct {
+	store   *store.Store
+	sm      *session.Manager
+	handler *core.Bot
+}
+
+func newRuntimeState(stores map[string]*store.Store, cfg config.Config) (*runtimeState, error) {
+	rs := &runtimeState{stores: stores}
 	if err := rs.updateConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -363,33 +410,40 @@ func (r *runtimeState) updateConfig(cfg config.Config) error {
 	if err := cfg.LLM.Validate(); err != nil {
 		return fmt.Errorf("validate llm config: %w", err)
 	}
-	resetCount, err := r.store.ResetUnavailableUserModels(cfg.LLM.DefaultModel, cfg.LLM.ModelNames())
-	if err != nil {
-		return fmt.Errorf("reset unavailable user models: %w", err)
-	}
-	if resetCount > 0 {
-		log.Printf("Reset %d user model preference(s) to default model %q", resetCount, cfg.LLM.DefaultModel)
+	runtimes := make(map[string]platformRuntime, len(r.stores))
+	for platformID, st := range r.stores {
+		resetCount, err := st.ResetUnavailableUserModels(cfg.LLM.DefaultModel, cfg.LLM.ModelNames())
+		if err != nil {
+			return fmt.Errorf("reset %s user models: %w", platformID, err)
+		}
+		if resetCount > 0 {
+			log.Printf("Reset %d %s user model preference(s) to default model %q", resetCount, platformID, cfg.LLM.DefaultModel)
+		}
+		sm := session.NewManager(st, cfg.LLM)
+		runtimes[platformID] = platformRuntime{
+			store:   st,
+			sm:      sm,
+			handler: core.New(sm, cfg.LLM),
+		}
 	}
 	digest, err := config.Digest(cfg)
 	if err != nil {
 		return err
 	}
-	sm := session.NewManager(r.store, cfg.LLM)
-	handler := core.New(sm, cfg.LLM)
 	r.mu.Lock()
 	r.cfg = cfg
-	r.sm = sm
-	r.handler = handler
+	r.runtimes = runtimes
 	r.digest = digest
 	r.mu.Unlock()
 	logConfig(cfg)
 	return nil
 }
 
-func (r *runtimeState) snapshot() (config.Config, *session.Manager, *core.Bot) {
+func (r *runtimeState) snapshot(platformID string) (config.Config, platformRuntime, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.cfg, r.sm, r.handler
+	rt, ok := r.runtimes[platformID]
+	return r.cfg, rt, ok
 }
 
 func (r *runtimeState) signatureExtra(acc store.Account) string {
@@ -431,18 +485,18 @@ func cmdAccountNewWithRegistry(args []string, registry *platform.Registry) error
 		return errUsage
 	}
 
-	st, err := openStore()
+	catalog, err := openAccountCatalog(registry)
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer catalog.Close()
 
-	accounts, err := st.ListAccounts()
-	if err != nil {
-		return fmt.Errorf("list accounts: %w", err)
+	st, ok := catalog.stores[def.ID]
+	if !ok {
+		return fmt.Errorf("store for platform %q is not open", def.ID)
 	}
 	exists := func(name string) bool {
-		for _, a := range accounts {
+		for _, a := range catalog.accounts {
 			if a.Name == name {
 				return true
 			}
@@ -464,7 +518,11 @@ func cmdAccountNewWithRegistry(args []string, registry *platform.Registry) error
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	if err := def.CreateAccount(platform.AccountNewContext{Store: st, Config: &cfg}, opts); err != nil {
+	platformCtx, err := core.NewPlatformContext(def.ID, &cfg, st, config.Save)
+	if err != nil {
+		return err
+	}
+	if err := def.CreateOrUpdateAccount(platform.AccountNewContext{Platform: platformCtx}, opts); err != nil {
 		return err
 	}
 	notifyRunningProcess()
@@ -486,17 +544,17 @@ func cmdRun(args []string) error {
 
 	logBuildInfo()
 
-	st, err := openStore()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-
-	state, err := newRuntimeState(st, cfg)
-	if err != nil {
-		return err
-	}
 	registry, err := platform.NewDefaultRegistry()
+	if err != nil {
+		return err
+	}
+	catalog, err := openAccountCatalog(registry)
+	if err != nil {
+		return err
+	}
+	defer catalog.Close()
+
+	state, err := newRuntimeState(catalog.stores, cfg)
 	if err != nil {
 		return err
 	}
@@ -504,15 +562,23 @@ func cmdRun(args []string) error {
 	runCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
-	supervisor := runner.NewSupervisor(st, func(ctx context.Context, acc store.Account) error {
-		cfg, sm, coreHandler := state.snapshot()
+	supervisor := runner.NewSupervisor(catalog, func(ctx context.Context, acc store.Account) error {
+		cfg, rt, ok := state.snapshot(acc.Platform)
+		if !ok {
+			return fmt.Errorf("runtime for platform %q is not available", acc.Platform)
+		}
 		def, ok := registry.LookupAccountPlatform(acc.Platform)
 		if !ok {
 			return fmt.Errorf("unsupported account platform %q for account %s", acc.Platform, acc.Name)
 		}
+		platformCtx, err := core.NewPlatformContext(acc.Platform, &cfg, rt.store, nil)
+		if err != nil {
+			return err
+		}
 		runtimePlatform, err := def.RuntimePlatform(platform.RuntimeContext{
-			Store:     st,
-			Sessions:  sm,
+			Store:     rt.store,
+			Sessions:  rt.sm,
+			Platform:  platformCtx,
 			Config:    cfg,
 			LLMConfig: cfg.LLM,
 			Account:   acc,
@@ -520,7 +586,7 @@ func cmdRun(args []string) error {
 		if err != nil {
 			return err
 		}
-		return runtimePlatform.Run(ctx, coreHandler)
+		return runtimePlatform.Run(ctx, rt.handler)
 	}, *targetAccount)
 	supervisor.SetSignatureExtra(state.signatureExtra)
 
@@ -561,13 +627,17 @@ func cmdRun(args []string) error {
 }
 
 func cmdAccountList(args []string) error {
-	st, err := openStore()
+	registry, err := platform.NewDefaultRegistry()
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	catalog, err := openAccountCatalog(registry)
+	if err != nil {
+		return err
+	}
+	defer catalog.Close()
 
-	accounts, err := st.ListAccounts()
+	accounts, err := catalog.ListAccounts()
 	if err != nil {
 		return fmt.Errorf("list accounts: %w", err)
 	}
@@ -583,11 +653,7 @@ func cmdAccountList(args []string) error {
 		if !a.Enabled {
 			status = "✗"
 		}
-		platform := a.Platform
-		if platform == "" {
-			platform = store.PlatformWeChat
-		}
-		fmt.Printf("  %s %s [%s] (id: %s)\n", status, a.Name, platform, a.ID)
+		fmt.Printf("  %s %s [%s] (id: %s)\n", status, a.Name, a.Platform, a.ID)
 	}
 	return nil
 }
@@ -599,13 +665,17 @@ func cmdAccountDelete(args []string) error {
 	}
 	name := strings.Join(args, " ")
 
-	st, err := openStore()
+	registry, err := platform.NewDefaultRegistry()
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	catalog, err := openAccountCatalog(registry)
+	if err != nil {
+		return err
+	}
+	defer catalog.Close()
 
-	accounts, err := st.ListAccounts()
+	accounts, err := catalog.ListAccounts()
 	if err != nil {
 		return fmt.Errorf("list accounts: %w", err)
 	}
@@ -621,18 +691,12 @@ func cmdAccountDelete(args []string) error {
 		return fmt.Errorf("account %q not found", name)
 	}
 
+	st, ok := catalog.stores[target.Platform]
+	if !ok {
+		return fmt.Errorf("store for platform %q is not open", target.Platform)
+	}
 	if err := st.DeleteAccount(target.ID); err != nil {
 		return fmt.Errorf("delete account: %w", err)
-	}
-	if target.Platform == store.PlatformFeishu {
-		cfg, err := config.Load()
-		if err != nil {
-			return fmt.Errorf("load config: %w", err)
-		}
-		config.RemoveFeishuAccount(&cfg, target.Name)
-		if err := config.Save(cfg); err != nil {
-			return fmt.Errorf("save config: %w", err)
-		}
 	}
 
 	fmt.Printf("Deleted account: %s\n", name)

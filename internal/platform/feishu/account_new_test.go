@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"lingobridge/internal/config"
+	"lingobridge/internal/core"
+	"lingobridge/internal/store"
 )
 
 func TestParseAccountNewFlagsPromptsForMissingCredentials(t *testing.T) {
@@ -72,5 +76,30 @@ func TestNewAccountUsesParsedPromptCredentials(t *testing.T) {
 	}
 	if acc.Name != "fsbot" || acc.UserID != "cli_prompt" || acc.CredentialsJSON != "{}" {
 		t.Fatalf("account = %#v", acc)
+	}
+}
+
+func TestUpsertAndResolveAccountConfig(t *testing.T) {
+	cfg := config.DefaultConfig()
+	platformCtx, err := core.NewPlatformContext(store.PlatformFeishu, &cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+	if err := UpsertAccountConfig(platformCtx, "fsbot", AccountConfig{
+		AppID:     " cli_xxx ",
+		AppSecret: " secret ",
+	}); err != nil {
+		t.Fatalf("UpsertAccountConfig returned error: %v", err)
+	}
+
+	account, ok, err := ResolveAccountConfig(platformCtx, "fsbot")
+	if err != nil {
+		t.Fatalf("ResolveAccountConfig returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("ResolveAccountConfig did not find account")
+	}
+	if account.AppID != "cli_xxx" || account.AppSecret != "secret" || account.BaseURL != DefaultBaseURL {
+		t.Fatalf("account = %#v", account)
 	}
 }

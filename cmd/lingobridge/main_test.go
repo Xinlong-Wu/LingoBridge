@@ -28,7 +28,7 @@ func TestCmdAccountNewFeishuSavesAccount(t *testing.T) {
 		t.Fatalf("cmdAccountNew returned error: %v", err)
 	}
 
-	st, err := store.Open()
+	st, err := store.Open(store.PlatformFeishu)
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -48,9 +48,13 @@ func TestCmdAccountNewFeishuSavesAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	feishuAccount, ok, err := cfg.ResolveFeishuAccount("fsbot")
+	platformCtx, err := core.NewPlatformContext(store.PlatformFeishu, &cfg, st, nil)
 	if err != nil {
-		t.Fatalf("ResolveFeishuAccount returned error: %v", err)
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+	feishuAccount, ok, err := feishu.ResolveAccountConfig(platformCtx, "fsbot")
+	if err != nil {
+		t.Fatalf("ResolveAccountConfig returned error: %v", err)
 	}
 	if !ok || feishuAccount.AppID != "cli_xxx" || feishuAccount.AppSecret != "secret" {
 		t.Fatalf("feishu account = %#v ok=%v", feishuAccount, ok)
@@ -80,7 +84,7 @@ func TestCmdAccountNewFeishuAliasSavesAccount(t *testing.T) {
 		t.Fatalf("cmdAccountNew returned error: %v", err)
 	}
 
-	st, err := store.Open()
+	st, err := store.Open(store.PlatformFeishu)
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -105,7 +109,7 @@ func TestCmdAccountNewWeixinAliasUsesPlatformDefinition(t *testing.T) {
 		t.Fatalf("cmdAccountNewWithRegistry returned error: %v", err)
 	}
 
-	st, err := store.Open()
+	st, err := store.Open(store.PlatformWeChat)
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -204,8 +208,8 @@ func newFakeAccountNewRegistry(t *testing.T) *platform.Registry {
 			}
 			return platform.AccountNewOptions{Name: name}, nil
 		},
-		CreateAccount: func(ctx platform.AccountNewContext, opts platform.AccountNewOptions) error {
-			return ctx.Store.SaveAccount(store.Account{
+		CreateOrUpdateAccount: func(ctx platform.AccountNewContext, opts platform.AccountNewOptions) error {
+			return ctx.Platform.DataStore().SaveAccount(store.Account{
 				ID:              "wechat:test",
 				Name:            opts.Name,
 				Platform:        store.PlatformWeChat,

@@ -38,6 +38,7 @@ llm:
   max_history: 0
 
 platforms:
+  # Each platform owns the schema under platforms.<platform>.
   feishu:
     accounts:
       fsbot:

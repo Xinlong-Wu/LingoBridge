@@ -65,9 +65,9 @@ If Feishu credentials are omitted, LingoBridge prompts for them interactively:
 ./lingobridge account new feishu --name fsbot
 ```
 
-Feishu app credentials are saved under `platforms.feishu.accounts` in
-`~/.lingobridge/config.yaml`; the SQLite account record only stores account
-metadata used to list, delete, and supervise the running adapter.
+Feishu app credentials are saved under `platforms.feishu.accounts` in the
+shared `~/.lingobridge/config.yaml`. The Feishu platform defines the schema
+inside its own `platforms.feishu` config block.
 
 For Feishu, enable bot capability and long-connection event subscription for
 `im.message.receive_v1` in the Feishu Open Platform app console. The first
@@ -96,9 +96,9 @@ when relevant config changes.
 | Command | Description |
 |---|---|
 | `account new weixin [--name <name>]` | Add a WeChat bot account via QR login and reload a running bot process |
-| `account new feishu [--name <name>] [--app-id <id>] [--app-secret <secret>] [--base-url <url>]` | Add a Feishu self-built app account, write credentials to config, and reload a running bot process |
+| `account new feishu [--name <name>] [--app-id <id>] [--app-secret <secret>] [--base-url <url>]` | Add a Feishu self-built app account, write Feishu config, and reload a running bot process |
 | `account list` | List all accounts with their platform |
-| `account delete <name>` | Delete an account, remove Feishu config credentials when applicable, and reload a running bot process |
+| `account delete <name>` | Delete an account from its platform data domain and reload a running bot process |
 | `model add <name> [--provider <openai\|anthropic>] [--base-url <url>] [--api-key <key>] [--id <model-id>] [--endpoint <mode>] [--default]` | Add an LLM model profile to config and optionally make it the default |
 | `run [--account <name>]` | Start the bot loop |
 
@@ -138,8 +138,8 @@ Quoted media is not downloaded or interpreted; only the current text is sent.
 
 Current image messages are downloaded from WeChat media/CDN and passed to the
 selected model through LingoBridge's provider-neutral attachment interface. With
-OpenAI Responses model profiles, images are first saved under
-`data/media/{user}/{session}/`, then uploaded to the OpenAI Files API with
+OpenAI Responses model profiles, images are first saved under the current
+platform's `data/media/{user}/{session}/`, then uploaded to the OpenAI Files API with
 `purpose=vision` and sent as `input_image` parts. The JSONL history stores both
 a provider reference (`ref_provider`, `ref_type`, `ref_id`) and `local_path`, so
 later turns can still refer to the image while that message remains inside
@@ -192,13 +192,17 @@ are not sent back to Feishu yet.
 | `llm.models.<name>.endpoint` | `chat` | Endpoint mode: `chat` or `responses` for OpenAI-compatible APIs, `messages` for Anthropic |
 | `llm.system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `llm.max_history` | `0` | Max historical messages per request. `0` = no limit |
-| `platforms.feishu.accounts.<name>.app_id` | — | Feishu app ID for the account named `<name>` |
-| `platforms.feishu.accounts.<name>.app_secret` | — | Feishu app secret |
+| `platforms.<platform>` | — | Platform-private config block; each platform owns its internal schema |
+| `platforms.feishu.accounts.<name>.app_id` | — | Feishu app ID for account `<name>` |
+| `platforms.feishu.accounts.<name>.app_secret` | — | Feishu app secret for account `<name>` |
 | `platforms.feishu.accounts.<name>.base_url` | `https://open.feishu.cn` | Feishu Open Platform base URL |
-
 Each model profile is independent. `provider`, `base_url`, `api_key`, and `id` are required; `endpoint` is optional and defaults to `chat`.
 For Anthropic model profiles, an omitted `endpoint` defaults to `messages`.
 Top-level `llm.model`, `llm.provider`, `llm.base_url`, `llm.api_key`, and `llm.endpoint` are no longer supported.
+The core config loader preserves `platforms.<platform>` as platform-private
+YAML and only validates that platform keys are safe registry IDs. Platform
+packages decode and validate their own config through core's scoped platform
+config API.
 On startup and reload, `run` validates the default model profile and resets any
 saved per-user model preference that no longer exists back to
 `llm.default_model`.
@@ -207,34 +211,54 @@ saved per-user model preference that no longer exists back to
 
 ```
 ~/.lingobridge/
-  config.yaml                          # User configuration
+  config.yaml                          # Shared LLM config and platform-private platforms.<platform> config
   lingobridge.sock                       # Local control socket used by a running process
-  data/
-    lingobridge.db                       # SQLite: platform account metadata, sessions, user preferences, sync cursors
-    sessions/{userId}/{sessionId}.jsonl # Conversation history; image attachments may store provider refs
-    media/{safeUserId}/{safeSessionId}/ # Local copies of user and generated images
+  platforms/
+    wechat/
+      data/
+        lingobridge.db                   # WeChat accounts, sessions, user preferences, sync cursors
+        sessions/{userId}/{sessionId}.jsonl
+        media/{safeUserId}/{safeSessionId}/
+    feishu/
+      data/
+        lingobridge.db                   # Feishu account metadata, sessions, user preferences
+        sessions/{userId}/{sessionId}.jsonl
 ```
 
-The `accounts` table stores a `platform` value (`wechat` or `feishu`) and a
-`credentials_json` payload for platform-specific credentials. Feishu accounts
-keep app credentials in `config.yaml` instead of SQLite; Feishu records without
-matching `platforms.feishu.accounts.<name>` config will not run. Existing
-WeChat accounts migrate automatically with `platform='wechat'`.
+Each platform has its own SQLite database and data directory. The middle layer
+opens a store for the selected platform and passes only that scoped store to the
+platform adapter, so WeChat code cannot read Feishu data and Feishu code cannot
+read WeChat data through the storage API. The `accounts` table stores account
+metadata; Feishu `app_id/app_secret/base_url` live in
+`platforms.feishu.accounts.<name>` rather than SQLite. Removed global data
+layouts and legacy storage schemas are not migrated automatically; add accounts
+again with the current CLI if needed.
 
 ## Internal Architecture
 
-LingoBridge uses a three-layer adapter structure:
+LingoBridge uses a multi-platform frontend, shared middle layer, and multi-provider backend structure:
 
 ```
-internal/platform/wechat/   # WeChat adapter: native events/API <-> core messages
-internal/platform/feishu/   # Feishu adapter: native events/API <-> core messages
-internal/platform/          # Platform registry: account creation, runtime factories, command policy
-internal/core/              # Shared command, session, history, LLM orchestration
-internal/llm/               # Provider adapters: core messages <-> provider APIs
+cmd/lingobridge/            # CLI entrypoint and process orchestration
+internal/config/            # Shared config file, generic platforms.<platform> YAML preservation
+internal/platform/          # Platform registry and parameter/runtime handler registration
+internal/platform/wechat/   # WeChat frontend adapter: native events/API <-> core messages
+internal/platform/feishu/   # Feishu frontend adapter and its private config schema
+internal/core/              # Middle layer: scoped platform config/data APIs, commands, sessions, LLM orchestration
+internal/store/             # Platform-scoped SQLite/history/media persistence
+internal/llm/               # Backend provider adapters: OpenAI-compatible and Anthropic APIs
+internal/session/           # Session manager backed by the scoped store
+internal/commands/          # Shared in-chat slash commands
+internal/runner/            # Account supervisor and monitor lifecycle
+internal/control/           # Local Unix-socket reload control API
 ```
 
 In-chat slash commands live in `internal/commands/` and are shared by every
 platform adapter unless that platform's command policy disables them.
+Platforms register account parameter handlers with the registry. The CLI and
+runtime create a `core.PlatformContext` for the active platform, and platform
+code uses that context to persist its own config and data without receiving
+access to other platform stores.
 
 ## Tech Stack
 

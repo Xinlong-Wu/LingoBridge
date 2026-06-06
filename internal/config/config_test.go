@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func validLLMConfig() LLMConfig {
@@ -50,12 +52,24 @@ func TestPathsUseLingoBridgeHome(t *testing.T) {
 		t.Fatalf("ControlSocketPath = %q, want lingobridge socket", socketPath)
 	}
 
-	dataDir, err := DataDir()
+	wechatDataDir, err := PlatformDataDir("wechat")
 	if err != nil {
-		t.Fatalf("DataDir returned error: %v", err)
+		t.Fatalf("PlatformDataDir returned error: %v", err)
 	}
-	if dataDir != filepath.Join(home, ".lingobridge", "data") {
-		t.Fatalf("DataDir = %q, want ~/.lingobridge/data", dataDir)
+	if wechatDataDir != filepath.Join(home, ".lingobridge", "platforms", "wechat", "data") {
+		t.Fatalf("PlatformDataDir = %q, want wechat platform data", wechatDataDir)
+	}
+	feishuDataDir, err := PlatformDataDir("feishu")
+	if err != nil {
+		t.Fatalf("PlatformDataDir feishu returned error: %v", err)
+	}
+	if feishuDataDir == wechatDataDir {
+		t.Fatalf("platform data dirs should differ: %q", feishuDataDir)
+	}
+	for _, platformID := range []string{"", "we/chat", ".wechat", " wechat"} {
+		if _, err := PlatformDataDir(platformID); err == nil {
+			t.Fatalf("PlatformDataDir(%q) returned nil error, want invalid platform error", platformID)
+		}
 	}
 }
 
@@ -206,27 +220,6 @@ func TestAddModelSetsFirstModelAsDefault(t *testing.T) {
 	}
 }
 
-func TestUpsertAndResolveFeishuAccount(t *testing.T) {
-	cfg := DefaultConfig()
-
-	if err := UpsertFeishuAccount(&cfg, "fsbot", FeishuAccountConfig{
-		AppID:     " cli_xxx ",
-		AppSecret: " secret ",
-	}); err != nil {
-		t.Fatalf("UpsertFeishuAccount returned error: %v", err)
-	}
-	account, ok, err := cfg.ResolveFeishuAccount("fsbot")
-	if err != nil {
-		t.Fatalf("ResolveFeishuAccount returned error: %v", err)
-	}
-	if !ok {
-		t.Fatal("ResolveFeishuAccount did not find account")
-	}
-	if account.AppID != "cli_xxx" || account.AppSecret != "secret" || account.BaseURL != DefaultFeishuBaseURL {
-		t.Fatalf("account = %#v", account)
-	}
-}
-
 func TestLLMConfigValidateUnknownDefault(t *testing.T) {
 	cfg := validLLMConfig()
 	cfg.DefaultModel = "missing"
@@ -234,6 +227,100 @@ func TestLLMConfigValidateUnknownDefault(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "default_model") {
 		t.Fatalf("Validate error = %v, want default_model error", err)
+	}
+}
+
+func TestLoadPreservesUnknownPlatformConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path, err := ConfigPath()
+	if err != nil {
+		t.Fatalf("ConfigPath returned error: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	data := []byte(`llm:
+  default_model: "deepseek"
+  models:
+    deepseek:
+      provider: "openai"
+      base_url: "https://api.deepseek.com/v1"
+      api_key: "key"
+      id: "deepseek-chat"
+platforms:
+  custom:
+    nested:
+      value: "kept"
+`)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	var custom struct {
+		Nested struct {
+			Value string `yaml:"value"`
+		} `yaml:"nested"`
+	}
+	customNode := cfg.Platforms["custom"]
+	if err := customNode.Decode(&custom); err != nil {
+		t.Fatalf("Decode custom platform returned error: %v", err)
+	}
+	if custom.Nested.Value != "kept" {
+		t.Fatalf("custom platform config = %#v", custom)
+	}
+}
+
+func TestLoadRejectsInvalidPlatformConfigID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path, err := ConfigPath()
+	if err != nil {
+		t.Fatalf("ConfigPath returned error: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	data := []byte(`llm:
+  default_model: "deepseek"
+  models:
+    deepseek:
+      provider: "openai"
+      base_url: "https://api.deepseek.com/v1"
+      api_key: "key"
+      id: "deepseek-chat"
+platforms:
+  bad/platform: {}
+`)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	_, err = Load()
+	if err == nil || !strings.Contains(err.Error(), "platform id") {
+		t.Fatalf("Load error = %v, want invalid platform id error", err)
+	}
+}
+
+func TestSaveRejectsInvalidPlatformConfigID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := DefaultConfig()
+	cfg.Platforms = map[string]yaml.Node{
+		"bad/platform": {Kind: yaml.MappingNode},
+	}
+	if err := AddModel(&cfg, "deepseek", LLMModelConfig{
+		Provider: "openai",
+		BaseURL:  "https://api.deepseek.com/v1",
+		APIKey:   "key",
+		ID:       "deepseek-chat",
+	}, true); err != nil {
+		t.Fatalf("AddModel returned error: %v", err)
+	}
+	err := Save(cfg)
+	if err == nil || !strings.Contains(err.Error(), "platform id") {
+		t.Fatalf("Save error = %v, want invalid platform id error", err)
 	}
 }
 

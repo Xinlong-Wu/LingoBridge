@@ -11,7 +11,7 @@ func newTestManager(t *testing.T) (*Manager, *store.Store) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 
-	st, err := store.Open()
+	st, err := store.Open(store.PlatformWeChat)
 	if err != nil {
 		t.Fatalf("store.Open returned error: %v", err)
 	}

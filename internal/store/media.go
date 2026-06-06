@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"lingobridge/internal/config"
 )
 
 // MediaFile describes a locally persisted media file.
@@ -20,23 +18,18 @@ type MediaFile struct {
 	Size         int
 }
 
-// SaveMediaFile writes media bytes under data/media/{user}/{session}/ and
+// SaveMediaFile writes media bytes under data/media/{user}/{session}/ in this platform store and
 // returns the path relative to the data directory.
-func SaveMediaFile(userID, sessionID, role string, index int, mimeType string, data []byte) (*MediaFile, error) {
+func (s *Store) SaveMediaFile(userID, sessionID, role string, index int, mimeType string, data []byte) (*MediaFile, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("media data is empty")
-	}
-
-	dataDir, err := config.EnsureDataDir()
-	if err != nil {
-		return nil, err
 	}
 
 	userPart := safeMediaPathComponent(userID)
 	sessionPart := safeMediaPathComponent(sessionID)
 	filename := mediaFilename(role, index, mimeType)
 	relPath := filepath.ToSlash(filepath.Join("media", userPart, sessionPart, filename))
-	absPath := filepath.Join(dataDir, filepath.FromSlash(relPath))
+	absPath := filepath.Join(s.dataDir, filepath.FromSlash(relPath))
 
 	if err := os.MkdirAll(filepath.Dir(absPath), 0700); err != nil {
 		return nil, fmt.Errorf("create media dir: %w", err)

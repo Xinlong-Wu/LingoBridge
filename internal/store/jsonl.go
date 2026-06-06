@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"lingobridge/internal/config"
 )
 
 // Attachment represents non-text content associated with a chat message.
@@ -33,31 +31,20 @@ type Conversation struct {
 	Messages []Message `json:"messages"`
 }
 
-// SessionDir returns the directory for a user's sessions.
-func SessionDir(userID string) (string, error) {
-	base, err := config.SessionsDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, userID), nil
+// SessionDir returns the directory for a user's sessions in this platform store.
+func (s *Store) SessionDir(userID string) string {
+	return filepath.Join(s.dataDir, "sessions", userID)
 }
 
-// SessionPath returns the JSONL file path for a specific session.
-func SessionPath(userID, sessionID string) (string, error) {
-	dir, err := SessionDir(userID)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, sessionID+".jsonl"), nil
+// SessionPath returns the JSONL file path for a specific session in this platform store.
+func (s *Store) SessionPath(userID, sessionID string) string {
+	return filepath.Join(s.SessionDir(userID), sessionID+".jsonl")
 }
 
 // LoadConversation reads the last line of a JSONL file as the current conversation.
 // Returns an empty conversation if the file doesn't exist.
-func LoadConversation(userID, sessionID string) (*Conversation, error) {
-	path, err := SessionPath(userID, sessionID)
-	if err != nil {
-		return nil, err
-	}
+func (s *Store) LoadConversation(userID, sessionID string) (*Conversation, error) {
+	path := s.SessionPath(userID, sessionID)
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -84,11 +71,8 @@ func LoadConversation(userID, sessionID string) (*Conversation, error) {
 }
 
 // AppendConversation appends a conversation snapshot as a new JSONL line.
-func AppendConversation(userID, sessionID string, conv *Conversation) error {
-	path, err := SessionPath(userID, sessionID)
-	if err != nil {
-		return err
-	}
+func (s *Store) AppendConversation(userID, sessionID string, conv *Conversation) error {
+	path := s.SessionPath(userID, sessionID)
 
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -113,12 +97,9 @@ func AppendConversation(userID, sessionID string, conv *Conversation) error {
 	return nil
 }
 
-// TruncateConversation removes all history for a session (start fresh).
-func TruncateConversation(userID, sessionID string) error {
-	path, err := SessionPath(userID, sessionID)
-	if err != nil {
-		return err
-	}
+// TruncateConversation removes all history for a session in this platform store.
+func (s *Store) TruncateConversation(userID, sessionID string) error {
+	path := s.SessionPath(userID, sessionID)
 	// Just delete the file; next append will recreate it
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("truncate session: %w", err)

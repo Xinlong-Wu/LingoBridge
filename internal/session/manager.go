@@ -49,12 +49,12 @@ func (m *Manager) CurrentSession(userID string) (*store.Session, error) {
 
 // LoadHistory loads the conversation history for a session.
 func (m *Manager) LoadHistory(userID, sessionID string) (*store.Conversation, error) {
-	return store.LoadConversation(userID, sessionID)
+	return m.store.LoadConversation(userID, sessionID)
 }
 
 // SaveHistory saves a conversation snapshot for a session.
 func (m *Manager) SaveHistory(userID, sessionID string, conv *store.Conversation) error {
-	return store.AppendConversation(userID, sessionID, conv)
+	return m.store.AppendConversation(userID, sessionID, conv)
 }
 
 // CreateSession creates a new session for a user and sets it as current.

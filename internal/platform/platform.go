@@ -31,26 +31,26 @@ type AccountNewIO struct {
 }
 
 type AccountNewContext struct {
-	Store  *store.Store
-	Config *config.Config
+	Platform *core.PlatformContext
 }
 
 type RuntimeContext struct {
 	Store     *store.Store
 	Sessions  *session.Manager
+	Platform  *core.PlatformContext
 	Config    config.Config
 	LLMConfig config.LLMConfig
 	Account   store.Account
 }
 
 type Definition struct {
-	ID                   string
-	Aliases              []string
-	AccountNewUsage      string
-	ParseAccountNewFlags func(args []string, io AccountNewIO) (AccountNewOptions, error)
-	CreateAccount        func(ctx AccountNewContext, opts AccountNewOptions) error
-	NewRuntimePlatform   func(ctx RuntimeContext) (core.Platform, error)
-	CommandPolicy        commands.Policy
+	ID                    string
+	Aliases               []string
+	AccountNewUsage       string
+	ParseAccountNewFlags  func(args []string, io AccountNewIO) (AccountNewOptions, error)
+	CreateOrUpdateAccount func(ctx AccountNewContext, opts AccountNewOptions) error
+	NewRuntimePlatform    func(ctx RuntimeContext) (core.Platform, error)
+	CommandPolicy         commands.Policy
 }
 
 func DefaultAccountNewIO() AccountNewIO {
@@ -110,7 +110,7 @@ func (r *Registry) Register(def Definition) error {
 	if def.ParseAccountNewFlags == nil {
 		return fmt.Errorf("platform %q missing account new parser", id)
 	}
-	if def.CreateAccount == nil {
+	if def.CreateOrUpdateAccount == nil {
 		return fmt.Errorf("platform %q missing account creator", id)
 	}
 	if def.NewRuntimePlatform == nil {
@@ -142,9 +142,6 @@ func (r *Registry) Lookup(name string) (Definition, bool) {
 
 func (r *Registry) LookupAccountPlatform(platform string) (Definition, bool) {
 	platform = normalizePlatformName(platform)
-	if platform == "" {
-		platform = store.PlatformWeChat
-	}
 	return r.Lookup(platform)
 }
 
@@ -209,8 +206,8 @@ func wechatDefinition() Definition {
 			}
 			return AccountNewOptions{Name: normalizeAccountName(*name)}, nil
 		},
-		CreateAccount: func(ctx AccountNewContext, opts AccountNewOptions) error {
-			if err := login.Login(ctx.Store, opts.Name); err != nil {
+		CreateOrUpdateAccount: func(ctx AccountNewContext, opts AccountNewOptions) error {
+			if err := login.Login(ctx.Platform.DataStore(), opts.Name); err != nil {
 				return fmt.Errorf("login failed: %w", err)
 			}
 			return nil
@@ -238,41 +235,37 @@ func feishuDefinition() Definition {
 				Values: values,
 			}, nil
 		},
-		CreateAccount: func(ctx AccountNewContext, opts AccountNewOptions) error {
+		CreateOrUpdateAccount: func(ctx AccountNewContext, opts AccountNewOptions) error {
 			values, ok := opts.Values.(feishu.AccountNewOptions)
 			if !ok {
 				return fmt.Errorf("invalid feishu account options")
+			}
+			if err := feishu.UpsertAccountConfig(ctx.Platform, opts.Name, feishu.AccountConfig{
+				AppID:     values.AppID,
+				AppSecret: values.AppSecret,
+				BaseURL:   values.BaseURL,
+			}); err != nil {
+				return err
 			}
 			acc, err := feishu.NewAccount(opts.Name, values.AppID, values.AppSecret, values.BaseURL)
 			if err != nil {
 				return err
 			}
-			cfg := ctx.Config
-			if cfg == nil {
-				loaded, err := config.Load()
-				if err != nil {
-					return fmt.Errorf("load config: %w", err)
-				}
-				cfg = &loaded
-			}
-			if err := config.UpsertFeishuAccount(cfg, opts.Name, config.FeishuAccountConfig{
-				AppID:     values.AppID,
-				AppSecret: values.AppSecret,
-				BaseURL:   acc.BaseURL,
-			}); err != nil {
-				return err
-			}
-			if err := config.Save(*cfg); err != nil {
-				return fmt.Errorf("save config: %w", err)
-			}
-			if err := ctx.Store.SaveAccount(acc); err != nil {
+			if err := ctx.Platform.DataStore().SaveAccount(acc); err != nil {
 				return fmt.Errorf("save account: %w", err)
 			}
 			fmt.Printf("✅ 已添加飞书账户: %s (%s)\n", acc.Name, acc.ID)
 			return nil
 		},
 		NewRuntimePlatform: func(ctx RuntimeContext) (core.Platform, error) {
-			return feishumonitor.NewPlatform(ctx.Account, ctx.Config), nil
+			accountConfig, ok, err := feishu.ResolveAccountConfig(ctx.Platform, ctx.Account.Name)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, fmt.Errorf("platforms.feishu.accounts.%s is required", ctx.Account.Name)
+			}
+			return feishumonitor.NewPlatform(ctx.Account, accountConfig), nil
 		},
 		CommandPolicy: commands.DefaultPolicy(),
 	}

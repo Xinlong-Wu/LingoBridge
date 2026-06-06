@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"path/filepath"
+	"os"
 	"sync"
 
 	_ "modernc.org/sqlite"
@@ -23,8 +23,10 @@ var (
 
 // Store provides SQLite-backed metadata storage.
 type Store struct {
-	db *sql.DB
-	mu sync.Mutex // serializes writes across goroutines
+	db         *sql.DB
+	platformID string
+	dataDir    string
+	mu         sync.Mutex // serializes writes across goroutines
 }
 
 const (
@@ -47,9 +49,6 @@ type Account struct {
 }
 
 func (a *Account) applyDefaults() {
-	if a.Platform == "" {
-		a.Platform = PlatformWeChat
-	}
 	if a.CredentialsJSON == "" {
 		a.CredentialsJSON = "{}"
 	}
@@ -72,14 +71,17 @@ type ArchiveResult struct {
 	CurrentChanged bool
 }
 
-// Open creates or opens the SQLite database at ~/.lingobridge/data/lingobridge.db.
-func Open() (*Store, error) {
-	dataDir, err := config.EnsureDataDir()
+// Open creates or opens the SQLite database for one isolated platform.
+func Open(platformID string) (*Store, error) {
+	dataDir, err := config.EnsurePlatformDataDir(platformID)
 	if err != nil {
 		return nil, err
 	}
 
-	dbPath := filepath.Join(dataDir, "lingobridge.db")
+	dbPath, err := config.PlatformDBPath(platformID)
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -95,10 +97,14 @@ func Open() (*Store, error) {
 		return nil, fmt.Errorf("set busy_timeout: %w", err)
 	}
 
-	s := &Store{db: db}
+	s := &Store{db: db, platformID: platformID, dataDir: dataDir}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if err := os.Chmod(dbPath, 0600); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("chmod sqlite: %w", err)
 	}
 
 	return s, nil
@@ -109,11 +115,11 @@ func (s *Store) migrate() error {
 		`CREATE TABLE IF NOT EXISTS accounts (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
-			platform TEXT NOT NULL DEFAULT 'wechat',
+			platform TEXT NOT NULL,
 			token TEXT NOT NULL,
-			base_url TEXT NOT NULL DEFAULT 'https://ilinkai.weixin.qq.com',
-			user_id TEXT NOT NULL DEFAULT '',
-			credentials_json TEXT NOT NULL DEFAULT '{}',
+			base_url TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			credentials_json TEXT NOT NULL,
 			enabled INTEGER NOT NULL DEFAULT 1
 		)`,
 		`CREATE TABLE IF NOT EXISTS sync_cursors (
@@ -141,12 +147,6 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
-	if err := s.migrateAccounts(); err != nil {
-		return err
-	}
-	if err := s.migrateSessions(); err != nil {
-		return err
-	}
 	indexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(user_id, archived)`,
@@ -159,132 +159,27 @@ func (s *Store) migrate() error {
 	return nil
 }
 
-func (s *Store) migrateAccounts() error {
-	columns, err := tableColumns(s.db, "accounts")
-	if err != nil {
-		return err
-	}
-	if !columns["platform"] {
-		if _, err := s.db.Exec(`ALTER TABLE accounts ADD COLUMN platform TEXT NOT NULL DEFAULT 'wechat'`); err != nil {
-			return fmt.Errorf("add accounts platform column: %w", err)
-		}
-	}
-	if !columns["credentials_json"] {
-		if _, err := s.db.Exec(`ALTER TABLE accounts ADD COLUMN credentials_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
-			return fmt.Errorf("add accounts credentials_json column: %w", err)
-		}
-	}
-	return nil
-}
-
-func (s *Store) migrateSessions() error {
-	columns, err := tableColumns(s.db, "sessions")
-	if err != nil {
-		return err
-	}
-	if !columns["active"] {
-		if !columns["archived"] {
-			if _, err := s.db.Exec(`ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`); err != nil {
-				return fmt.Errorf("add archived column: %w", err)
-			}
-		}
-		return nil
-	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	rows, err := tx.Query(`SELECT user_id, id FROM sessions WHERE active=1 ORDER BY user_id, created_at DESC, id DESC`)
-	if err != nil {
-		return fmt.Errorf("query active sessions: %w", err)
-	}
-	activeByUser := map[string]string{}
-	for rows.Next() {
-		var userID, sessionID string
-		if err := rows.Scan(&userID, &sessionID); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan active session: %w", err)
-		}
-		if _, ok := activeByUser[userID]; !ok {
-			activeByUser[userID] = sessionID
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	for userID, sessionID := range activeByUser {
-		if err := upsertCurrentSessionTx(tx, userID, sessionID); err != nil {
-			return err
-		}
-	}
-
-	if _, err := tx.Exec(`DROP INDEX IF EXISTS idx_sessions_active`); err != nil {
-		return fmt.Errorf("drop active index: %w", err)
-	}
-	if _, err := tx.Exec(`DROP INDEX IF EXISTS idx_sessions_user`); err != nil {
-		return fmt.Errorf("drop sessions user index: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE TABLE sessions_new (
-		id TEXT PRIMARY KEY,
-		user_id TEXT NOT NULL,
-		name TEXT NOT NULL DEFAULT 'default',
-		archived INTEGER NOT NULL DEFAULT 0,
-		created_at TEXT NOT NULL DEFAULT (datetime('now'))
-	)`); err != nil {
-		return fmt.Errorf("create sessions_new: %w", err)
-	}
-	if _, err := tx.Exec(`INSERT INTO sessions_new (id, user_id, name, archived, created_at)
-		SELECT id, user_id, name, 0, created_at FROM sessions`); err != nil {
-		return fmt.Errorf("copy sessions: %w", err)
-	}
-	if _, err := tx.Exec(`DROP TABLE sessions`); err != nil {
-		return fmt.Errorf("drop old sessions: %w", err)
-	}
-	if _, err := tx.Exec(`ALTER TABLE sessions_new RENAME TO sessions`); err != nil {
-		return fmt.Errorf("rename sessions_new: %w", err)
-	}
-	return tx.Commit()
-}
-
-func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
-	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
-	if err != nil {
-		return nil, fmt.Errorf("inspect %s columns: %w", table, err)
-	}
-	defer rows.Close()
-
-	columns := map[string]bool{}
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull int
-		var defaultValue sql.NullString
-		var pk int
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return nil, err
-		}
-		columns[name] = true
-	}
-	return columns, rows.Err()
-}
-
 // Close closes the database.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// PlatformID returns the platform this store is allowed to access.
+func (s *Store) PlatformID() string {
+	return s.platformID
+}
+
+// DataDir returns this store's isolated data directory.
+func (s *Store) DataDir() string {
+	return s.dataDir
 }
 
 // --- Accounts ---
 
 // SaveAccount inserts or updates a bot account.
 func (s *Store) SaveAccount(a Account) error {
-	if a.Platform == "" {
-		a.Platform = PlatformWeChat
+	if a.Platform != s.platformID {
+		return fmt.Errorf("account platform %q does not match store platform %q", a.Platform, s.platformID)
 	}
 	if a.CredentialsJSON == "" {
 		a.CredentialsJSON = "{}"
@@ -312,6 +207,9 @@ func (s *Store) GetAccount(id string) (Account, error) {
 		return a, err
 	}
 	a.applyDefaults()
+	if a.Platform != s.platformID {
+		return Account{}, fmt.Errorf("account %q platform %q does not match store platform %q", id, a.Platform, s.platformID)
+	}
 	return a, nil
 }
 
@@ -330,6 +228,9 @@ func (s *Store) ListAccounts() ([]Account, error) {
 			return nil, err
 		}
 		a.applyDefaults()
+		if a.Platform != s.platformID {
+			return nil, fmt.Errorf("account %q platform %q does not match store platform %q", a.ID, a.Platform, s.platformID)
+		}
 		accounts = append(accounts, a)
 	}
 	return accounts, rows.Err()

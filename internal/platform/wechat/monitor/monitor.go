@@ -124,6 +124,7 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 		newLLM:     defaultLLMFactory,
 		cdnBaseURL: defaultWeixinCDNBaseURL,
 		handler:    handler,
+		saveMedia:  p.store.SaveMediaFile,
 	}
 	return b.runAccount(ctx, acc)
 }
@@ -561,7 +562,7 @@ func (b *bot) persistResponseImages(userID, sessionID string, resp llm.Response)
 func (b *bot) saveMediaFile(userID, sessionID, role string, index int, mimeType string, data []byte) (*store.MediaFile, error) {
 	saver := b.saveMedia
 	if saver == nil {
-		saver = store.SaveMediaFile
+		return nil, fmt.Errorf("media saver is not configured")
 	}
 	return saver(userID, sessionID, role, index, mimeType, data)
 }

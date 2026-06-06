@@ -67,31 +67,30 @@ func (r feishuResponder) StartTyping(ctx context.Context) func() {
 }
 
 func RunContext(ctx context.Context, st *store.Store, sm *session.Manager, cfg config.LLMConfig, acc store.Account) error {
-	return NewPlatform(acc, config.Config{LLM: cfg}).Run(ctx, core.New(sm, cfg))
+	return fmt.Errorf("feishu RunContext requires resolved platform account config")
 }
 
 type Platform struct {
-	account store.Account
-	config  config.Config
+	account       store.Account
+	accountConfig feishu.AccountConfig
 }
 
 var _ core.Platform = (*Platform)(nil)
 
-func NewPlatform(acc store.Account, cfg config.Config) *Platform {
-	return &Platform{account: acc, config: cfg}
+func NewPlatform(acc store.Account, accountConfig feishu.AccountConfig) *Platform {
+	return &Platform{account: acc, accountConfig: accountConfig}
 }
 
 func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 	acc := p.account
-	feishuAccount, ok, err := p.config.ResolveFeishuAccount(acc.Name)
-	if err != nil {
-		return err
+	creds := feishu.CredentialsFromConfig(p.accountConfig)
+	if creds.AppID == "" {
+		return fmt.Errorf("feishu account %s credentials app_id is required", acc.Name)
 	}
-	if !ok {
-		return fmt.Errorf("platforms.feishu.accounts.%s is required", acc.Name)
+	if creds.AppSecret == "" {
+		return fmt.Errorf("feishu account %s credentials app_secret is required", acc.Name)
 	}
-	creds := feishu.CredentialsFromConfig(feishuAccount)
-	baseURL := feishuAccount.BaseURL
+	baseURL := p.accountConfig.BaseURL
 
 	restClient := newRESTClient(creds, baseURL)
 	b := &bot{

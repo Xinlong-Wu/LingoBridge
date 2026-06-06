@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -13,7 +14,7 @@ func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 
-	st, err := Open()
+	st, err := Open(PlatformWeChat)
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -156,10 +157,14 @@ func TestResetUnavailableUserModels(t *testing.T) {
 	}
 }
 
-func TestSaveAccountDefaultsToWeChat(t *testing.T) {
+func TestSaveAccountRequiresMatchingPlatform(t *testing.T) {
 	st := openTestStore(t)
 
-	if err := st.SaveAccount(Account{ID: "a1", Name: "bot", Token: "token", BaseURL: "https://wechat.test", Enabled: true}); err != nil {
+	err := st.SaveAccount(Account{ID: "a1", Name: "bot", Token: "token", BaseURL: "https://wechat.test", Enabled: true})
+	if err == nil {
+		t.Fatal("SaveAccount returned nil error, want platform mismatch")
+	}
+	if err := st.SaveAccount(Account{ID: "a1", Name: "bot", Platform: PlatformWeChat, Token: "token", BaseURL: "https://wechat.test", Enabled: true}); err != nil {
 		t.Fatalf("SaveAccount returned error: %v", err)
 	}
 	got, err := st.GetAccount("a1")
@@ -174,8 +179,17 @@ func TestSaveAccountDefaultsToWeChat(t *testing.T) {
 	}
 }
 
-func TestSaveFeishuAccountCredentials(t *testing.T) {
-	st := openTestStore(t)
+func TestSaveFeishuAccountMetadata(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	st, err := Open(PlatformFeishu)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
 
 	account := Account{
 		ID:              "feishu:cli_xxx",
@@ -183,7 +197,7 @@ func TestSaveFeishuAccountCredentials(t *testing.T) {
 		Platform:        PlatformFeishu,
 		BaseURL:         "https://open.feishu.cn",
 		UserID:          "cli_xxx",
-		CredentialsJSON: `{"app_id":"cli_xxx","app_secret":"secret"}`,
+		CredentialsJSON: "{}",
 		Enabled:         true,
 	}
 	if err := st.SaveAccount(account); err != nil {
@@ -193,18 +207,22 @@ func TestSaveFeishuAccountCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAccount returned error: %v", err)
 	}
-	if got.Platform != PlatformFeishu || got.CredentialsJSON != account.CredentialsJSON || got.UserID != account.UserID {
-		t.Fatalf("account = %#v, want feishu credentials preserved", got)
+	if got.Platform != PlatformFeishu || got.CredentialsJSON != "{}" || got.UserID != account.UserID {
+		t.Fatalf("account = %#v, want feishu metadata preserved", got)
 	}
 }
 
-func TestMigrateLegacyAccountsDefaultToWeChat(t *testing.T) {
+func TestOpenUsesPlatformDatabaseNotLegacyGlobalDatabase(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	dataDir, err := config.EnsureDataDir()
+	configDir, err := config.ConfigDir()
 	if err != nil {
-		t.Fatalf("EnsureDataDir returned error: %v", err)
+		t.Fatalf("ConfigDir returned error: %v", err)
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dataDir, "lingobridge.db"))
+	legacyDataDir := filepath.Join(configDir, "data")
+	if err := os.MkdirAll(legacyDataDir, 0700); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(legacyDataDir, "lingobridge.db"))
 	if err != nil {
 		t.Fatalf("sql.Open returned error: %v", err)
 	}
@@ -226,7 +244,7 @@ func TestMigrateLegacyAccountsDefaultToWeChat(t *testing.T) {
 		t.Fatalf("db.Close returned error: %v", err)
 	}
 
-	st, err := Open()
+	st, err := Open(PlatformWeChat)
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -236,23 +254,20 @@ func TestMigrateLegacyAccountsDefaultToWeChat(t *testing.T) {
 		}
 	})
 
-	got, err := st.GetAccount("a1")
+	accounts, err := st.ListAccounts()
 	if err != nil {
-		t.Fatalf("GetAccount returned error: %v", err)
+		t.Fatalf("ListAccounts returned error: %v", err)
 	}
-	if got.Platform != PlatformWeChat {
-		t.Fatalf("platform = %q, want %q", got.Platform, PlatformWeChat)
-	}
-	if got.CredentialsJSON != "{}" {
-		t.Fatalf("credentials_json = %q, want {}", got.CredentialsJSON)
+	if len(accounts) != 0 {
+		t.Fatalf("platform store read legacy global accounts: %#v", accounts)
 	}
 }
 
-func TestMigrateActiveSessionToUserPreference(t *testing.T) {
+func TestOpenDoesNotMigrateLegacyActiveSessionSchema(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	dataDir, err := config.EnsureDataDir()
+	dataDir, err := config.EnsurePlatformDataDir(PlatformWeChat)
 	if err != nil {
-		t.Fatalf("EnsureDataDir returned error: %v", err)
+		t.Fatalf("EnsurePlatformDataDir returned error: %v", err)
 	}
 	db, err := sql.Open("sqlite", filepath.Join(dataDir, "lingobridge.db"))
 	if err != nil {
@@ -278,31 +293,9 @@ func TestMigrateActiveSessionToUserPreference(t *testing.T) {
 		t.Fatalf("db.Close returned error: %v", err)
 	}
 
-	st, err := Open()
-	if err != nil {
-		t.Fatalf("Open returned error: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := st.Close(); err != nil {
-			t.Fatalf("Close returned error: %v", err)
-		}
-	})
-
-	current, err := st.GetCurrentSession("user")
-	if err != nil {
-		t.Fatalf("GetCurrentSession returned error: %v", err)
-	}
-	if current.ID != "old-current" {
-		t.Fatalf("current session = %s, want old-current", current.ID)
-	}
-	columns, err := tableColumns(st.db, "sessions")
-	if err != nil {
-		t.Fatalf("tableColumns returned error: %v", err)
-	}
-	if columns["active"] {
-		t.Fatal("sessions.active column still exists after migration")
-	}
-	if !columns["archived"] {
-		t.Fatal("sessions.archived column missing after migration")
+	st, err := Open(PlatformWeChat)
+	if err == nil {
+		st.Close()
+		t.Fatal("Open returned nil error, want legacy schema failure")
 	}
 }

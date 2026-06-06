@@ -5,6 +5,7 @@ import (
 
 	"lingobridge/internal/config"
 	"lingobridge/internal/core"
+	"lingobridge/internal/platform/feishu"
 	"lingobridge/internal/session"
 	"lingobridge/internal/store"
 )
@@ -33,18 +34,14 @@ func TestDefaultRegistryLookupAliases(t *testing.T) {
 	}
 }
 
-func TestLookupAccountPlatformFallbacksToWechat(t *testing.T) {
+func TestLookupAccountPlatformDoesNotFallback(t *testing.T) {
 	registry, err := NewDefaultRegistry()
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry returned error: %v", err)
 	}
 
-	def, ok := registry.LookupAccountPlatform("")
-	if !ok {
-		t.Fatal("LookupAccountPlatform did not find default platform")
-	}
-	if def.ID != store.PlatformWeChat {
-		t.Fatalf("default platform = %q, want wechat", def.ID)
+	if _, ok := registry.LookupAccountPlatform(""); ok {
+		t.Fatal("LookupAccountPlatform found empty platform, want no fallback")
 	}
 }
 
@@ -54,31 +51,57 @@ func TestDefaultDefinitionsCreateRuntimePlatforms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDefaultRegistry returned error: %v", err)
 	}
-	st, err := store.Open()
+	wechatStore, err := store.Open(store.PlatformWeChat)
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
-	defer st.Close()
-
-	cfg := config.LLMConfig{
-		DefaultModel: "deepseek",
-		Models: map[string]config.LLMModelConfig{
-			"deepseek": {Provider: "openai", BaseURL: "https://llm.test", APIKey: "key", ID: "model"},
-		},
+	defer wechatStore.Close()
+	feishuStore, err := store.Open(store.PlatformFeishu)
+	if err != nil {
+		t.Fatalf("Open feishu returned error: %v", err)
 	}
-	sm := session.NewManager(st, cfg)
-	for _, account := range []store.Account{
-		{ID: "wechat:test", Platform: store.PlatformWeChat},
-		{ID: "feishu:test", Platform: store.PlatformFeishu, CredentialsJSON: `{"app_id":"cli_xxx","app_secret":"secret"}`},
+	defer feishuStore.Close()
+
+	cfg := config.DefaultConfig()
+	if err := config.AddModel(&cfg, "deepseek", config.LLMModelConfig{
+		Provider: "openai",
+		BaseURL:  "https://llm.test",
+		APIKey:   "key",
+		ID:       "model",
+	}, true); err != nil {
+		t.Fatalf("AddModel returned error: %v", err)
+	}
+	feishuCtx, err := core.NewPlatformContext(store.PlatformFeishu, &cfg, feishuStore, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext feishu returned error: %v", err)
+	}
+	if err := feishu.UpsertAccountConfig(feishuCtx, "fsbot", feishu.AccountConfig{AppID: "cli_xxx", AppSecret: "secret"}); err != nil {
+		t.Fatalf("UpsertAccountConfig returned error: %v", err)
+	}
+
+	for _, tc := range []struct {
+		account store.Account
+		st      *store.Store
+	}{
+		{account: store.Account{ID: "wechat:test", Name: "wxbot", Platform: store.PlatformWeChat}, st: wechatStore},
+		{account: store.Account{ID: "feishu:cli_xxx", Name: "fsbot", Platform: store.PlatformFeishu}, st: feishuStore},
 	} {
+		account := tc.account
 		def, ok := registry.LookupAccountPlatform(account.Platform)
 		if !ok {
 			t.Fatalf("LookupAccountPlatform(%q) did not find platform", account.Platform)
 		}
+		sm := session.NewManager(tc.st, cfg.LLM)
+		platformCtx, err := core.NewPlatformContext(account.Platform, &cfg, tc.st, nil)
+		if err != nil {
+			t.Fatalf("NewPlatformContext(%q) returned error: %v", account.Platform, err)
+		}
 		p, err := def.RuntimePlatform(RuntimeContext{
-			Store:     st,
+			Store:     tc.st,
 			Sessions:  sm,
-			LLMConfig: cfg,
+			Platform:  platformCtx,
+			Config:    cfg,
+			LLMConfig: cfg.LLM,
 			Account:   account,
 		})
 		if err != nil {

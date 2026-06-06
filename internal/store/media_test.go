@@ -5,18 +5,25 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"lingobridge/internal/config"
 )
 
 func TestSaveMediaFileSeparatesUserAndSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	st, err := Open(PlatformWeChat)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
 
-	first, err := SaveMediaFile("user@im.wechat", "session/one", "user", 0, "image/png", []byte("first"))
+	first, err := st.SaveMediaFile("user@im.wechat", "session/one", "user", 0, "image/png", []byte("first"))
 	if err != nil {
 		t.Fatalf("SaveMediaFile first returned error: %v", err)
 	}
-	second, err := SaveMediaFile("user@im.wechat", "session/two", "assistant", 1, "image/jpeg", []byte("second"))
+	second, err := st.SaveMediaFile("user@im.wechat", "session/two", "assistant", 1, "image/jpeg", []byte("second"))
 	if err != nil {
 		t.Fatalf("SaveMediaFile second returned error: %v", err)
 	}
@@ -40,15 +47,20 @@ func TestSaveMediaFileSeparatesUserAndSession(t *testing.T) {
 		t.Fatalf("second relative path = %q, want .jpg", second.RelativePath)
 	}
 
-	dataDir, err := config.DataDir()
-	if err != nil {
-		t.Fatalf("DataDir returned error: %v", err)
-	}
-	firstData, err := os.ReadFile(filepath.Join(dataDir, filepath.FromSlash(first.RelativePath)))
+	firstData, err := os.ReadFile(filepath.Join(st.DataDir(), filepath.FromSlash(first.RelativePath)))
 	if err != nil {
 		t.Fatalf("read first media file: %v", err)
 	}
 	if string(firstData) != "first" {
 		t.Fatalf("first media file = %q, want first", firstData)
+	}
+
+	feishu, err := Open(PlatformFeishu)
+	if err != nil {
+		t.Fatalf("Open feishu returned error: %v", err)
+	}
+	defer feishu.Close()
+	if st.DataDir() == feishu.DataDir() {
+		t.Fatalf("platform media data dirs should differ: %q", st.DataDir())
 	}
 }

@@ -131,14 +131,13 @@ func TestSupervisorRestartsChangedAccount(t *testing.T) {
 	}
 }
 
-func TestSupervisorRestartsChangedFeishuCredentials(t *testing.T) {
+func TestSupervisorRestartsChangedAccountMetadata(t *testing.T) {
 	st := &fakeAccountStore{accounts: []store.Account{{
-		ID:              "feishu:cli_xxx",
-		Name:            "fsbot",
-		Platform:        store.PlatformFeishu,
-		BaseURL:         "https://open.feishu.cn",
-		CredentialsJSON: `{"app_id":"cli_xxx","app_secret":"old"}`,
-		Enabled:         true,
+		ID:       "feishu:cli_xxx",
+		Name:     "fsbot",
+		Platform: store.PlatformFeishu,
+		BaseURL:  "https://open.feishu.cn",
+		Enabled:  true,
 	}}}
 	runner := newRecordingRunner()
 	supervisor := NewSupervisor(st, runner.run, "")
@@ -151,19 +150,18 @@ func TestSupervisorRestartsChangedFeishuCredentials(t *testing.T) {
 	first := waitStart(t, runner.starts)
 
 	st.accounts = []store.Account{{
-		ID:              "feishu:cli_xxx",
-		Name:            "fsbot",
-		Platform:        store.PlatformFeishu,
-		BaseURL:         "https://open.feishu.cn",
-		CredentialsJSON: `{"app_id":"cli_xxx","app_secret":"new"}`,
-		Enabled:         true,
+		ID:       "feishu:cli_xxx",
+		Name:     "fsbot-renamed",
+		Platform: store.PlatformFeishu,
+		BaseURL:  "https://open.feishu.cn",
+		Enabled:  true,
 	}}
 	if err := supervisor.Reconcile(ctx); err != nil {
-		t.Fatalf("Reconcile after credentials change returned error: %v", err)
+		t.Fatalf("Reconcile after metadata change returned error: %v", err)
 	}
 	second := waitStart(t, runner.starts)
-	if first.CredentialsJSON == second.CredentialsJSON {
-		t.Fatalf("credentials did not change: %q", second.CredentialsJSON)
+	if first.Name == second.Name {
+		t.Fatalf("account metadata did not change: %q", second.Name)
 	}
 }
 

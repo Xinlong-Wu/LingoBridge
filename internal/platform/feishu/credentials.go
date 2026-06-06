@@ -1,18 +1,31 @@
 package feishu
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
-	"lingobridge/internal/config"
+	"lingobridge/internal/core"
 	"lingobridge/internal/store"
 )
 
-const DefaultBaseURL = config.DefaultFeishuBaseURL
+const DefaultBaseURL = "https://open.feishu.cn"
 
 type Credentials struct {
 	AppID     string `json:"app_id"`
 	AppSecret string `json:"app_secret"`
+}
+
+// Config holds Feishu platform-private configuration.
+type Config struct {
+	Accounts map[string]AccountConfig `yaml:"accounts"`
+}
+
+// AccountConfig holds one Feishu self-built app account config.
+type AccountConfig struct {
+	AppID     string `yaml:"app_id"`
+	AppSecret string `yaml:"app_secret"`
+	BaseURL   string `yaml:"base_url"`
 }
 
 func NewAccount(name, appID, appSecret, baseURL string) (store.Account, error) {
@@ -40,9 +53,92 @@ func NewAccount(name, appID, appSecret, baseURL string) (store.Account, error) {
 	}, nil
 }
 
-func CredentialsFromConfig(account config.FeishuAccountConfig) Credentials {
+// LoadConfig decodes the Feishu platform config through the core config API.
+func LoadConfig(api core.PlatformConfigAPI) (Config, error) {
+	var cfg Config
+	if err := api.GetPlatformConfig(store.PlatformFeishu, &cfg); err != nil {
+		if errors.Is(err, core.ErrPlatformConfigNotFound) {
+			cfg.ApplyDefaults()
+			return cfg, nil
+		}
+		return Config{}, err
+	}
+	cfg.ApplyDefaults()
+	return cfg, nil
+}
+
+// UpsertAccountConfig writes one Feishu account config through the core config API.
+func UpsertAccountConfig(api core.PlatformConfigAPI, name string, account AccountConfig) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("feishu account name is required")
+	}
+	account = normalizeAccountConfig(account)
+	if account.AppID == "" {
+		return fmt.Errorf("platforms.feishu.accounts.%s.app_id is required", name)
+	}
+	if account.AppSecret == "" {
+		return fmt.Errorf("platforms.feishu.accounts.%s.app_secret is required", name)
+	}
+	cfg, err := LoadConfig(api)
+	if err != nil {
+		return err
+	}
+	if cfg.Accounts == nil {
+		cfg.Accounts = map[string]AccountConfig{}
+	}
+	cfg.Accounts[name] = account
+	return api.SetPlatformConfig(store.PlatformFeishu, cfg)
+}
+
+// ResolveAccountConfig returns a validated Feishu account config by account name.
+func ResolveAccountConfig(api core.PlatformConfigAPI, name string) (AccountConfig, bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return AccountConfig{}, false, nil
+	}
+	cfg, err := LoadConfig(api)
+	if err != nil {
+		return AccountConfig{}, false, err
+	}
+	account, ok := cfg.Accounts[name]
+	if !ok {
+		return AccountConfig{}, false, nil
+	}
+	account = normalizeAccountConfig(account)
+	if account.AppID == "" {
+		return account, true, fmt.Errorf("platforms.feishu.accounts.%s.app_id is required", name)
+	}
+	if account.AppSecret == "" {
+		return account, true, fmt.Errorf("platforms.feishu.accounts.%s.app_secret is required", name)
+	}
+	return account, true, nil
+}
+
+// CredentialsFromConfig returns SDK credentials from a Feishu account config.
+func CredentialsFromConfig(account AccountConfig) Credentials {
 	return Credentials{
 		AppID:     strings.TrimSpace(account.AppID),
 		AppSecret: strings.TrimSpace(account.AppSecret),
 	}
+}
+
+// ApplyDefaults fills optional Feishu platform config fields.
+func (c *Config) ApplyDefaults() {
+	if c.Accounts == nil {
+		c.Accounts = map[string]AccountConfig{}
+	}
+	for name, account := range c.Accounts {
+		c.Accounts[name] = normalizeAccountConfig(account)
+	}
+}
+
+func normalizeAccountConfig(account AccountConfig) AccountConfig {
+	account.AppID = strings.TrimSpace(account.AppID)
+	account.AppSecret = strings.TrimSpace(account.AppSecret)
+	account.BaseURL = strings.TrimRight(strings.TrimSpace(account.BaseURL), "/")
+	if account.BaseURL == "" {
+		account.BaseURL = DefaultBaseURL
+	}
+	return account
 }
