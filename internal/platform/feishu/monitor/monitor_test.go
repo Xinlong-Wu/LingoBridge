@@ -112,6 +112,38 @@ func (f *fakeSender) DeleteReaction(ctx context.Context, messageID, reactionID s
 	return f.deleteReactionErr
 }
 
+type fakeSDKLogger struct {
+	mu     sync.Mutex
+	debugs int
+	infos  int
+	warns  int
+	errors int
+}
+
+func (l *fakeSDKLogger) Debug(context.Context, ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.debugs++
+}
+
+func (l *fakeSDKLogger) Info(context.Context, ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.infos++
+}
+
+func (l *fakeSDKLogger) Warn(context.Context, ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warns++
+}
+
+func (l *fakeSDKLogger) Error(context.Context, ...interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.errors++
+}
+
 func (f *fakeProcessor) snapshot() fakeProcessor {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -702,6 +734,26 @@ func TestFeishuSDKLogLevel(t *testing.T) {
 		if got := feishuSDKLogLevel(tc.level); got != tc.want {
 			t.Fatalf("feishuSDKLogLevel(%v) = %v, want %v", tc.level, got, tc.want)
 		}
+	}
+}
+
+func TestSDKLevelLoggerFiltersBeforeSharedLogger(t *testing.T) {
+	next := &fakeSDKLogger{}
+	logger := newSDKLevelLogger(larkcore.LogLevelInfo, next)
+
+	logger.Debug(context.Background(), "hidden")
+	logger.Info(context.Background(), "visible")
+
+	if next.debugs != 0 || next.infos != 1 {
+		t.Fatalf("info sdk logger counts: debug=%d info=%d, want debug=0 info=1", next.debugs, next.infos)
+	}
+
+	next = &fakeSDKLogger{}
+	logger = newSDKLevelLogger(larkcore.LogLevelDebug, next)
+	logger.Debug(context.Background(), "visible")
+
+	if next.debugs != 1 {
+		t.Fatalf("debug sdk logger debug count = %d, want 1", next.debugs)
 	}
 }
 

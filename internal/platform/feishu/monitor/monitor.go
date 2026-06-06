@@ -64,7 +64,8 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 	baseURL := accountConfig.BaseURL
 
 	sdkLogLevel := feishuSDKLogLevel(p.level)
-	restClient := newRESTClient(creds, baseURL, sdkLogLevel)
+	sdkLog := newSDKLevelLogger(sdkLogLevel, feishuSDKLog)
+	restClient := newRESTClient(creds, baseURL, sdkLogLevel, sdkLog)
 	b := &bot{
 		handler:       handler,
 		sender:        &sdkSender{client: restClient},
@@ -75,14 +76,14 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 	}
 
 	d := dispatcher.NewEventDispatcher("", "")
-	d.Config.Logger = feishuSDKLog
+	d.Config.Logger = sdkLog
 	d, registeredEvents, err := b.configureEventHandlers(d, p.config.Events)
 	if err != nil {
 		return err
 	}
 	opts := []larkws.ClientOption{
 		larkws.WithEventHandler(d),
-		larkws.WithLogger(feishuSDKLog),
+		larkws.WithLogger(sdkLog),
 		larkws.WithLogLevel(sdkLogLevel),
 		larkws.WithOnReady(func() {
 			feishuLog.Info(ctx, "long connection ready for account %s (%s)", acc.Name, acc.ID)
@@ -117,15 +118,48 @@ func runClient(ctx context.Context, client interface {
 	}
 }
 
-func newRESTClient(creds feishu.Credentials, baseURL string, level larkcore.LogLevel) *lark.Client {
+func newRESTClient(creds feishu.Credentials, baseURL string, level larkcore.LogLevel, logger larkcore.Logger) *lark.Client {
 	opts := []lark.ClientOptionFunc{
-		lark.WithLogger(feishuSDKLog),
+		lark.WithLogger(logger),
 		lark.WithLogLevel(level),
 	}
 	if baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/"); baseURL != "" {
 		opts = append(opts, lark.WithOpenBaseUrl(baseURL))
 	}
 	return lark.NewClient(creds.AppID, creds.AppSecret, opts...)
+}
+
+type sdkLevelLogger struct {
+	level larkcore.LogLevel
+	next  larkcore.Logger
+}
+
+func newSDKLevelLogger(level larkcore.LogLevel, next larkcore.Logger) larkcore.Logger {
+	return sdkLevelLogger{level: level, next: next}
+}
+
+func (l sdkLevelLogger) Debug(ctx context.Context, args ...interface{}) {
+	if l.next != nil && l.level <= larkcore.LogLevelDebug {
+		l.next.Debug(ctx, args...)
+	}
+}
+
+func (l sdkLevelLogger) Info(ctx context.Context, args ...interface{}) {
+	if l.next != nil && l.level <= larkcore.LogLevelInfo {
+		l.next.Info(ctx, args...)
+	}
+}
+
+func (l sdkLevelLogger) Warn(ctx context.Context, args ...interface{}) {
+	if l.next != nil && l.level <= larkcore.LogLevelWarn {
+		l.next.Warn(ctx, args...)
+	}
+}
+
+func (l sdkLevelLogger) Error(ctx context.Context, args ...interface{}) {
+	if l.next != nil && l.level <= larkcore.LogLevelError {
+		l.next.Error(ctx, args...)
+	}
 }
 
 func feishuSDKLogLevel(level logging.Level) larkcore.LogLevel {
