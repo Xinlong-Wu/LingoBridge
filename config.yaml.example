@@ -36,3 +36,12 @@ llm:
   # Maximum historical messages to send per request. 0 = no limit (send all).
   # Default: 0
   max_history: 0
+
+platforms:
+  feishu:
+    accounts:
+      fsbot:
+        app_id: "cli_xxx"
+        app_secret: "your-app-secret"
+        # Optional. Defaults to https://open.feishu.cn.
+        base_url: "https://open.feishu.cn"

@@ -70,11 +70,7 @@ func TestNewAccountUsesParsedPromptCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAccount returned error: %v", err)
 	}
-	creds, err := ParseCredentials(acc)
-	if err != nil {
-		t.Fatalf("ParseCredentials returned error: %v", err)
-	}
-	if acc.Name != "fsbot" || creds.AppID != "cli_prompt" || creds.AppSecret != "secret_prompt" {
-		t.Fatalf("account = %#v credentials = %#v", acc, creds)
+	if acc.Name != "fsbot" || acc.UserID != "cli_prompt" || acc.CredentialsJSON != "{}" {
+		t.Fatalf("account = %#v", acc)
 	}
 }

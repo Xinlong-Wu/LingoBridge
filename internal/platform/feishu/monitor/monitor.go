@@ -67,27 +67,33 @@ func (r feishuResponder) StartTyping(ctx context.Context) func() {
 }
 
 func RunContext(ctx context.Context, st *store.Store, sm *session.Manager, cfg config.LLMConfig, acc store.Account) error {
-	return NewPlatform(acc).Run(ctx, core.New(sm, cfg))
+	return NewPlatform(acc, config.Config{LLM: cfg}).Run(ctx, core.New(sm, cfg))
 }
 
 type Platform struct {
 	account store.Account
+	config  config.Config
 }
 
 var _ core.Platform = (*Platform)(nil)
 
-func NewPlatform(acc store.Account) *Platform {
-	return &Platform{account: acc}
+func NewPlatform(acc store.Account, cfg config.Config) *Platform {
+	return &Platform{account: acc, config: cfg}
 }
 
 func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 	acc := p.account
-	creds, err := feishu.ParseCredentials(acc)
+	feishuAccount, ok, err := p.config.ResolveFeishuAccount(acc.Name)
 	if err != nil {
 		return err
 	}
+	if !ok {
+		return fmt.Errorf("platforms.feishu.accounts.%s is required", acc.Name)
+	}
+	creds := feishu.CredentialsFromConfig(feishuAccount)
+	baseURL := feishuAccount.BaseURL
 
-	restClient := newRESTClient(creds, acc.BaseURL)
+	restClient := newRESTClient(creds, baseURL)
 	b := &bot{
 		handler: handler,
 		sender:  &sdkSender{client: restClient},
@@ -104,8 +110,8 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 			log.Printf("[feishu] long connection error account=%s: %v", acc.Name, err)
 		}),
 	}
-	if baseURL := strings.TrimRight(strings.TrimSpace(acc.BaseURL), "/"); baseURL != "" {
-		opts = append(opts, larkws.WithDomain(baseURL))
+	if domain := strings.TrimRight(strings.TrimSpace(baseURL), "/"); domain != "" {
+		opts = append(opts, larkws.WithDomain(domain))
 	}
 	wsClient := larkws.NewClient(creds.AppID, creds.AppSecret, opts...)
 	log.Printf("[feishu] Starting for account %s (%s)", acc.Name, acc.ID)

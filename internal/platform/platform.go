@@ -31,12 +31,14 @@ type AccountNewIO struct {
 }
 
 type AccountNewContext struct {
-	Store *store.Store
+	Store  *store.Store
+	Config *config.Config
 }
 
 type RuntimeContext struct {
 	Store     *store.Store
 	Sessions  *session.Manager
+	Config    config.Config
 	LLMConfig config.LLMConfig
 	Account   store.Account
 }
@@ -245,6 +247,24 @@ func feishuDefinition() Definition {
 			if err != nil {
 				return err
 			}
+			cfg := ctx.Config
+			if cfg == nil {
+				loaded, err := config.Load()
+				if err != nil {
+					return fmt.Errorf("load config: %w", err)
+				}
+				cfg = &loaded
+			}
+			if err := config.UpsertFeishuAccount(cfg, opts.Name, config.FeishuAccountConfig{
+				AppID:     values.AppID,
+				AppSecret: values.AppSecret,
+				BaseURL:   acc.BaseURL,
+			}); err != nil {
+				return err
+			}
+			if err := config.Save(*cfg); err != nil {
+				return fmt.Errorf("save config: %w", err)
+			}
 			if err := ctx.Store.SaveAccount(acc); err != nil {
 				return fmt.Errorf("save account: %w", err)
 			}
@@ -252,7 +272,7 @@ func feishuDefinition() Definition {
 			return nil
 		},
 		NewRuntimePlatform: func(ctx RuntimeContext) (core.Platform, error) {
-			return feishumonitor.NewPlatform(ctx.Account), nil
+			return feishumonitor.NewPlatform(ctx.Account, ctx.Config), nil
 		},
 		CommandPolicy: commands.DefaultPolicy(),
 	}

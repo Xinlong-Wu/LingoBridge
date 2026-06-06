@@ -2,10 +2,13 @@ package monitor
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"lingobridge/internal/config"
 	"lingobridge/internal/core"
+	"lingobridge/internal/store"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -94,6 +97,20 @@ func TestHandleTextMessageUsesBridgeAndReplies(t *testing.T) {
 	}
 	if !sender.called || sender.chatID != "oc_chat" || sender.text != "ok" {
 		t.Fatalf("sender = %#v", sender)
+	}
+}
+
+func TestPlatformRunRequiresFeishuConfigAccount(t *testing.T) {
+	acc := store.Account{
+		ID:              "feishu:cli_xxx",
+		Name:            "fsbot",
+		Platform:        store.PlatformFeishu,
+		CredentialsJSON: `{"app_id":"cli_xxx","app_secret":"old"}`,
+	}
+
+	err := NewPlatform(acc, config.DefaultConfig()).Run(context.Background(), &fakeProcessor{})
+	if err == nil || !strings.Contains(err.Error(), "platforms.feishu.accounts.fsbot is required") {
+		t.Fatalf("Run error = %v, want missing config account error", err)
 	}
 }
 

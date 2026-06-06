@@ -16,11 +16,15 @@ type AccountStore interface {
 // MonitorRunner runs one account until ctx is canceled.
 type MonitorRunner func(ctx context.Context, acc store.Account) error
 
+// AccountSignatureExtra returns extra state that should restart an account when changed.
+type AccountSignatureExtra func(acc store.Account) string
+
 // Supervisor keeps running monitors reconciled with enabled accounts in storage.
 type Supervisor struct {
-	store         AccountStore
-	runMonitor    MonitorRunner
-	targetAccount string
+	store          AccountStore
+	runMonitor     MonitorRunner
+	targetAccount  string
+	signatureExtra AccountSignatureExtra
 
 	mu      sync.Mutex
 	wg      sync.WaitGroup
@@ -42,6 +46,13 @@ func NewSupervisor(st AccountStore, runMonitor MonitorRunner, targetAccount stri
 		targetAccount: targetAccount,
 		running:       make(map[string]*runningMonitor),
 	}
+}
+
+// SetSignatureExtra adds process-local state to account signatures.
+func (s *Supervisor) SetSignatureExtra(extra AccountSignatureExtra) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signatureExtra = extra
 }
 
 // Reconcile starts, stops, or restarts account monitors to match current store state.
@@ -72,7 +83,7 @@ func (s *Supervisor) Reconcile(ctx context.Context) error {
 
 	for id, current := range s.running {
 		next, ok := desired[id]
-		if !ok || current.signature != accountSignature(next) {
+		if !ok || current.signature != s.accountSignature(next) {
 			delete(s.running, id)
 			toStop = append(toStop, current)
 		}
@@ -132,7 +143,7 @@ func (s *Supervisor) startLocked(parent context.Context, acc store.Account) {
 	ctx, cancel := context.WithCancel(parent)
 	current := &runningMonitor{
 		account:   acc,
-		signature: accountSignature(acc),
+		signature: s.accountSignature(acc),
 		cancel:    cancel,
 	}
 	s.running[acc.ID] = current
@@ -155,4 +166,12 @@ func (s *Supervisor) startLocked(parent context.Context, acc store.Account) {
 
 func accountSignature(acc store.Account) string {
 	return acc.ID + "\x00" + acc.Name + "\x00" + acc.Platform + "\x00" + acc.Token + "\x00" + acc.BaseURL + "\x00" + acc.UserID + "\x00" + acc.CredentialsJSON
+}
+
+func (s *Supervisor) accountSignature(acc store.Account) string {
+	signature := accountSignature(acc)
+	if s.signatureExtra != nil {
+		signature += "\x00" + s.signatureExtra(acc)
+	}
+	return signature
 }

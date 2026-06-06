@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,15 @@ func TestPathsUseLingoBridgeHome(t *testing.T) {
 	}
 	if dataDir != filepath.Join(home, ".lingobridge", "data") {
 		t.Fatalf("DataDir = %q, want ~/.lingobridge/data", dataDir)
+	}
+}
+
+func TestLoadMissingConfigReturnsErrConfigNotFound(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	_, err := Load()
+	if !errors.Is(err, ErrConfigNotFound) {
+		t.Fatalf("Load error = %v, want ErrConfigNotFound", err)
 	}
 }
 
@@ -138,6 +148,82 @@ func TestLoadDefaultsMissingEndpointToChat(t *testing.T) {
 	}
 	if resolved.Endpoint != "chat" {
 		t.Fatalf("resolved endpoint = %q, want chat", resolved.Endpoint)
+	}
+}
+
+func TestLoadDefaultsAnthropicEndpointToMessages(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path, err := ConfigPath()
+	if err != nil {
+		t.Fatalf("ConfigPath returned error: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	data := []byte(`llm:
+  default_model: "claude"
+  models:
+    claude:
+      provider: "anthropic"
+      base_url: "https://api.anthropic.com"
+      api_key: "key"
+      id: "claude"
+`)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	resolved, err := cfg.LLM.ResolveModel("claude")
+	if err != nil {
+		t.Fatalf("ResolveModel returned error: %v", err)
+	}
+	if resolved.Endpoint != "messages" {
+		t.Fatalf("resolved endpoint = %q, want messages", resolved.Endpoint)
+	}
+}
+
+func TestAddModelSetsFirstModelAsDefault(t *testing.T) {
+	cfg := DefaultConfig()
+
+	err := AddModel(&cfg, "gpt", LLMModelConfig{
+		Provider: "openai",
+		BaseURL:  "https://api.openai.com/v1",
+		APIKey:   "key",
+		ID:       "gpt-4o",
+	}, false)
+	if err != nil {
+		t.Fatalf("AddModel returned error: %v", err)
+	}
+	if cfg.LLM.DefaultModel != "gpt" {
+		t.Fatalf("default_model = %q, want gpt", cfg.LLM.DefaultModel)
+	}
+	if cfg.LLM.Models["gpt"].Endpoint != "chat" {
+		t.Fatalf("endpoint = %q, want chat", cfg.LLM.Models["gpt"].Endpoint)
+	}
+}
+
+func TestUpsertAndResolveFeishuAccount(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if err := UpsertFeishuAccount(&cfg, "fsbot", FeishuAccountConfig{
+		AppID:     " cli_xxx ",
+		AppSecret: " secret ",
+	}); err != nil {
+		t.Fatalf("UpsertFeishuAccount returned error: %v", err)
+	}
+	account, ok, err := cfg.ResolveFeishuAccount("fsbot")
+	if err != nil {
+		t.Fatalf("ResolveFeishuAccount returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("ResolveFeishuAccount did not find account")
+	}
+	if account.AppID != "cli_xxx" || account.AppSecret != "secret" || account.BaseURL != DefaultFeishuBaseURL {
+		t.Fatalf("account = %#v", account)
 	}
 }
 

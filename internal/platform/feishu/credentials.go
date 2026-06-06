@@ -1,14 +1,14 @@
 package feishu
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
+	"lingobridge/internal/config"
 	"lingobridge/internal/store"
 )
 
-const DefaultBaseURL = "https://open.feishu.cn"
+const DefaultBaseURL = config.DefaultFeishuBaseURL
 
 type Credentials struct {
 	AppID     string `json:"app_id"`
@@ -29,32 +29,20 @@ func NewAccount(name, appID, appSecret, baseURL string) (store.Account, error) {
 		baseURL = DefaultBaseURL
 	}
 
-	creds := Credentials{AppID: appID, AppSecret: appSecret}
-	data, err := json.Marshal(creds)
-	if err != nil {
-		return store.Account{}, fmt.Errorf("marshal feishu credentials: %w", err)
-	}
 	return store.Account{
 		ID:              "feishu:" + appID,
 		Name:            name,
 		Platform:        store.PlatformFeishu,
 		BaseURL:         baseURL,
 		UserID:          appID,
-		CredentialsJSON: string(data),
+		CredentialsJSON: "{}",
 		Enabled:         true,
 	}, nil
 }
 
-func ParseCredentials(acc store.Account) (Credentials, error) {
-	var creds Credentials
-	if err := json.Unmarshal([]byte(acc.CredentialsJSON), &creds); err != nil {
-		return creds, fmt.Errorf("parse feishu credentials: %w", err)
+func CredentialsFromConfig(account config.FeishuAccountConfig) Credentials {
+	return Credentials{
+		AppID:     strings.TrimSpace(account.AppID),
+		AppSecret: strings.TrimSpace(account.AppSecret),
 	}
-	if strings.TrimSpace(creds.AppID) == "" {
-		return creds, fmt.Errorf("feishu app_id is required")
-	}
-	if strings.TrimSpace(creds.AppSecret) == "" {
-		return creds, fmt.Errorf("feishu app_secret is required")
-	}
-	return creds, nil
 }

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"lingobridge/internal/config"
 	"lingobridge/internal/core"
 	"lingobridge/internal/platform"
 	"lingobridge/internal/platform/feishu"
@@ -13,6 +16,7 @@ import (
 
 func TestCmdAccountNewFeishuSavesAccount(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	writeTestConfig(t)
 
 	err := cmdAccountNew([]string{
 		"feishu",
@@ -37,12 +41,19 @@ func TestCmdAccountNewFeishuSavesAccount(t *testing.T) {
 	if acc.Name != "fsbot" || acc.Platform != store.PlatformFeishu || acc.BaseURL != feishu.DefaultBaseURL {
 		t.Fatalf("account = %#v", acc)
 	}
-	creds, err := feishu.ParseCredentials(acc)
-	if err != nil {
-		t.Fatalf("ParseCredentials returned error: %v", err)
+	if acc.CredentialsJSON != "{}" {
+		t.Fatalf("credentials_json = %q, want {}", acc.CredentialsJSON)
 	}
-	if creds.AppID != "cli_xxx" || creds.AppSecret != "secret" {
-		t.Fatalf("credentials = %#v", creds)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	feishuAccount, ok, err := cfg.ResolveFeishuAccount("fsbot")
+	if err != nil {
+		t.Fatalf("ResolveFeishuAccount returned error: %v", err)
+	}
+	if !ok || feishuAccount.AppID != "cli_xxx" || feishuAccount.AppSecret != "secret" {
+		t.Fatalf("feishu account = %#v ok=%v", feishuAccount, ok)
 	}
 }
 
@@ -57,6 +68,7 @@ func TestCmdAccountNewFeishuRequiresCredentials(t *testing.T) {
 
 func TestCmdAccountNewFeishuAliasSavesAccount(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	writeTestConfig(t)
 
 	err := cmdAccountNew([]string{
 		"飞书",
@@ -85,6 +97,7 @@ func TestCmdAccountNewFeishuAliasSavesAccount(t *testing.T) {
 
 func TestCmdAccountNewWeixinAliasUsesPlatformDefinition(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	writeTestConfig(t)
 	registry := newFakeAccountNewRegistry(t)
 
 	err := cmdAccountNewWithRegistry([]string{"weixin", "--name", "wxbot"}, registry)
@@ -122,6 +135,49 @@ func TestCmdAccountNewUnknownPlatform(t *testing.T) {
 	err := cmdAccountNew([]string{"unknown"})
 	if err == nil {
 		t.Fatal("cmdAccountNew returned nil error, want unsupported platform error")
+	}
+}
+
+func TestEnsureConfigInitializedCreatesFirstModelAsDefault(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	input := strings.NewReader("first\nopenai\nhttps://api.example.com/v1\nkey\nmodel\n\n")
+	var out bytes.Buffer
+
+	if err := ensureConfigInitialized(input, &out); err != nil {
+		t.Fatalf("ensureConfigInitialized returned error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.LLM.DefaultModel != "first" || !cfg.LLM.HasModel("first") {
+		t.Fatalf("llm config = %#v", cfg.LLM)
+	}
+}
+
+func TestCmdModelAddWritesConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	writeTestConfig(t)
+	var out bytes.Buffer
+
+	err := cmdModelAdd([]string{
+		"gpt4o",
+		"--provider", "openai",
+		"--base-url", "https://api.openai.com/v1",
+		"--api-key", "key",
+		"--id", "gpt-4o",
+		"--endpoint", "responses",
+		"--default",
+	}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatalf("cmdModelAdd returned error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.LLM.DefaultModel != "gpt4o" || cfg.LLM.Models["gpt4o"].Endpoint != "responses" {
+		t.Fatalf("llm config = %#v", cfg.LLM)
 	}
 }
 
@@ -165,4 +221,20 @@ func newFakeAccountNewRegistry(t *testing.T) *platform.Registry {
 		t.Fatalf("Register returned error: %v", err)
 	}
 	return registry
+}
+
+func writeTestConfig(t *testing.T) {
+	t.Helper()
+	cfg := config.DefaultConfig()
+	if err := config.AddModel(&cfg, "deepseek", config.LLMModelConfig{
+		Provider: "openai",
+		BaseURL:  "https://api.deepseek.com/v1",
+		APIKey:   "key",
+		ID:       "deepseek-chat",
+	}, true); err != nil {
+		t.Fatalf("AddModel returned error: %v", err)
+	}
+	if err := config.Save(cfg); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
 }

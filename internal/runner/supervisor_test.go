@@ -167,6 +167,34 @@ func TestSupervisorRestartsChangedFeishuCredentials(t *testing.T) {
 	}
 }
 
+func TestSupervisorRestartsWhenSignatureExtraChanges(t *testing.T) {
+	st := &fakeAccountStore{accounts: []store.Account{{
+		ID:       "feishu:cli_xxx",
+		Name:     "fsbot",
+		Platform: store.PlatformFeishu,
+		Enabled:  true,
+	}}}
+	runner := newRecordingRunner()
+	supervisor := NewSupervisor(st, runner.run, "")
+	defer supervisor.Stop()
+
+	extra := "old"
+	supervisor.SetSignatureExtra(func(store.Account) string { return extra })
+	if err := supervisor.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	waitStart(t, runner.starts)
+
+	extra = "new"
+	if err := supervisor.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile after signature change returned error: %v", err)
+	}
+	if got := waitStop(t, runner.stops); got != "feishu:cli_xxx" {
+		t.Fatalf("stopped account = %q, want feishu:cli_xxx", got)
+	}
+	waitStart(t, runner.starts)
+}
+
 func TestSupervisorTargetAccountFilter(t *testing.T) {
 	st := &fakeAccountStore{accounts: []store.Account{
 		{ID: "a1", Name: "wanted", Token: "t", Enabled: true},

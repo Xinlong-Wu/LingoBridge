@@ -1,6 +1,9 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +30,23 @@ type LLMModelConfig struct {
 	Endpoint string `yaml:"endpoint"` // Provider endpoint mode
 }
 
+// PlatformsConfig holds platform-specific configuration.
+type PlatformsConfig struct {
+	Feishu FeishuConfig `yaml:"feishu"`
+}
+
+// FeishuConfig holds Feishu Open Platform account configuration.
+type FeishuConfig struct {
+	Accounts map[string]FeishuAccountConfig `yaml:"accounts"`
+}
+
+// FeishuAccountConfig holds one Feishu self-built app account.
+type FeishuAccountConfig struct {
+	AppID     string `yaml:"app_id"`
+	AppSecret string `yaml:"app_secret"`
+	BaseURL   string `yaml:"base_url"`
+}
+
 // ResolvedModel is an effective LLM profile selected for a user.
 type ResolvedModel struct {
 	Name     string
@@ -39,27 +59,32 @@ type ResolvedModel struct {
 
 // Config is the top-level configuration.
 type Config struct {
-	LLM LLMConfig `yaml:"llm"`
+	LLM       LLMConfig       `yaml:"llm"`
+	Platforms PlatformsConfig `yaml:"platforms"`
 }
 
 const DefaultSystemPrompt = "You are a helpful assistant."
 const DefaultModelEndpoint = "chat"
+const DefaultAnthropicEndpoint = "messages"
+const DefaultFeishuBaseURL = "https://open.feishu.cn"
+
+var (
+	// ErrConfigNotFound is returned when ~/.lingobridge/config.yaml does not exist.
+	ErrConfigNotFound = errors.New("config file not found")
+	// ErrModelExists is returned when adding a duplicate model profile.
+	ErrModelExists = errors.New("model profile already exists")
+)
 
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
 		LLM: LLMConfig{
-			DefaultModel: "deepseek",
-			Models: map[string]LLMModelConfig{
-				"deepseek": {
-					Provider: "openai",
-					BaseURL:  "https://api.deepseek.com/v1",
-					ID:       "deepseek-chat",
-					Endpoint: "chat",
-				},
-			},
+			Models:       map[string]LLMModelConfig{},
 			SystemPrompt: DefaultSystemPrompt,
 			MaxHistory:   0, // 0 = no limit
+		},
+		Platforms: PlatformsConfig{
+			Feishu: FeishuConfig{Accounts: map[string]FeishuAccountConfig{}},
 		},
 	}
 }
@@ -109,7 +134,7 @@ func SessionsDir() (string, error) {
 	return filepath.Join(dir, "sessions"), nil
 }
 
-// Load reads and parses the config file, falling back to defaults if not found.
+// Load reads and parses the config file.
 func Load() (Config, error) {
 	cfg := DefaultConfig()
 
@@ -121,23 +146,13 @@ func Load() (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cfg, nil // return defaults
+			return cfg, fmt.Errorf("%w: %s", ErrConfigNotFound, path)
 		}
 		return cfg, fmt.Errorf("read config: %w", err)
 	}
 
 	if err := rejectLegacyLLMFields(data); err != nil {
 		return cfg, err
-	}
-
-	// If the user explicitly provides llm.models, replace the built-in defaults
-	// instead of merging with them.
-	hasModels, err := hasLLMField(data, "models")
-	if err != nil {
-		return cfg, fmt.Errorf("parse config: %w", err)
-	}
-	if hasModels {
-		cfg.LLM.Models = map[string]LLMModelConfig{}
 	}
 
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
@@ -151,13 +166,23 @@ func Load() (Config, error) {
 	if cfg.LLM.MaxHistory < 0 {
 		cfg.LLM.MaxHistory = 0
 	}
+	if cfg.LLM.Models == nil {
+		cfg.LLM.Models = map[string]LLMModelConfig{}
+	}
+	if cfg.Platforms.Feishu.Accounts == nil {
+		cfg.Platforms.Feishu.Accounts = map[string]FeishuAccountConfig{}
+	}
 	cfg.LLM.ApplyDefaults()
+	cfg.Platforms.Feishu.ApplyDefaults()
 
 	return cfg, nil
 }
 
 // Save writes the config to disk, creating directories as needed.
 func Save(cfg Config) error {
+	cfg.LLM.ApplyDefaults()
+	cfg.Platforms.Feishu.ApplyDefaults()
+
 	path, err := ConfigPath()
 	if err != nil {
 		return err
@@ -177,6 +202,18 @@ func Save(cfg Config) error {
 	}
 
 	return nil
+}
+
+// Digest returns a stable hash of the effective config.
+func Digest(cfg Config) (string, error) {
+	cfg.LLM.ApplyDefaults()
+	cfg.Platforms.Feishu.ApplyDefaults()
+	data, err := yaml.Marshal(&cfg)
+	if err != nil {
+		return "", fmt.Errorf("marshal config: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // EnsureDataDir creates the data directory if it doesn't exist.
@@ -205,12 +242,39 @@ func EnsureSessionsDir() (string, error) {
 
 // ApplyDefaults fills optional LLM profile fields.
 func (c *LLMConfig) ApplyDefaults() {
+	if c.Models == nil {
+		c.Models = map[string]LLMModelConfig{}
+	}
 	for name, model := range c.Models {
 		if model.Endpoint == "" {
-			model.Endpoint = DefaultModelEndpoint
+			model.Endpoint = DefaultEndpointForProvider(model.Provider)
 			c.Models[name] = model
 		}
 	}
+}
+
+// ApplyDefaults fills optional Feishu account fields.
+func (c *FeishuConfig) ApplyDefaults() {
+	if c.Accounts == nil {
+		c.Accounts = map[string]FeishuAccountConfig{}
+	}
+	for name, account := range c.Accounts {
+		account.AppID = strings.TrimSpace(account.AppID)
+		account.AppSecret = strings.TrimSpace(account.AppSecret)
+		account.BaseURL = strings.TrimRight(strings.TrimSpace(account.BaseURL), "/")
+		if account.BaseURL == "" {
+			account.BaseURL = DefaultFeishuBaseURL
+		}
+		c.Accounts[name] = account
+	}
+}
+
+// DefaultEndpointForProvider returns the endpoint default for a provider.
+func DefaultEndpointForProvider(provider string) string {
+	if provider == "anthropic" {
+		return DefaultAnthropicEndpoint
+	}
+	return DefaultModelEndpoint
 }
 
 // Validate checks that the configured model profiles are complete and usable.
@@ -238,7 +302,7 @@ func (c LLMConfig) Validate() error {
 func validateModelProfile(name string, model LLMModelConfig) error {
 	endpoint := model.Endpoint
 	if endpoint == "" {
-		endpoint = DefaultModelEndpoint
+		endpoint = DefaultEndpointForProvider(model.Provider)
 	}
 	if model.Provider == "" {
 		return fmt.Errorf("llm.models.%s.provider is required", name)
@@ -268,6 +332,101 @@ func validateModelProfile(name string, model LLMModelConfig) error {
 	return nil
 }
 
+// AddModel adds a named model profile to the config.
+func AddModel(cfg *Config, name string, model LLMModelConfig, makeDefault bool) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("model profile name is required")
+	}
+	if cfg.LLM.Models == nil {
+		cfg.LLM.Models = map[string]LLMModelConfig{}
+	}
+	if _, ok := cfg.LLM.Models[name]; ok {
+		return fmt.Errorf("%w: %s", ErrModelExists, name)
+	}
+	model.Provider = strings.TrimSpace(model.Provider)
+	model.BaseURL = strings.TrimRight(strings.TrimSpace(model.BaseURL), "/")
+	model.APIKey = strings.TrimSpace(model.APIKey)
+	model.ID = strings.TrimSpace(model.ID)
+	model.Endpoint = strings.TrimSpace(model.Endpoint)
+	if model.Endpoint == "" {
+		model.Endpoint = DefaultEndpointForProvider(model.Provider)
+	}
+	if err := validateModelProfile(name, model); err != nil {
+		return err
+	}
+	cfg.LLM.Models[name] = model
+	if cfg.LLM.DefaultModel == "" || makeDefault {
+		cfg.LLM.DefaultModel = name
+	}
+	if cfg.LLM.SystemPrompt == "" {
+		cfg.LLM.SystemPrompt = DefaultSystemPrompt
+	}
+	if cfg.LLM.MaxHistory < 0 {
+		cfg.LLM.MaxHistory = 0
+	}
+	return nil
+}
+
+// UpsertFeishuAccount writes a Feishu account configuration by account name.
+func UpsertFeishuAccount(cfg *Config, name string, account FeishuAccountConfig) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("feishu account name is required")
+	}
+	account.AppID = strings.TrimSpace(account.AppID)
+	account.AppSecret = strings.TrimSpace(account.AppSecret)
+	account.BaseURL = strings.TrimRight(strings.TrimSpace(account.BaseURL), "/")
+	if account.AppID == "" {
+		return fmt.Errorf("platforms.feishu.accounts.%s.app_id is required", name)
+	}
+	if account.AppSecret == "" {
+		return fmt.Errorf("platforms.feishu.accounts.%s.app_secret is required", name)
+	}
+	if account.BaseURL == "" {
+		account.BaseURL = DefaultFeishuBaseURL
+	}
+	if cfg.Platforms.Feishu.Accounts == nil {
+		cfg.Platforms.Feishu.Accounts = map[string]FeishuAccountConfig{}
+	}
+	cfg.Platforms.Feishu.Accounts[name] = account
+	return nil
+}
+
+// RemoveFeishuAccount removes a Feishu account configuration by account name.
+func RemoveFeishuAccount(cfg *Config, name string) {
+	name = strings.TrimSpace(name)
+	if name == "" || cfg.Platforms.Feishu.Accounts == nil {
+		return
+	}
+	delete(cfg.Platforms.Feishu.Accounts, name)
+}
+
+// ResolveFeishuAccount returns a Feishu account configuration by account name.
+func (c Config) ResolveFeishuAccount(name string) (FeishuAccountConfig, bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || c.Platforms.Feishu.Accounts == nil {
+		return FeishuAccountConfig{}, false, nil
+	}
+	account, ok := c.Platforms.Feishu.Accounts[name]
+	if !ok {
+		return FeishuAccountConfig{}, false, nil
+	}
+	account.AppID = strings.TrimSpace(account.AppID)
+	account.AppSecret = strings.TrimSpace(account.AppSecret)
+	account.BaseURL = strings.TrimRight(strings.TrimSpace(account.BaseURL), "/")
+	if account.BaseURL == "" {
+		account.BaseURL = DefaultFeishuBaseURL
+	}
+	if account.AppID == "" {
+		return account, true, fmt.Errorf("platforms.feishu.accounts.%s.app_id is required", name)
+	}
+	if account.AppSecret == "" {
+		return account, true, fmt.Errorf("platforms.feishu.accounts.%s.app_secret is required", name)
+	}
+	return account, true, nil
+}
+
 // ModelNames returns sorted model profile names.
 func (c LLMConfig) ModelNames() []string {
 	names := make([]string, 0, len(c.Models))
@@ -295,7 +454,7 @@ func (c LLMConfig) ResolveModel(name string) (ResolvedModel, error) {
 	}
 	endpoint := model.Endpoint
 	if endpoint == "" {
-		endpoint = DefaultModelEndpoint
+		endpoint = DefaultEndpointForProvider(model.Provider)
 	}
 	return ResolvedModel{
 		Name:     name,

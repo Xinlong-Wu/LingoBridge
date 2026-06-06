@@ -17,6 +17,10 @@ cp config.yaml.example ~/.lingobridge/config.yaml
 # Edit ~/.lingobridge/config.yaml with your LLM API key and settings
 ```
 
+If `~/.lingobridge/config.yaml` does not exist, the first real command you run
+starts an interactive setup flow. It asks for at least one model profile and
+sets that first profile as `llm.default_model`.
+
 Minimal config:
 
 ```yaml
@@ -28,6 +32,17 @@ llm:
       base_url: "https://api.deepseek.com/v1"
       api_key: "sk-your-key-here"
       id: "deepseek-chat"
+```
+
+You can also add model profiles from the CLI:
+
+```bash
+./lingobridge model add gpt4o \
+  --provider openai \
+  --base-url https://api.openai.com/v1 \
+  --api-key sk-your-openai-key \
+  --id gpt-4o \
+  --endpoint responses
 ```
 
 ### 3. Add a bot account
@@ -50,6 +65,10 @@ If Feishu credentials are omitted, LingoBridge prompts for them interactively:
 ./lingobridge account new feishu --name fsbot
 ```
 
+Feishu app credentials are saved under `platforms.feishu.accounts` in
+`~/.lingobridge/config.yaml`; the SQLite account record only stores account
+metadata used to list, delete, and supervise the running adapter.
+
 For Feishu, enable bot capability and long-connection event subscription for
 `im.message.receive_v1` in the Feishu Open Platform app console. The first
 version supports text messages in 1:1 chats and group messages that mention the
@@ -68,15 +87,19 @@ Listens to all enabled accounts concurrently. If no enabled accounts exist yet, 
 ```
 
 While `run` is active, `account new` and `account delete` notify it over a local Unix socket so account changes are applied without restarting the bot loop.
+`model add` also notifies the running process. On reload, LingoBridge reloads
+`config.yaml`, rebuilds the active model list, and restarts account monitors
+when relevant config changes.
 
 ## CLI Reference
 
 | Command | Description |
 |---|---|
 | `account new weixin [--name <name>]` | Add a WeChat bot account via QR login and reload a running bot process |
-| `account new feishu [--name <name>] [--app-id <id>] [--app-secret <secret>] [--base-url <url>]` | Add a Feishu self-built app account and prompt for missing credentials |
+| `account new feishu [--name <name>] [--app-id <id>] [--app-secret <secret>] [--base-url <url>]` | Add a Feishu self-built app account, write credentials to config, and reload a running bot process |
 | `account list` | List all accounts with their platform |
-| `account delete <name>` | Delete an account and reload a running bot process |
+| `account delete <name>` | Delete an account, remove Feishu config credentials when applicable, and reload a running bot process |
+| `model add <name> [--provider <openai\|anthropic>] [--base-url <url>] [--api-key <key>] [--id <model-id>] [--endpoint <mode>] [--default]` | Add an LLM model profile to config and optionally make it the default |
 | `run [--account <name>]` | Start the bot loop |
 
 ## In-Chat Commands
@@ -169,10 +192,16 @@ are not sent back to Feishu yet.
 | `llm.models.<name>.endpoint` | `chat` | Endpoint mode: `chat` or `responses` for OpenAI-compatible APIs, `messages` for Anthropic |
 | `llm.system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `llm.max_history` | `0` | Max historical messages per request. `0` = no limit |
+| `platforms.feishu.accounts.<name>.app_id` | — | Feishu app ID for the account named `<name>` |
+| `platforms.feishu.accounts.<name>.app_secret` | — | Feishu app secret |
+| `platforms.feishu.accounts.<name>.base_url` | `https://open.feishu.cn` | Feishu Open Platform base URL |
 
 Each model profile is independent. `provider`, `base_url`, `api_key`, and `id` are required; `endpoint` is optional and defaults to `chat`.
+For Anthropic model profiles, an omitted `endpoint` defaults to `messages`.
 Top-level `llm.model`, `llm.provider`, `llm.base_url`, `llm.api_key`, and `llm.endpoint` are no longer supported.
-On startup, `run` validates the default model profile and resets any saved per-user model preference that no longer exists back to `llm.default_model`.
+On startup and reload, `run` validates the default model profile and resets any
+saved per-user model preference that no longer exists back to
+`llm.default_model`.
 
 ## Storage
 
@@ -181,14 +210,16 @@ On startup, `run` validates the default model profile and resets any saved per-u
   config.yaml                          # User configuration
   lingobridge.sock                       # Local control socket used by a running process
   data/
-    lingobridge.db                       # SQLite: platform accounts, credentials, sessions, user preferences, sync cursors
+    lingobridge.db                       # SQLite: platform account metadata, sessions, user preferences, sync cursors
     sessions/{userId}/{sessionId}.jsonl # Conversation history; image attachments may store provider refs
     media/{safeUserId}/{safeSessionId}/ # Local copies of user and generated images
 ```
 
 The `accounts` table stores a `platform` value (`wechat` or `feishu`) and a
-`credentials_json` payload for platform-specific credentials. Existing WeChat
-accounts migrate automatically with `platform='wechat'`.
+`credentials_json` payload for platform-specific credentials. Feishu accounts
+keep app credentials in `config.yaml` instead of SQLite; Feishu records without
+matching `platforms.feishu.accounts.<name>` config will not run. Existing
+WeChat accounts migrate automatically with `platform='wechat'`.
 
 ## Internal Architecture
 
