@@ -1,10 +1,12 @@
 package logging
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 var shared = log.Default()
@@ -21,8 +23,16 @@ const (
 
 var currentLevel atomic.Int32
 
-// Logger is a component-prefixed view over the shared process logger.
-type Logger struct {
+// Logger is the shared logging interface used by LingoBridge and SDK adapters.
+type Logger interface {
+	Debug(context.Context, ...interface{})
+	Info(context.Context, ...interface{})
+	Warn(context.Context, ...interface{})
+	Error(context.Context, ...interface{})
+}
+
+// componentLogger is a component-prefixed view over the shared process logger.
+type componentLogger struct {
 	component string
 	base      *log.Logger
 }
@@ -81,7 +91,7 @@ func (l Level) String() string {
 
 // For returns a logger instance for one component, platform, or provider.
 func For(component string) Logger {
-	return Logger{
+	return componentLogger{
 		component: strings.Trim(strings.TrimSpace(component), "[]"),
 		base:      shared,
 	}
@@ -93,26 +103,26 @@ func Shared() *log.Logger {
 }
 
 // Debug logs a debug message.
-func (l Logger) Debug(format string, args ...any) {
-	l.output(Debug, fmt.Sprintf(format, args...))
+func (l componentLogger) Debug(ctx context.Context, args ...interface{}) {
+	l.output(Debug, formatArgs(args...))
 }
 
 // Info logs an informational message.
-func (l Logger) Info(format string, args ...any) {
-	l.output(Info, fmt.Sprintf(format, args...))
+func (l componentLogger) Info(ctx context.Context, args ...interface{}) {
+	l.output(Info, formatArgs(args...))
 }
 
 // Warn logs a warning message.
-func (l Logger) Warn(format string, args ...any) {
-	l.output(Warn, fmt.Sprintf(format, args...))
+func (l componentLogger) Warn(ctx context.Context, args ...interface{}) {
+	l.output(Warn, formatArgs(args...))
 }
 
 // Error logs an error message.
-func (l Logger) Error(format string, args ...any) {
-	l.output(Error, fmt.Sprintf(format, args...))
+func (l componentLogger) Error(ctx context.Context, args ...interface{}) {
+	l.output(Error, formatArgs(args...))
 }
 
-func (l Logger) output(level Level, message string) {
+func (l componentLogger) output(level Level, message string) {
 	if level < GetLevel() {
 		return
 	}
@@ -121,9 +131,37 @@ func (l Logger) output(level Level, message string) {
 		base = shared
 	}
 	message = strings.TrimRight(message, "\n")
-	message = "[" + level.String() + "] " + message
-	if l.component != "" {
-		message = "[" + l.component + "] " + message
+	component := l.component
+	if component == "" {
+		component = "app"
 	}
+	message = fmt.Sprintf("%s - [%s] - [%s] %s", time.Now().Format(time.RFC3339), strings.ToUpper(level.String()), component, message)
 	_ = base.Output(3, message)
+}
+
+func formatArgs(args ...interface{}) string {
+	if len(args) == 0 {
+		return ""
+	}
+	if format, ok := args[0].(string); ok && len(args) > 1 && hasFormatVerb(format) {
+		return fmt.Sprintf(format, args[1:]...)
+	}
+	return strings.TrimRight(fmt.Sprintln(args...), "\n")
+}
+
+func hasFormatVerb(format string) bool {
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' {
+			continue
+		}
+		i++
+		if i >= len(format) {
+			return false
+		}
+		if format[i] == '%' {
+			continue
+		}
+		return true
+	}
+	return false
 }

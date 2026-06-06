@@ -91,6 +91,9 @@ specific one, and `--verbose` to set the log level (`debug`, `info`, `warn`, or
 ./lingobridge run --verbose debug
 ```
 
+Logs are printed as `timestamp - [LEVEL] - [component] message`; Feishu SDK
+logs use the `feishu/lark` component.
+
 While `run` is active, `account new` and `account delete` notify it over a local Unix socket so account changes are applied without restarting the bot loop.
 `model add` also notifies the running process. On reload, LingoBridge reloads
 `config.yaml`, rebuilds the active model list, and restarts account monitors

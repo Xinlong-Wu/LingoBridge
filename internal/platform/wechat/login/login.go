@@ -2,6 +2,7 @@ package login
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -26,6 +27,7 @@ var loginLog = logging.For("wechat-login")
 
 // Login performs the QR code login flow and saves the account.
 func Login(st *store.Store, accountName string) error {
+	ctx := context.Background()
 	client := api.NewClient(fixedBaseURL, "")
 	client.Debug = false
 
@@ -66,7 +68,7 @@ func Login(st *store.Store, accountName string) error {
 	for time.Now().Before(deadline) {
 		statusResp, err := client.PollQRStatus(qrcode, pendingVerifyCode)
 		if err != nil {
-			loginLog.Warn("poll error: %v", err)
+			loginLog.Warn(ctx, "poll error: %v", err)
 			time.Sleep(qrPollInterval)
 			continue
 		}
@@ -130,7 +132,7 @@ func Login(st *store.Store, accountName string) error {
 			if statusResp.RedirectHost != "" {
 				pollBaseURL = "https://" + statusResp.RedirectHost
 				client.BaseURL = pollBaseURL
-				loginLog.Info("IDC redirect: %s", statusResp.RedirectHost)
+				loginLog.Info(ctx, "IDC redirect: %s", statusResp.RedirectHost)
 			}
 
 		case "confirmed":

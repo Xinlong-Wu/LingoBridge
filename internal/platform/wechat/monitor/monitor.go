@@ -141,20 +141,20 @@ func defaultLLMFactory(model config.ResolvedModel) llm.Client {
 }
 
 func (b *bot) runAccount(ctx context.Context, acc store.Account) error {
-	wechatLog.Info("Starting for account %s (%s)", acc.Name, acc.ID)
+	wechatLog.Info(ctx, "Starting for account %s (%s)", acc.Name, acc.ID)
 
 	if err := b.client.NotifyStart(); err != nil {
-		wechatLog.Warn("notifyStart failed: %v", err)
+		wechatLog.Warn(ctx, "notifyStart failed: %v", err)
 	}
 	defer func() {
 		if err := b.client.NotifyStop(); err != nil {
-			wechatLog.Warn("notifyStop failed: %v", err)
+			wechatLog.Warn(ctx, "notifyStop failed: %v", err)
 		}
 	}()
 
 	buf, err := b.cursors.GetSyncBuf(acc.ID)
 	if err != nil {
-		wechatLog.Warn("load sync buf: %v", err)
+		wechatLog.Warn(ctx, "load sync buf: %v", err)
 	}
 
 	consecutiveFails := 0
@@ -167,7 +167,7 @@ func (b *bot) runAccount(ctx context.Context, acc store.Account) error {
 
 		if time.Now().Before(sessionPausedUntil) {
 			wait := time.Until(sessionPausedUntil)
-			wechatLog.Warn("Session paused for %v", wait.Round(time.Second))
+			wechatLog.Warn(ctx, "Session paused for %v", wait.Round(time.Second))
 			if !sleepContext(ctx, wait) {
 				return nil
 			}
@@ -179,7 +179,7 @@ func (b *bot) runAccount(ctx context.Context, acc store.Account) error {
 				return nil
 			}
 			consecutiveFails++
-			wechatLog.Warn("getUpdates failed: %v (fail %d/%d)", err, consecutiveFails, maxConsecutiveFails)
+			wechatLog.Warn(ctx, "getUpdates failed: %v (fail %d/%d)", err, consecutiveFails, maxConsecutiveFails)
 			if consecutiveFails >= maxConsecutiveFails {
 				if !sleepContext(ctx, backoffBase) {
 					return nil
@@ -191,7 +191,7 @@ func (b *bot) runAccount(ctx context.Context, acc store.Account) error {
 		consecutiveFails = 0
 
 		if resp.Errcode == -14 {
-			wechatLog.Warn("Session expired, pausing for %v", sessionExpiryPause)
+			wechatLog.Warn(ctx, "Session expired, pausing for %v", sessionExpiryPause)
 			sessionPausedUntil = time.Now().Add(sessionExpiryPause)
 			continue
 		}
@@ -199,13 +199,13 @@ func (b *bot) runAccount(ctx context.Context, acc store.Account) error {
 		if resp.GetUpdatesBuf != "" {
 			buf = resp.GetUpdatesBuf
 			if err := b.cursors.SaveSyncBuf(acc.ID, buf); err != nil {
-				wechatLog.Warn("save sync buf: %v", err)
+				wechatLog.Warn(ctx, "save sync buf: %v", err)
 			}
 		}
 
 		for _, msg := range resp.Msgs {
 			if err := b.processOne(msg); err != nil {
-				wechatLog.Warn("process message: %v", err)
+				wechatLog.Warn(ctx, "process message: %v", err)
 			}
 		}
 	}
@@ -232,7 +232,7 @@ func (b *bot) processOne(msg *api.WeixinMessage) error {
 	contextToken := msg.ContextToken
 	commandText := message.ExtractText(msg)
 	llmText := message.ExtractLLMText(msg)
-	wechatLog.Debug("msg from=%s len=%d", fromUserID, len(llmText))
+	wechatLog.Debug(context.Background(), "msg from=%s len=%d", fromUserID, len(llmText))
 
 	if strings.HasPrefix(strings.TrimSpace(commandText), "/") {
 		return b.coreHandler().Handle(context.Background(), core.InboundMessage{
@@ -266,22 +266,22 @@ func (b *bot) applyMedia(msg *api.WeixinMessage, fromUserID, contextToken, text 
 		switch item.Type {
 		case api.ItemTypeImage:
 			if item.ImageItem != nil && item.ImageItem.Media != nil {
-				wechatLog.Debug("image from=%s", fromUserID)
+				wechatLog.Debug(context.Background(), "image from=%s", fromUserID)
 			}
 		case api.ItemTypeVoice:
 			if item.VoiceItem != nil && item.VoiceItem.Text != "" {
 				text = item.VoiceItem.Text
 			} else if item.VoiceItem != nil && item.VoiceItem.Media != nil {
-				wechatLog.Debug("voice from=%s (no transcription)", fromUserID)
+				wechatLog.Debug(context.Background(), "voice from=%s (no transcription)", fromUserID)
 				b.sendText(fromUserID, "🎤 语音消息暂不支持自动识别，请发送文字。", contextToken)
 				return text, true
 			}
 		case api.ItemTypeVideo:
-			wechatLog.Debug("video from=%s", fromUserID)
+			wechatLog.Debug(context.Background(), "video from=%s", fromUserID)
 			b.sendText(fromUserID, "🎬 视频消息已收到，暂不支持视频理解。", contextToken)
 			return text, true
 		case api.ItemTypeFile:
-			wechatLog.Debug("file from=%s", fromUserID)
+			wechatLog.Debug(context.Background(), "file from=%s", fromUserID)
 			b.sendText(fromUserID, "📎 文件消息已收到，暂不支持文件处理。", contextToken)
 			return text, true
 		}
@@ -551,7 +551,7 @@ func (b *bot) persistResponseImages(userID, sessionID string, resp llm.Response)
 		resp.Images[i].MIMEType = mimeType
 		mediaFile, err := b.saveMediaFile(userID, sessionID, "assistant", i, mimeType, resp.Images[i].Data)
 		if err != nil {
-			wechatLog.Warn("save response image failed image=%d: %v", i+1, err)
+			wechatLog.Warn(context.Background(), "save response image failed image=%d: %v", i+1, err)
 			continue
 		}
 		resp.Images[i].Filename = mediaFile.Filename
@@ -599,7 +599,7 @@ func (b *bot) sendText(toUserID, text, contextToken string) error {
 	for i, chunk := range chunks {
 		msg := message.BuildTextMessage(toUserID, chunk, contextToken)
 		if err := b.client.SendMessage(msg); err != nil {
-			wechatLog.Error("sendMessage failed chunk=%d/%d len=%d: %v", i+1, len(chunks), len(chunk), err)
+			wechatLog.Error(context.Background(), "sendMessage failed chunk=%d/%d len=%d: %v", i+1, len(chunks), len(chunk), err)
 			return err
 		}
 	}
@@ -618,7 +618,7 @@ func (b *bot) sendImage(toUserID, contextToken string, image llm.Image) error {
 
 	msg := message.BuildImageMessage(toUserID, uploaded.Media, uploaded.MidSize, contextToken)
 	if err := b.client.SendMessage(msg); err != nil {
-		wechatLog.Error("sendImage failed len=%d: %v", len(image.Data), err)
+		wechatLog.Error(context.Background(), "sendImage failed len=%d: %v", len(image.Data), err)
 		return err
 	}
 	return nil
@@ -669,7 +669,7 @@ func (b *bot) sendTyping(toUserID, contextToken string, status int) {
 		return
 	}
 	if err := b.client.SendTyping(toUserID, resp.TypingTicket, status); err != nil {
-		wechatLog.Warn("sendTyping failed: %v", err)
+		wechatLog.Warn(context.Background(), "sendTyping failed: %v", err)
 	}
 }
 

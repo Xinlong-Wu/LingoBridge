@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -56,7 +57,7 @@ func (c *openaiResponsesClient) AssistantMessage(resp Response) (store.Message, 
 		mimeType, filename := imageHistoryMetadata(image)
 		fileID, err := c.uploadVisionFile(filename, image.Data)
 		if err != nil {
-			openAILog.Warn("responses image upload failed model=%s filename=%s: %v", c.cfg.Model, filename, err)
+			openAILog.Warn(context.Background(), "responses image upload failed model=%s filename=%s: %v", c.cfg.Model, filename, err)
 			fileID = ""
 		}
 		msg.Attachments = append(msg.Attachments, store.Attachment{

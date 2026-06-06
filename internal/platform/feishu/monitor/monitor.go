@@ -26,7 +26,10 @@ import (
 
 const unsupportedMessageText = "暂不支持此类飞书消息，请发送文字。"
 
-var feishuLog = logging.For("feishu")
+var (
+	feishuLog    = logging.For("feishu")
+	feishuSDKLog = logging.For("feishu/lark")
+)
 
 type starter interface {
 	Start(ctx context.Context) error
@@ -113,26 +116,29 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 		eventCommands: map[string][]string{},
 	}
 
-	d, registeredEvents, err := b.configureEventHandlers(dispatcher.NewEventDispatcher("", "").OnP2MessageReceiveV1(b.handleMessage), p.config.Events)
+	d := dispatcher.NewEventDispatcher("", "")
+	d.Config.Logger = feishuSDKLog
+	d, registeredEvents, err := b.configureEventHandlers(d.OnP2MessageReceiveV1(b.handleMessage), p.config.Events)
 	if err != nil {
 		return err
 	}
 	opts := []larkws.ClientOption{
 		larkws.WithEventHandler(d),
+		larkws.WithLogger(feishuSDKLog),
 		larkws.WithLogLevel(sdkLogLevel),
 		larkws.WithOnReady(func() {
-			feishuLog.Info("long connection ready for account %s (%s)", acc.Name, acc.ID)
+			feishuLog.Info(ctx, "long connection ready for account %s (%s)", acc.Name, acc.ID)
 		}),
 		larkws.WithOnError(func(err error) {
-			feishuLog.Error("long connection error account=%s: %v", acc.Name, err)
+			feishuLog.Error(ctx, "long connection error account=%s: %v", acc.Name, err)
 		}),
 	}
 	if domain := strings.TrimRight(strings.TrimSpace(baseURL), "/"); domain != "" {
 		opts = append(opts, larkws.WithDomain(domain))
 	}
 	wsClient := larkws.NewClient(creds.AppID, creds.AppSecret, opts...)
-	feishuLog.Info("registered events for account %s (%s): %s", acc.Name, acc.ID, strings.Join(registeredEvents, ", "))
-	feishuLog.Info("starting for account %s (%s)", acc.Name, acc.ID)
+	feishuLog.Info(ctx, "registered events for account %s (%s): %s", acc.Name, acc.ID, strings.Join(registeredEvents, ", "))
+	feishuLog.Info(ctx, "starting for account %s (%s)", acc.Name, acc.ID)
 	return runClient(ctx, wsClient)
 }
 
@@ -154,7 +160,10 @@ func runClient(ctx context.Context, client interface {
 }
 
 func newRESTClient(creds feishu.Credentials, baseURL string, level larkcore.LogLevel) *lark.Client {
-	opts := []lark.ClientOptionFunc{lark.WithLogLevel(level)}
+	opts := []lark.ClientOptionFunc{
+		lark.WithLogger(feishuSDKLog),
+		lark.WithLogLevel(level),
+	}
 	if baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/"); baseURL != "" {
 		opts = append(opts, lark.WithOpenBaseUrl(baseURL))
 	}
@@ -206,7 +215,7 @@ func (b *bot) configureEventHandlers(d *dispatcher.EventDispatcher, events []fei
 }
 
 func (b *bot) handleMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
-	in, ok := normalizeEvent(event)
+	in, ok := normalizeEvent(ctx, event)
 	if !ok {
 		return nil
 	}
@@ -236,7 +245,7 @@ type incomingMessage struct {
 	Unsupported bool
 }
 
-func normalizeEvent(event *larkim.P2MessageReceiveV1) (incomingMessage, bool) {
+func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1) (incomingMessage, bool) {
 	if event == nil || event.Event == nil || event.Event.Sender == nil || event.Event.Message == nil {
 		return incomingMessage{}, false
 	}
@@ -269,7 +278,7 @@ func normalizeEvent(event *larkim.P2MessageReceiveV1) (incomingMessage, bool) {
 
 	text, err := extractText(deref(msg.Content), msg.Mentions)
 	if err != nil {
-		feishuLog.Warn("parse text message: %v", err)
+		feishuLog.Warn(ctx, "parse text message: %v", err)
 		return incomingMessage{UserID: userKey, ChatID: chatID, Unsupported: true}, true
 	}
 	return incomingMessage{UserID: userKey, ChatID: chatID, Text: text}, true
@@ -352,7 +361,7 @@ func runShellScript(ctx context.Context, script string, env map[string]string) (
 		return stdout.String(), err
 	}
 	if msg := strings.TrimSpace(stderr.String()); msg != "" {
-		feishuLog.Warn("event command stderr: %s", msg)
+		feishuLog.Warn(ctx, "event command stderr: %s", msg)
 	}
 	return stdout.String(), nil
 }

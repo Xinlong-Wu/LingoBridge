@@ -36,9 +36,10 @@ var (
 )
 
 func logBuildInfo() {
+	ctx := context.Background()
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
-		cliLog.Info("LingoBridge dev go/%s", runtime.Version()[2:])
+		cliLog.Info(ctx, "LingoBridge dev go/%s", runtime.Version()[2:])
 		return
 	}
 
@@ -72,9 +73,9 @@ func logBuildInfo() {
 	}
 
 	if vcsTime != "" {
-		cliLog.Info("LingoBridge %s (%s) go/%s", version, vcsTime, runtime.Version()[2:])
+		cliLog.Info(ctx, "LingoBridge %s (%s) go/%s", version, vcsTime, runtime.Version()[2:])
 	} else {
-		cliLog.Info("LingoBridge %s go/%s", version, runtime.Version()[2:])
+		cliLog.Info(ctx, "LingoBridge %s go/%s", version, runtime.Version()[2:])
 	}
 }
 
@@ -443,7 +444,7 @@ func (r *runtimeState) updateConfig(cfg config.Config) error {
 			return fmt.Errorf("reset %s user models: %w", platformID, err)
 		}
 		if resetCount > 0 {
-			runtimeLog.Info("reset %d %s user model preference(s) to default model %q", resetCount, platformID, cfg.LLM.DefaultModel)
+			runtimeLog.Info(context.Background(), "reset %d %s user model preference(s) to default model %q", resetCount, platformID, cfg.LLM.DefaultModel)
 		}
 		sm := session.NewManager(st, cfg.LLM)
 		runtimes[platformID] = platformRuntime{
@@ -482,10 +483,11 @@ func (r *runtimeState) signatureExtra(acc store.Account) string {
 }
 
 func logConfig(cfg config.Config) {
-	configLog.Info("llm default_model: %s", cfg.LLM.DefaultModel)
-	configLog.Info("llm models: %s", strings.Join(cfg.LLM.ModelNames(), ", "))
-	configLog.Info("llm max_history: %d", cfg.LLM.MaxHistory)
-	configLog.Info("llm system_prompt: %s", cfg.LLM.SystemPrompt)
+	ctx := context.Background()
+	configLog.Info(ctx, "llm default_model: %s", cfg.LLM.DefaultModel)
+	configLog.Info(ctx, "llm models: %s", strings.Join(cfg.LLM.ModelNames(), ", "))
+	configLog.Info(ctx, "llm max_history: %d", cfg.LLM.MaxHistory)
+	configLog.Info(ctx, "llm system_prompt: %s", cfg.LLM.SystemPrompt)
 }
 
 func cmdAccountNew(args []string) error {
@@ -657,7 +659,7 @@ func cmdRun(args []string) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := controlServer.Close(shutdownCtx); err != nil {
-			controlLog.Warn("server shutdown: %v", err)
+			controlLog.Warn(shutdownCtx, "server shutdown: %v", err)
 		}
 	}()
 
@@ -665,9 +667,9 @@ func cmdRun(args []string) error {
 		return fmt.Errorf("reconcile accounts: %w", err)
 	}
 
-	runtimeLog.Info("listening on %d account(s)...", supervisor.RunningCount())
+	runtimeLog.Info(runCtx, "listening on %d account(s)...", supervisor.RunningCount())
 	<-runCtx.Done()
-	runtimeLog.Info("shutting down...")
+	runtimeLog.Info(runCtx, "shutting down...")
 	supervisor.Stop()
 	return nil
 }

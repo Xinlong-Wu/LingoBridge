@@ -53,7 +53,7 @@ func (f *fakeSender) SendText(ctx context.Context, chatID, text string) error {
 }
 
 func TestNormalizeP2PTextMessage(t *testing.T) {
-	in, ok := normalizeEvent(feishuEvent("p2p", "text", `{"text":"hi"}`, nil))
+	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "text", `{"text":"hi"}`, nil))
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
@@ -63,7 +63,7 @@ func TestNormalizeP2PTextMessage(t *testing.T) {
 }
 
 func TestNormalizeGroupMessageRequiresBotMention(t *testing.T) {
-	if _, ok := normalizeEvent(feishuEvent("group", "text", `{"text":"hi"}`, nil)); ok {
+	if _, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"hi"}`, nil)); ok {
 		t.Fatal("group message without bot mention was accepted")
 	}
 }
@@ -72,7 +72,7 @@ func TestNormalizeGroupMentionStripsMentionKey(t *testing.T) {
 	mentions := []*larkim.MentionEvent{
 		larkim.NewMentionEventBuilder().Key("@_user_1").MentionedType("app").Build(),
 	}
-	in, ok := normalizeEvent(feishuEvent("group", "text", `{"text":"@_user_1 hello"}`, mentions))
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"@_user_1 hello"}`, mentions))
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}

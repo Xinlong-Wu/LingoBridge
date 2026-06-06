@@ -2,6 +2,8 @@ package logging
 
 import (
 	"bytes"
+	"context"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -10,10 +12,10 @@ func TestLoggerPrefixesSharedOutput(t *testing.T) {
 	buf := captureLogs(t)
 	SetLevel(Info)
 
-	For("[core]").Info("hello %s", "world")
+	For("[core]").Info(context.Background(), "hello %s", "world")
 
 	got := strings.TrimSpace(buf.String())
-	if got != "[core] [info] hello world" {
+	if !regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[^ ]+ - \[INFO\] - \[core\] hello world$`).MatchString(got) {
 		t.Fatalf("unexpected log output: %q", got)
 	}
 }
@@ -30,17 +32,17 @@ func TestLevelFiltering(t *testing.T) {
 	log := For("test")
 
 	SetLevel(Info)
-	log.Debug("hidden")
-	log.Info("visible")
-	if got := buf.String(); strings.Contains(got, "hidden") || !strings.Contains(got, "[info] visible") {
+	log.Debug(context.Background(), "hidden")
+	log.Info(context.Background(), "visible")
+	if got := buf.String(); strings.Contains(got, "hidden") || !strings.Contains(got, "[INFO] - [test] visible") {
 		t.Fatalf("info filtering output = %q", got)
 	}
 
 	buf.Reset()
 	SetLevel(Error)
-	log.Warn("hidden")
-	log.Error("visible")
-	if got := buf.String(); strings.Contains(got, "hidden") || !strings.Contains(got, "[error] visible") {
+	log.Warn(context.Background(), "hidden")
+	log.Error(context.Background(), "visible")
+	if got := buf.String(); strings.Contains(got, "hidden") || !strings.Contains(got, "[ERROR] - [test] visible") {
 		t.Fatalf("error filtering output = %q", got)
 	}
 }
