@@ -159,6 +159,26 @@ func TestEnsureConfigInitializedCreatesFirstModelAsDefault(t *testing.T) {
 	}
 }
 
+func TestEnsureConfigInitializedRepromptsInvalidEndpoint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	input := strings.NewReader("first\nopenai\nhttps://api.example.com/v1\nkey\nmodel\nresponse\nresponses\n")
+	var out bytes.Buffer
+
+	if err := ensureConfigInitialized(input, &out); err != nil {
+		t.Fatalf("ensureConfigInitialized returned error: %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.LLM.Models["first"].Endpoint != "responses" {
+		t.Fatalf("endpoint = %q, want responses", cfg.LLM.Models["first"].Endpoint)
+	}
+	if !strings.Contains(out.String(), "注意不是 response") || !strings.Contains(out.String(), "复数 responses") {
+		t.Fatalf("prompt output = %q, want responses guidance", out.String())
+	}
+}
+
 func TestCmdModelAddWritesConfig(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	writeTestConfig(t)

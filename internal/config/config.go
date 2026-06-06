@@ -276,6 +276,24 @@ func DefaultEndpointForProvider(provider string) string {
 	return DefaultModelEndpoint
 }
 
+// EndpointChoicesForProvider returns valid endpoint modes for a provider.
+func EndpointChoicesForProvider(provider string) []string {
+	if provider == "anthropic" {
+		return []string{DefaultAnthropicEndpoint}
+	}
+	return []string{DefaultModelEndpoint, "responses"}
+}
+
+// IsValidEndpointForProvider reports whether endpoint is valid for provider.
+func IsValidEndpointForProvider(provider, endpoint string) bool {
+	for _, choice := range EndpointChoicesForProvider(provider) {
+		if endpoint == choice {
+			return true
+		}
+	}
+	return false
+}
+
 // Validate checks that the configured model profiles are complete and usable.
 func (c LLMConfig) Validate() error {
 	if c.DefaultModel == "" {
@@ -320,11 +338,11 @@ func validateModelProfile(name string, model LLMModelConfig) error {
 	}
 	switch model.Provider {
 	case "openai":
-		if endpoint != "chat" && endpoint != "responses" {
-			return fmt.Errorf("llm.models.%s.endpoint must be chat or responses for openai", name)
+		if !IsValidEndpointForProvider(model.Provider, endpoint) {
+			return fmt.Errorf("llm.models.%s.endpoint must be chat or responses for openai; use responses, not response", name)
 		}
 	case "anthropic":
-		if endpoint != "messages" {
+		if !IsValidEndpointForProvider(model.Provider, endpoint) {
 			return fmt.Errorf("llm.models.%s.endpoint must be messages for anthropic", name)
 		}
 	}

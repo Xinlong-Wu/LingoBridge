@@ -354,13 +354,31 @@ func promptModelProfile(name string, model config.LLMModelConfig, in io.Reader, 
 	}
 	if strings.TrimSpace(model.Endpoint) == "" {
 		defaultEndpoint := config.DefaultEndpointForProvider(strings.TrimSpace(model.Provider))
-		prompt := fmt.Sprintf("Endpoint（直接回车使用 %s）: ", defaultEndpoint)
-		model.Endpoint, err = promptCLIValue(reader, out, prompt, false, defaultEndpoint)
+		model.Endpoint, err = promptEndpoint(reader, out, strings.TrimSpace(model.Provider), defaultEndpoint)
 		if err != nil {
 			return "", model, err
 		}
 	}
 	return strings.TrimSpace(name), model, nil
+}
+
+func promptEndpoint(reader *bufio.Reader, out io.Writer, provider, defaultEndpoint string) (string, error) {
+	choices := strings.Join(config.EndpointChoicesForProvider(provider), "/")
+	prompt := fmt.Sprintf("Endpoint（%s, default [%s]): ", choices, defaultEndpoint)
+	for {
+		endpoint, err := promptCLIValue(reader, out, prompt, false, defaultEndpoint)
+		if err != nil {
+			return "", err
+		}
+		endpoint = strings.TrimSpace(endpoint)
+		if config.IsValidEndpointForProvider(provider, endpoint) {
+			return endpoint, nil
+		}
+		fmt.Fprintf(out, "Endpoint 无效：%s。%s 可用值：%s。\n", endpoint, provider, choices)
+		if strings.EqualFold(endpoint, "response") {
+			fmt.Fprintln(out, "提示：OpenAI Responses endpoint 使用复数 responses。")
+		}
+	}
 }
 
 func promptCLIValue(reader *bufio.Reader, out io.Writer, prompt string, required bool, defaultValue string) (string, error) {

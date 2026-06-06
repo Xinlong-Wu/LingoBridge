@@ -127,6 +127,18 @@ func TestLLMConfigValidateMissingRequiredField(t *testing.T) {
 	}
 }
 
+func TestLLMConfigValidateOpenAIEndpointGuidesResponses(t *testing.T) {
+	cfg := validLLMConfig()
+	model := cfg.Models["deepseek"]
+	model.Endpoint = "response"
+	cfg.Models["deepseek"] = model
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "use responses, not response") {
+		t.Fatalf("Validate error = %v, want responses guidance", err)
+	}
+}
+
 func TestLoadDefaultsMissingEndpointToChat(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	path, err := ConfigPath()
