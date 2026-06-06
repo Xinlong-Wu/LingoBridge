@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -19,17 +20,30 @@ type sdkSender struct {
 	client *lark.Client
 }
 
+type richTextContent struct {
+	ZhCN richTextLanguage `json:"zh_cn"`
+}
+
+type richTextLanguage struct {
+	Content [][]richTextTextElement `json:"content"`
+}
+
+type richTextTextElement struct {
+	Tag  string `json:"tag"`
+	Text string `json:"text"`
+}
+
 func (s *sdkSender) SendText(ctx context.Context, chatID, text string) error {
-	body, err := json.Marshal(textContent{Text: text})
+	body, err := marshalRichTextContent(text)
 	if err != nil {
-		return fmt.Errorf("marshal feishu text content: %w", err)
+		return fmt.Errorf("marshal feishu rich text content: %w", err)
 	}
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType("chat_id").
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(chatID).
-			MsgType("text").
-			Content(string(body)).
+			MsgType(larkim.MsgTypePost).
+			Content(body).
 			Build()).
 		Build()
 	resp, err := s.client.Im.Message.Create(ctx, req)
@@ -40,6 +54,33 @@ func (s *sdkSender) SendText(ctx context.Context, chatID, text string) error {
 		return fmt.Errorf("send feishu message code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+func marshalRichTextContent(text string) (string, error) {
+	body, err := json.Marshal(buildRichTextContent(text))
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func buildRichTextContent(text string) richTextContent {
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	lines := strings.Split(normalized, "\n")
+	content := make([][]richTextTextElement, 0, len(lines))
+	for _, line := range lines {
+		if line == "" {
+			line = " "
+		}
+		content = append(content, []richTextTextElement{{
+			Tag:  "text",
+			Text: line,
+		}})
+	}
+	return richTextContent{
+		ZhCN: richTextLanguage{Content: content},
+	}
 }
 
 func (s *sdkSender) AddReaction(ctx context.Context, messageID, emojiType string) (string, error) {

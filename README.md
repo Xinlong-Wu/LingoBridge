@@ -187,8 +187,8 @@ a list of shell command strings. `version: "1.0"` events are registered with
 Feishu SDK `OnCustomizedEvent`; `version: "2.0"` events are registered through
 LingoBridge's built-in event-name to `OnP2...` mapping. Configured v2.0 events
 currently support `im.chat.access_event.bot_p2p_chat_entered_v1`. Non-empty
-stdout from each command is sent back as a Feishu text message only when the
-event contains a `chat_id`.
+stdout from each command is sent back as a Feishu rich text message only when
+the event contains a `chat_id`.
 Event commands receive environment variables including
 `LINGOBRIDGE_EVENT_NAME`, `LINGOBRIDGE_EVENT_JSON`,
 `LINGOBRIDGE_COMMAND_HELP`, and Feishu-specific fields such as
