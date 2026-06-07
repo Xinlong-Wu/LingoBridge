@@ -50,6 +50,7 @@ func (r feishuResponder) StartTyping(ctx context.Context) func() {
 }
 
 func (b *bot) handleMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+	logReceivedMessage(ctx, event)
 	in, ok := normalizeEvent(ctx, event)
 	if !ok {
 		return nil
@@ -64,6 +65,28 @@ func (b *bot) handleMessage(ctx context.Context, event *larkim.P2MessageReceiveV
 
 	go b.processMessage(in)
 	return nil
+}
+
+func logReceivedMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) {
+	if event == nil || event.Event == nil || event.Event.Message == nil {
+		return
+	}
+	msg := event.Event.Message
+	user := ""
+	if event.Event.Sender != nil {
+		user = userOpenID(event.Event.Sender.SenderId)
+		if user == "" {
+			user = userID(event.Event.Sender.SenderId)
+		}
+	}
+	feishuLog.Info(ctx, "received feishu message chat=%s user=%s message=%s type=%s chat_type=%s event=%s",
+		deref(msg.ChatId),
+		user,
+		deref(msg.MessageId),
+		deref(msg.MessageType),
+		deref(msg.ChatType),
+		feishuEventID(event),
+	)
 }
 
 func (b *bot) processMessage(in incomingMessage) {
@@ -154,4 +177,11 @@ func feishuDedupeKey(event *larkim.P2MessageReceiveV1) string {
 		return event.EventV2Base.Header.EventID
 	}
 	return ""
+}
+
+func feishuEventID(event *larkim.P2MessageReceiveV1) string {
+	if event == nil || event.EventV2Base == nil || event.EventV2Base.Header == nil {
+		return ""
+	}
+	return event.EventV2Base.Header.EventID
 }

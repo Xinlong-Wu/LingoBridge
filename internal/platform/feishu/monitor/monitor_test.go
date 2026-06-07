@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -244,6 +245,27 @@ func waitForReactionDeletes(t *testing.T, sender *fakeSender, want int) fakeSend
 	}
 }
 
+func captureMonitorLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	base := logging.Shared()
+	originalWriter := base.Writer()
+	originalFlags := base.Flags()
+	originalPrefix := base.Prefix()
+	originalLevel := logging.GetLevel()
+	t.Cleanup(func() {
+		base.SetOutput(originalWriter)
+		base.SetFlags(originalFlags)
+		base.SetPrefix(originalPrefix)
+		logging.SetLevel(originalLevel)
+	})
+
+	var buf bytes.Buffer
+	base.SetOutput(&buf)
+	base.SetFlags(0)
+	base.SetPrefix("")
+	return &buf
+}
+
 func TestNormalizeP2PTextMessage(t *testing.T) {
 	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "text", `{"text":"hi"}`, nil))
 	if !ok {
@@ -270,6 +292,33 @@ func TestNormalizeGroupMentionStripsMentionKey(t *testing.T) {
 	}
 	if in.UserID != "feishu:oc_chat:ou_user" || in.Text != "hello" {
 		t.Fatalf("incoming = %#v", in)
+	}
+}
+
+func TestHandleMessageLogsReceivedMetadata(t *testing.T) {
+	buf := captureMonitorLogs(t)
+	logging.SetLevel(logging.Info)
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender}
+
+	if err := b.handleMessage(context.Background(), feishuEvent("p2p", "text", `{"text":"hi"}`, nil)); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+
+	got := buf.String()
+	for _, want := range []string{
+		"[INFO] - [feishu] received feishu message",
+		"chat=oc_chat",
+		"user=ou_user",
+		"message=om_message",
+		"type=text",
+		"chat_type=p2p",
+		"event=event_message",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("log output = %q, want %q", got, want)
+		}
 	}
 }
 
