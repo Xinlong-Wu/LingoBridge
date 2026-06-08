@@ -69,11 +69,11 @@ func TestDefaultDefinitionsSetCoreRuntimeOptions(t *testing.T) {
 	if !ok {
 		t.Fatal("feishu definition not found")
 	}
-	if FeishuTextChunkLimit != 30*1024 {
-		t.Fatalf("FeishuTextChunkLimit = %d, want %d", FeishuTextChunkLimit, 30*1024)
+	if FeishuTextChunkLimit != 25*1024 {
+		t.Fatalf("FeishuTextChunkLimit = %d, want %d", FeishuTextChunkLimit, 25*1024)
 	}
 	if feishu.TextChunkLimit != FeishuTextChunkLimit {
-		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishu.TextChunkLimit, 30*1024)
+		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishu.TextChunkLimit, 25*1024)
 	}
 	if !feishu.EnableTextStreaming {
 		t.Fatal("feishu EnableTextStreaming = false, want true")

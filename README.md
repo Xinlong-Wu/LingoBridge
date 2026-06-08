@@ -174,7 +174,9 @@ Image understanding currently requires an OpenAI-compatible model profile with
 `请描述这张图片。` as the user prompt.
 
 Long text replies are automatically split into multiple WeChat messages before
-sending.
+sending. Before sending WeChat text, the WeChat monitor applies its private
+markdown-to-WeChat filter to remove unsupported Markdown wrappers while keeping
+the readable content.
 
 ### Feishu
 
@@ -184,13 +186,15 @@ processed, and the mention token is removed before sending text to the LLM.
 LLM text replies are streamed by updating one Feishu rich text message in
 place. In-chat command replies, event command output, unsupported-message
 notices, and generated-image notices are still sent as normal one-shot
-messages. Long Feishu replies are split into multiple streamed rich text
+messages. Feishu outbound text is sent as rich text markdown content, using the
+core reply text without the WeChat markdown filter. Long Feishu replies are
+split into multiple streamed rich text
 messages as they are generated, and each message keeps its own edit budget.
 Stream previews slow down as the reply grows and are capped to stay within
 Feishu's per-message edit limit. The final update is prioritized; if Feishu
 still rejects it, LingoBridge sends the final answer as a new rich text message.
 Long text splitting prefers line boundaries; WeChat keeps a 4000-character
-limit, while Feishu rich text uses a 30 KiB threshold and splits individual
+limit, while Feishu rich text uses a 25 KiB threshold and splits individual
 over-limit lines only at UTF-8 safe boundaries.
 The built-in Feishu runtime enables this code-level streaming path explicitly.
 Custom integrations can enable it by setting `core.Bot.EnableTextStreaming` to
@@ -300,6 +304,7 @@ cmd/lingobridge/            # CLI entrypoint and process orchestration
 internal/config/            # Shared config file, generic platforms.<platform> YAML preservation
 internal/platform/          # Platform registry and parameter/runtime handler registration
 internal/platform/wechat/   # WeChat frontend adapter: native events/API <-> core messages
+internal/platform/wechat/monitor/ # WeChat monitor, reply sender, media handling, and markdown-to-WeChat filtering
 internal/platform/feishu/   # Feishu frontend adapter and its private config schema
 internal/platform/feishu/monitor/ # Feishu long-connection monitor, message/text-stream adapter, and event hooks
 internal/core/              # Middle layer: scoped platform config/data APIs, commands, sessions, LLM orchestration

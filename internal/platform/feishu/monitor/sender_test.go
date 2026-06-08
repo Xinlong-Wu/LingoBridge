@@ -10,7 +10,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 )
 
-func TestMarshalRichTextContentBuildsPostContent(t *testing.T) {
+func TestMarshalRichTextContentBuildsMarkdownPostContent(t *testing.T) {
 	body, err := marshalRichTextContent("hello\n\nworld")
 	if err != nil {
 		t.Fatalf("marshalRichTextContent returned error: %v", err)
@@ -21,39 +21,19 @@ func TestMarshalRichTextContentBuildsPostContent(t *testing.T) {
 		t.Fatalf("unmarshal rich text content: %v", err)
 	}
 
-	lines := content.ZhCN.Content
-	if len(lines) != 3 {
-		t.Fatalf("content lines = %d, want 3", len(lines))
-	}
-	tests := []struct {
-		line int
-		text string
-	}{
-		{line: 0, text: "hello"},
-		{line: 1, text: " "},
-		{line: 2, text: "world"},
-	}
-	for _, tc := range tests {
-		if len(lines[tc.line]) != 1 {
-			t.Fatalf("line %d elements = %d, want 1", tc.line, len(lines[tc.line]))
-		}
-		element := lines[tc.line][0]
-		if element.Tag != "text" || element.Text != tc.text {
-			t.Fatalf("line %d element = %#v, want text %q", tc.line, element, tc.text)
-		}
-	}
+	assertMarkdownContent(t, content, "hello\n\nworld")
 }
 
 func TestBuildRichTextContentNormalizesCRLF(t *testing.T) {
 	content := buildRichTextContent("one\r\ntwo\rthree")
 
-	lines := content.ZhCN.Content
-	if len(lines) != 3 {
-		t.Fatalf("content lines = %d, want 3", len(lines))
-	}
-	if lines[0][0].Text != "one" || lines[1][0].Text != "two" || lines[2][0].Text != "three" {
-		t.Fatalf("content = %#v, want normalized line endings", lines)
-	}
+	assertMarkdownContent(t, content, "one\ntwo\nthree")
+}
+
+func TestBuildRichTextContentUsesSpaceForEmptyText(t *testing.T) {
+	content := buildRichTextContent("")
+
+	assertMarkdownContent(t, content, " ")
 }
 
 func TestSDKSenderSendsPostRichTextMessage(t *testing.T) {
@@ -116,10 +96,7 @@ func TestSDKSenderSendsPostRichTextMessage(t *testing.T) {
 	if err := json.Unmarshal([]byte(messageRequest.Content), &content); err != nil {
 		t.Fatalf("unmarshal request content: %v", err)
 	}
-	lines := content.ZhCN.Content
-	if len(lines) != 2 || lines[0][0].Text != "hello" || lines[1][0].Text != "world" {
-		t.Fatalf("request content = %#v, want rich text lines", lines)
-	}
+	assertMarkdownContent(t, content, "hello\nworld")
 }
 
 func TestSDKSenderCreatesTextAndReturnsMessageID(t *testing.T) {
@@ -238,10 +215,7 @@ func TestSDKSenderUpdatesPostRichTextMessage(t *testing.T) {
 	if err := json.Unmarshal([]byte(updateRequest.Content), &content); err != nil {
 		t.Fatalf("unmarshal update content: %v", err)
 	}
-	lines := content.ZhCN.Content
-	if len(lines) != 2 || lines[0][0].Text != "hello" || lines[1][0].Text != "world" {
-		t.Fatalf("update content = %#v, want rich text lines", lines)
-	}
+	assertMarkdownContent(t, content, "hello\nworld")
 }
 
 func TestSDKSenderUpdateTextRecognizesEditLimit(t *testing.T) {
@@ -289,5 +263,20 @@ func writeJSON(t *testing.T, w http.ResponseWriter, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		t.Fatalf("encode response: %v", err)
+	}
+}
+
+func assertMarkdownContent(t *testing.T, content richTextContent, want string) {
+	t.Helper()
+	lines := content.ZhCN.Content
+	if len(lines) != 1 {
+		t.Fatalf("content lines = %d, want 1", len(lines))
+	}
+	if len(lines[0]) != 1 {
+		t.Fatalf("content elements = %d, want 1", len(lines[0]))
+	}
+	element := lines[0][0]
+	if element.Tag != "md" || element.Text != want {
+		t.Fatalf("element = %#v, want md %q", element, want)
 	}
 }

@@ -3,14 +3,11 @@ package core
 import (
 	"context"
 	"strings"
-
-	"lingobridge/internal/markdown"
 )
 
 type replyTextStream struct {
 	sender   TextStreamSender
 	segments []*replyTextSegment
-	filter   *markdown.Filter
 	limit    int
 }
 
@@ -23,7 +20,6 @@ type replyTextSegment struct {
 func newReplyTextStream(sender TextStreamSender, limit int) *replyTextStream {
 	return &replyTextStream{
 		sender: sender,
-		filter: markdown.NewFilter(),
 		limit:  limit,
 	}
 }
@@ -32,21 +28,20 @@ func (s *replyTextStream) OnChunk(ctx context.Context, chunk string) error {
 	if s == nil {
 		return nil
 	}
-	filtered := s.filter.Write(chunk)
-	if filtered == "" {
+	if chunk == "" {
 		return nil
 	}
-	for filtered != "" {
+	for chunk != "" {
 		segment, err := s.currentSegment(ctx)
 		if err != nil {
 			return err
 		}
 		if s.limit <= 0 {
-			segment.text.WriteString(filtered)
+			segment.text.WriteString(chunk)
 			return segment.stream.Update(ctx, segment.text.String())
 		}
 
-		combined := segment.text.String() + filtered
+		combined := segment.text.String() + chunk
 		chunks := SplitTextChunks(combined, s.limit)
 		if len(chunks) == 0 || chunks[0] == "" {
 			return nil
@@ -62,7 +57,7 @@ func (s *replyTextStream) OnChunk(ctx context.Context, chunk string) error {
 		if err := s.finishSegment(ctx, segment, chunks[0]); err != nil {
 			return err
 		}
-		filtered = strings.Join(chunks[1:], "")
+		chunk = strings.Join(chunks[1:], "")
 	}
 	return nil
 }

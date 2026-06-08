@@ -12,7 +12,6 @@ import (
 	"lingobridge/internal/config"
 	"lingobridge/internal/llm"
 	"lingobridge/internal/logging"
-	"lingobridge/internal/markdown"
 	"lingobridge/internal/store"
 )
 
@@ -209,11 +208,10 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 	}
 
 	if llmResponse.Text != "" {
-		filtered := markdown.FilterText(llmResponse.Text)
-		chunks := SplitTextChunks(filtered, b.chunkLimit())
+		chunks := SplitTextChunks(llmResponse.Text, b.chunkLimit())
 		start := 0
 		if textStream != nil {
-			if err := textStream.Finish(ctx, filtered); err != nil {
+			if err := textStream.Finish(ctx, llmResponse.Text); err != nil {
 				return err
 			}
 			start = textStream.FinishedChunks(len(chunks))

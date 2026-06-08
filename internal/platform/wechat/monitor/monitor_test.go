@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"lingobridge/internal/config"
+	"lingobridge/internal/core"
 	"lingobridge/internal/llm"
 	"lingobridge/internal/platform/wechat/api"
 	"lingobridge/internal/platform/wechat/cdn"
@@ -909,6 +910,32 @@ func TestProcessOneTypingErrorDoesNotBlockReply(t *testing.T) {
 	}
 	if got := lastSentText(t, client); got != "hello" {
 		t.Fatalf("sent text = %q, want hello", got)
+	}
+}
+
+func TestProcessOneFiltersMarkdownBeforeSendingText(t *testing.T) {
+	b, client, _, llmClient := newTestBot()
+	llmClient.response.Text = "Commands:\n```bash\nsudo dnf update -y\n```\ninline `code`"
+
+	if err := b.processOne(textMessage("hi")); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+
+	want := "Commands:\nsudo dnf update -y\n\ninline code"
+	if got := lastSentText(t, client); got != want {
+		t.Fatalf("sent text = %q, want filtered markdown %q", got, want)
+	}
+}
+
+func TestWechatSenderSkipsEmptyTextAfterMarkdownFilter(t *testing.T) {
+	b, client, _, _ := newTestBot()
+	sender := wechatSender{bot: b, toUserID: "user", contextToken: "context"}
+
+	if err := sender.Send(context.Background(), core.OutboundMessage{Text: "![alt](https://example.test/image.png)"}); err != nil {
+		t.Fatalf("Send returned error: %v", err)
+	}
+	if len(client.sent) != 0 {
+		t.Fatalf("sent messages = %d, want none", len(client.sent))
 	}
 }
 

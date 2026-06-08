@@ -260,6 +260,30 @@ func TestHandleTextStreamsFirstChunkWhenSenderSupportsStream(t *testing.T) {
 	}
 }
 
+func TestHandleTextStreamsPreserveRawMarkdown(t *testing.T) {
+	text := "```bash\nsudo dnf update -y\n```\ninline `code`"
+	sessions := &fakeSessions{}
+	client := &fakeLLM{
+		streamChunks: []string{"```bash\n", "sudo dnf update -y\n```", "\ninline `code`"},
+		resp:         llm.Response{Text: text},
+	}
+	b := testBot(sessions, client)
+	sender := &fakeStreamingSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if sender.stream == nil {
+		t.Fatal("stream was not started")
+	}
+	if got := sender.stream.updates[len(sender.stream.updates)-1]; got != text {
+		t.Fatalf("last stream update = %q, want raw markdown %q", got, text)
+	}
+	if got := sender.stream.finishes; len(got) != 1 || got[0] != text {
+		t.Fatalf("stream finishes = %#v, want raw markdown", got)
+	}
+}
+
 func TestHandleTextStreamingDisabledUsesFinalChunkedSend(t *testing.T) {
 	sessions := &fakeSessions{}
 	client := &fakeLLM{
@@ -282,6 +306,22 @@ func TestHandleTextStreamingDisabledUsesFinalChunkedSend(t *testing.T) {
 	}
 	if sender.sent[0].Text != "abc" || sender.sent[1].Text != "def" {
 		t.Fatalf("sent = %#v, want abc/def chunks", sender.sent)
+	}
+}
+
+func TestHandleTextStreamingDisabledSendsRawMarkdown(t *testing.T) {
+	text := "```bash\nsudo dnf update -y\n```\ninline `code`"
+	sessions := &fakeSessions{}
+	client := &fakeLLM{resp: llm.Response{Text: text}}
+	b := testBot(sessions, client)
+	b.EnableTextStreaming = false
+	sender := &fakeSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(sender.sent) != 1 || sender.sent[0].Text != text {
+		t.Fatalf("sent = %#v, want raw markdown", sender.sent)
 	}
 }
 

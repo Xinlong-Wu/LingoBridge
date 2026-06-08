@@ -13,6 +13,8 @@ import (
 
 var ErrFeishuMessageEditLimit = errors.New("feishu message edit limit reached")
 
+const richTextLogPreviewRunes = 512
+
 type textSender interface {
 	SendText(ctx context.Context, chatID, text string) error
 	CreateText(ctx context.Context, chatID, text string) (string, error)
@@ -112,19 +114,16 @@ func marshalRichTextContent(text string) (string, error) {
 func buildRichTextContent(text string) richTextContent {
 	normalized := strings.ReplaceAll(text, "\r\n", "\n")
 	normalized = strings.ReplaceAll(normalized, "\r", "\n")
-	lines := strings.Split(normalized, "\n")
-	content := make([][]richTextTextElement, 0, len(lines))
-	for _, line := range lines {
-		if line == "" {
-			line = " "
-		}
-		content = append(content, []richTextTextElement{{
-			Tag:  "text",
-			Text: line,
-		}})
+	if normalized == "" {
+		normalized = " "
 	}
 	return richTextContent{
-		ZhCN: richTextLanguage{Content: content},
+		ZhCN: richTextLanguage{Content: [][]richTextTextElement{{
+			{
+				Tag:  "md",
+				Text: normalized,
+			},
+		}}},
 	}
 }
 

@@ -23,7 +23,7 @@ import (
 
 const (
 	WeChatTextChunkLimit = 4000
-	FeishuTextChunkLimit = 30 * 1024
+	FeishuTextChunkLimit = 25 * 1024
 )
 
 type AccountNewOptions struct {
