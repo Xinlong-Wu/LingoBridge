@@ -3,13 +3,17 @@ package core
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"lingobridge/internal/commands"
 	"lingobridge/internal/config"
 	"lingobridge/internal/llm"
 	"lingobridge/internal/store"
 )
+
+const testTextChunkLimit = 4000
 
 type fakeSessions struct {
 	sess       *store.Session
@@ -76,6 +80,8 @@ type fakeLLM struct {
 	messages        []store.Message
 	resp            llm.Response
 	prepareErr      error
+	streamChunks    []string
+	streamErr       error
 }
 
 func (f *fakeLLM) PrepareUserMessage(content string, attachments []llm.InputAttachment) (store.Message, error) {
@@ -93,6 +99,16 @@ func (f *fakeLLM) Chat(systemPrompt string, messages []store.Message) (llm.Respo
 func (f *fakeLLM) ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (llm.Response, error) {
 	f.called = true
 	f.messages = messages
+	for _, chunk := range f.streamChunks {
+		if onChunk != nil {
+			if err := onChunk(chunk); err != nil {
+				return llm.Response{}, err
+			}
+		}
+	}
+	if f.streamErr != nil {
+		return llm.Response{}, f.streamErr
+	}
 	if f.resp.Text == "" {
 		f.resp.Text = "hello"
 	}
@@ -117,6 +133,33 @@ func (f *fakeSender) Send(ctx context.Context, msg OutboundMessage) error {
 func (f *fakeSender) StartTyping(ctx context.Context) func() {
 	f.typing++
 	return func() { f.stopTyping++ }
+}
+
+type fakeStreamingSender struct {
+	fakeSender
+	stream  *fakeTextStream
+	streams []*fakeTextStream
+}
+
+func (f *fakeStreamingSender) StartTextStream(ctx context.Context) (TextStream, error) {
+	f.stream = &fakeTextStream{}
+	f.streams = append(f.streams, f.stream)
+	return f.stream, nil
+}
+
+type fakeTextStream struct {
+	updates  []string
+	finishes []string
+}
+
+func (f *fakeTextStream) Update(ctx context.Context, text string) error {
+	f.updates = append(f.updates, text)
+	return nil
+}
+
+func (f *fakeTextStream) Finish(ctx context.Context, text string) error {
+	f.finishes = append(f.finishes, text)
+	return nil
 }
 
 func TestHandleCommandDoesNotCallLLM(t *testing.T) {
@@ -181,6 +224,235 @@ func TestHandleTextSavesConversationAndSendsReply(t *testing.T) {
 	}
 }
 
+func TestNewDisablesTextStreamingByDefault(t *testing.T) {
+	b := New(&fakeSessions{}, config.LLMConfig{})
+	if b.EnableTextStreaming {
+		t.Fatal("EnableTextStreaming = true, want false")
+	}
+}
+
+func TestHandleTextStreamsFirstChunkWhenSenderSupportsStream(t *testing.T) {
+	sessions := &fakeSessions{}
+	client := &fakeLLM{
+		streamChunks: []string{"hel", "lo"},
+		resp:         llm.Response{Text: "hello"},
+	}
+	b := testBot(sessions, client)
+	sender := &fakeStreamingSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if sender.stream == nil {
+		t.Fatal("stream was not started")
+	}
+	if got, want := sender.stream.updates, []string{"hel", "hello"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("stream updates = %#v, want %#v", got, want)
+	}
+	if got, want := sender.stream.finishes, []string{"hello"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("stream finishes = %#v, want %#v", got, want)
+	}
+	if len(sender.sent) != 0 {
+		t.Fatalf("sent = %#v, want no duplicate text send", sender.sent)
+	}
+	if sessions.saved == nil || len(sessions.saved.Messages) != 2 {
+		t.Fatalf("saved = %#v, want history saved", sessions.saved)
+	}
+}
+
+func TestHandleTextStreamingDisabledUsesFinalChunkedSend(t *testing.T) {
+	sessions := &fakeSessions{}
+	client := &fakeLLM{
+		streamChunks: []string{"abc", "def"},
+		resp:         llm.Response{Text: "abcdef"},
+	}
+	b := testBot(sessions, client)
+	b.TextChunkLimit = 3
+	b.EnableTextStreaming = false
+	sender := &fakeStreamingSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(sender.streams) != 0 {
+		t.Fatalf("streams = %d, want 0 when streaming disabled", len(sender.streams))
+	}
+	if got, want := len(sender.sent), 2; got != want {
+		t.Fatalf("sent messages = %d, want %d", got, want)
+	}
+	if sender.sent[0].Text != "abc" || sender.sent[1].Text != "def" {
+		t.Fatalf("sent = %#v, want abc/def chunks", sender.sent)
+	}
+}
+
+func TestHandleTextStreamsFirstChunkAndSendsOverflow(t *testing.T) {
+	sessions := &fakeSessions{}
+	client := &fakeLLM{
+		streamChunks: []string{"abc", "def"},
+		resp:         llm.Response{Text: "abcdef"},
+	}
+	b := testBot(sessions, client)
+	b.TextChunkLimit = 3
+	sender := &fakeStreamingSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(sender.streams) != 2 {
+		t.Fatalf("streams = %d, want 2", len(sender.streams))
+	}
+	if got, want := sender.streams[0].finishes, []string{"abc"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("stream finishes = %#v, want %#v", got, want)
+	}
+	if got, want := sender.streams[1].finishes, []string{"def"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("second stream finishes = %#v, want %#v", got, want)
+	}
+	if len(sender.sent) != 0 {
+		t.Fatalf("sent = %#v, want no duplicate overflow send", sender.sent)
+	}
+}
+
+func TestHandleTextStreamingUnavailableUsesFinalChunkedSend(t *testing.T) {
+	sessions := &fakeSessions{}
+	client := &fakeLLM{
+		streamChunks: []string{"abc", "def"},
+		resp:         llm.Response{Text: "abcdef"},
+	}
+	b := testBot(sessions, client)
+	b.TextChunkLimit = 3
+	sender := &fakeSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if got, want := len(sender.sent), 2; got != want {
+		t.Fatalf("sent messages = %d, want %d", got, want)
+	}
+	if sender.sent[0].Text != "abc" || sender.sent[1].Text != "def" {
+		t.Fatalf("sent = %#v, want abc/def chunks", sender.sent)
+	}
+}
+
+func TestHandleTextStreamingFinalUncreatedTailFallsBackToSend(t *testing.T) {
+	sessions := &fakeSessions{}
+	client := &fakeLLM{
+		streamChunks: []string{"abc"},
+		resp:         llm.Response{Text: "abcdef"},
+	}
+	b := testBot(sessions, client)
+	b.TextChunkLimit = 3
+	sender := &fakeStreamingSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(sender.streams) != 1 {
+		t.Fatalf("streams = %d, want 1", len(sender.streams))
+	}
+	if got, want := sender.streams[0].finishes, []string{"abc"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("stream finishes = %#v, want %#v", got, want)
+	}
+	if len(sender.sent) != 1 || sender.sent[0].Text != "def" {
+		t.Fatalf("sent = %#v, want uncreated tail def", sender.sent)
+	}
+}
+
+func TestHandleTextStreamsSplitLinesAndPreserveUTF8(t *testing.T) {
+	text := "第一行\n第二行\n第三行"
+	sessions := &fakeSessions{}
+	client := &fakeLLM{
+		streamChunks: []string{text},
+		resp:         llm.Response{Text: text},
+	}
+	b := testBot(sessions, client)
+	b.TextChunkLimit = len("第一行\n第二")
+	sender := &fakeStreamingSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(sender.streams) != 3 {
+		t.Fatalf("streams = %d, want 3", len(sender.streams))
+	}
+	var got []string
+	for i, stream := range sender.streams {
+		if len(stream.finishes) != 1 {
+			t.Fatalf("stream %d finishes = %#v, want one finish", i+1, stream.finishes)
+		}
+		if !utf8.ValidString(stream.finishes[0]) {
+			t.Fatalf("stream %d finish is invalid UTF-8: %q", i+1, stream.finishes[0])
+		}
+		got = append(got, stream.finishes[0])
+	}
+	if joined := strings.Join(got, ""); joined != text {
+		t.Fatalf("joined stream text = %q, want %q", joined, text)
+	}
+	if got[0] != "第一行\n" || got[1] != "第二行\n" || got[2] != "第三行" {
+		t.Fatalf("stream chunks = %#v, want line chunks", got)
+	}
+}
+
+func TestHandleTextStreamsSplitLongLineWithoutBreakingUTF8(t *testing.T) {
+	text := "网络端口🙂网络端口"
+	sessions := &fakeSessions{}
+	client := &fakeLLM{
+		streamChunks: []string{text},
+		resp:         llm.Response{Text: text},
+	}
+	b := testBot(sessions, client)
+	b.TextChunkLimit = 5
+	sender := &fakeStreamingSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(sender.streams) < 2 {
+		t.Fatalf("streams = %d, want multiple streams", len(sender.streams))
+	}
+	var got []string
+	for i, stream := range sender.streams {
+		if len(stream.finishes) != 1 {
+			t.Fatalf("stream %d finishes = %#v, want one finish", i+1, stream.finishes)
+		}
+		chunk := stream.finishes[0]
+		if !utf8.ValidString(chunk) {
+			t.Fatalf("stream %d finish is invalid UTF-8: %q", i+1, chunk)
+		}
+		got = append(got, chunk)
+	}
+	if joined := strings.Join(got, ""); joined != text {
+		t.Fatalf("joined stream text = %q, want %q", joined, text)
+	}
+}
+
+func TestHandleTextStreamErrorUpdatesNoticeAndDoesNotSaveHistory(t *testing.T) {
+	sessions := &fakeSessions{}
+	streamErr := errors.New("stream broke")
+	client := &fakeLLM{
+		streamChunks: []string{"partial"},
+		streamErr:    streamErr,
+	}
+	b := testBot(sessions, client)
+	sender := &fakeStreamingSender{}
+
+	err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender)
+	if !errors.Is(err, streamErr) {
+		t.Fatalf("Handle error = %v, want streamErr", err)
+	}
+	if sender.stream == nil {
+		t.Fatal("stream was not started")
+	}
+	if len(sender.stream.finishes) != 1 || !strings.Contains(sender.stream.finishes[0], "AI 响应失败") {
+		t.Fatalf("stream finishes = %#v, want error notice", sender.stream.finishes)
+	}
+	if sessions.saved != nil {
+		t.Fatalf("saved = %#v, want no failed assistant history", sessions.saved)
+	}
+	if len(sender.sent) != 0 {
+		t.Fatalf("sent = %#v, want stream error notice without fallback send", sender.sent)
+	}
+}
+
 func TestHandleUsesPrepareHookAndPrepareErrorNotice(t *testing.T) {
 	sessions := &fakeSessions{}
 	client := &fakeLLM{}
@@ -203,6 +475,61 @@ func TestHandleUsesPrepareHookAndPrepareErrorNotice(t *testing.T) {
 	}
 }
 
+func TestSplitTextChunksPrefersLineBoundaries(t *testing.T) {
+	text := "第一行\n\n第二行\n第三行"
+	chunks := SplitTextChunks(text, len("第一行\n第二"))
+
+	if got, want := strings.Join(chunks, ""), text; got != want {
+		t.Fatalf("joined chunks = %q, want %q", got, want)
+	}
+	want := []string{"第一行\n\n", "第二行\n", "第三行"}
+	if len(chunks) != len(want) {
+		t.Fatalf("chunks = %#v, want %#v", chunks, want)
+	}
+	for i := range want {
+		if chunks[i] != want[i] {
+			t.Fatalf("chunk %d = %q, want %q", i+1, chunks[i], want[i])
+		}
+		if !utf8.ValidString(chunks[i]) {
+			t.Fatalf("chunk %d is invalid UTF-8: %q", i+1, chunks[i])
+		}
+	}
+}
+
+func TestSplitTextChunksSplitsLongLineOnUTF8Boundary(t *testing.T) {
+	text := "网络端口🙂网络端口"
+	chunks := SplitTextChunks(text, 5)
+
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %#v, want multiple chunks", chunks)
+	}
+	if got, want := strings.Join(chunks, ""), text; got != want {
+		t.Fatalf("joined chunks = %q, want %q", got, want)
+	}
+	for i, chunk := range chunks {
+		if !utf8.ValidString(chunk) {
+			t.Fatalf("chunk %d is invalid UTF-8: %q", i+1, chunk)
+		}
+	}
+}
+
+func TestSplitTextChunksKeepsRuneWhenLimitSmallerThanRune(t *testing.T) {
+	text := "网络"
+	chunks := SplitTextChunks(text, 1)
+
+	if got, want := strings.Join(chunks, ""), text; got != want {
+		t.Fatalf("joined chunks = %q, want %q", got, want)
+	}
+	if len(chunks) != 2 || chunks[0] != "网" || chunks[1] != "络" {
+		t.Fatalf("chunks = %#v, want individual runes", chunks)
+	}
+	for i, chunk := range chunks {
+		if !utf8.ValidString(chunk) {
+			t.Fatalf("chunk %d is invalid UTF-8: %q", i+1, chunk)
+		}
+	}
+}
+
 func testBot(sessions *fakeSessions, client *fakeLLM) *Bot {
 	cfg := config.LLMConfig{
 		DefaultModel: "deepseek",
@@ -212,10 +539,11 @@ func testBot(sessions *fakeSessions, client *fakeLLM) *Bot {
 		SystemPrompt: "system",
 	}
 	return &Bot{
-		Sessions:       sessions,
-		LLMConfig:      cfg,
-		LLMClients:     map[string]llm.Client{},
-		NewLLM:         func(config.ResolvedModel) llm.Client { return client },
-		TextChunkLimit: DefaultTextChunkLimit,
+		Sessions:            sessions,
+		LLMConfig:           cfg,
+		LLMClients:          map[string]llm.Client{},
+		NewLLM:              func(config.ResolvedModel) llm.Client { return client },
+		TextChunkLimit:      testTextChunkLimit,
+		EnableTextStreaming: true,
 	}
 }

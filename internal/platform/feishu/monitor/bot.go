@@ -49,6 +49,14 @@ func (r feishuResponder) StartTyping(ctx context.Context) func() {
 	return func() {}
 }
 
+func (r feishuResponder) StartTextStream(ctx context.Context) (core.TextStream, error) {
+	return &feishuTextStream{
+		sender: r.sender,
+		chatID: r.chatID,
+		now:    time.Now,
+	}, nil
+}
+
 func (b *bot) handleMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	logReceivedMessage(ctx, event)
 	in, ok := normalizeEvent(ctx, event)

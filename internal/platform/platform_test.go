@@ -45,6 +45,41 @@ func TestLookupAccountPlatformDoesNotFallback(t *testing.T) {
 	}
 }
 
+func TestDefaultDefinitionsSetCoreRuntimeOptions(t *testing.T) {
+	registry, err := NewDefaultRegistry()
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry returned error: %v", err)
+	}
+
+	wechat, ok := registry.LookupAccountPlatform(store.PlatformWeChat)
+	if !ok {
+		t.Fatal("wechat definition not found")
+	}
+	if WeChatTextChunkLimit != 4000 {
+		t.Fatalf("WeChatTextChunkLimit = %d, want 4000", WeChatTextChunkLimit)
+	}
+	if wechat.TextChunkLimit != WeChatTextChunkLimit {
+		t.Fatalf("wechat TextChunkLimit = %d, want 4000", wechat.TextChunkLimit)
+	}
+	if wechat.EnableTextStreaming {
+		t.Fatal("wechat EnableTextStreaming = true, want false")
+	}
+
+	feishu, ok := registry.LookupAccountPlatform(store.PlatformFeishu)
+	if !ok {
+		t.Fatal("feishu definition not found")
+	}
+	if FeishuTextChunkLimit != 30*1024 {
+		t.Fatalf("FeishuTextChunkLimit = %d, want %d", FeishuTextChunkLimit, 30*1024)
+	}
+	if feishu.TextChunkLimit != FeishuTextChunkLimit {
+		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishu.TextChunkLimit, 30*1024)
+	}
+	if !feishu.EnableTextStreaming {
+		t.Fatal("feishu EnableTextStreaming = false, want true")
+	}
+}
+
 func TestDefaultDefinitionsCreateRuntimePlatforms(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	registry, err := NewDefaultRegistry()

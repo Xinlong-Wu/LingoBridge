@@ -180,6 +180,54 @@ func TestParseRunOptionsRejectsInvalidVerbose(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateEnablesTextStreamingOnlyForFeishu(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	writeTestConfig(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	wechatStore, err := store.Open(store.PlatformWeChat)
+	if err != nil {
+		t.Fatalf("Open wechat returned error: %v", err)
+	}
+	defer wechatStore.Close()
+	feishuStore, err := store.Open(store.PlatformFeishu)
+	if err != nil {
+		t.Fatalf("Open feishu returned error: %v", err)
+	}
+	defer feishuStore.Close()
+
+	state, err := newRuntimeState(map[string]*store.Store{
+		store.PlatformWeChat: wechatStore,
+		store.PlatformFeishu: feishuStore,
+	}, cfg)
+	if err != nil {
+		t.Fatalf("newRuntimeState returned error: %v", err)
+	}
+
+	_, wechatRuntime, ok := state.snapshot(store.PlatformWeChat)
+	if !ok {
+		t.Fatal("wechat runtime not found")
+	}
+	if wechatRuntime.handler.EnableTextStreaming {
+		t.Fatal("wechat EnableTextStreaming = true, want false")
+	}
+	if wechatRuntime.handler.TextChunkLimit != platform.WeChatTextChunkLimit {
+		t.Fatalf("wechat TextChunkLimit = %d, want %d", wechatRuntime.handler.TextChunkLimit, platform.WeChatTextChunkLimit)
+	}
+	_, feishuRuntime, ok := state.snapshot(store.PlatformFeishu)
+	if !ok {
+		t.Fatal("feishu runtime not found")
+	}
+	if !feishuRuntime.handler.EnableTextStreaming {
+		t.Fatal("feishu EnableTextStreaming = false, want true")
+	}
+	if feishuRuntime.handler.TextChunkLimit != platform.FeishuTextChunkLimit {
+		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishuRuntime.handler.TextChunkLimit, platform.FeishuTextChunkLimit)
+	}
+}
+
 func TestWaitRunDoneReturnsFatalMonitorError(t *testing.T) {
 	wantErr := errors.New("bad config")
 	fatal := make(chan error, 1)

@@ -64,6 +64,11 @@ type sentText struct {
 	text   string
 }
 
+type updatedText struct {
+	messageID string
+	text      string
+}
+
 type reactionAdd struct {
 	messageID string
 	emojiType string
@@ -80,10 +85,29 @@ type fakeSender struct {
 	text              string
 	called            bool
 	messages          []sentText
+	streamCreates     []sentText
+	streamUpdates     []updatedText
 	reactionAdds      []reactionAdd
 	reactionDeletes   []reactionDelete
 	addReactionErr    error
 	deleteReactionErr error
+	updateTextErr     error
+}
+
+type fakeClock struct {
+	t time.Time
+}
+
+func newFakeClock() *fakeClock {
+	return &fakeClock{t: time.Unix(1000, 0)}
+}
+
+func (c *fakeClock) now() time.Time {
+	return c.t
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.t = c.t.Add(d)
 }
 
 func (f *fakeSender) SendText(ctx context.Context, chatID, text string) error {
@@ -94,6 +118,20 @@ func (f *fakeSender) SendText(ctx context.Context, chatID, text string) error {
 	f.text = text
 	f.messages = append(f.messages, sentText{chatID: chatID, text: text})
 	return nil
+}
+
+func (f *fakeSender) CreateText(ctx context.Context, chatID, text string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.streamCreates = append(f.streamCreates, sentText{chatID: chatID, text: text})
+	return "om_stream", nil
+}
+
+func (f *fakeSender) UpdateText(ctx context.Context, messageID, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.streamUpdates = append(f.streamUpdates, updatedText{messageID: messageID, text: text})
+	return f.updateTextErr
 }
 
 func (f *fakeSender) AddReaction(ctx context.Context, messageID, emojiType string) (string, error) {
@@ -161,6 +199,8 @@ func (f *fakeSender) snapshot() fakeSender {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	messages := append([]sentText(nil), f.messages...)
+	streamCreates := append([]sentText(nil), f.streamCreates...)
+	streamUpdates := append([]updatedText(nil), f.streamUpdates...)
 	reactionAdds := append([]reactionAdd(nil), f.reactionAdds...)
 	reactionDeletes := append([]reactionDelete(nil), f.reactionDeletes...)
 	return fakeSender{
@@ -168,6 +208,8 @@ func (f *fakeSender) snapshot() fakeSender {
 		text:            f.text,
 		called:          f.called,
 		messages:        messages,
+		streamCreates:   streamCreates,
+		streamUpdates:   streamUpdates,
 		reactionAdds:    reactionAdds,
 		reactionDeletes: reactionDeletes,
 	}
@@ -364,6 +406,161 @@ func TestHandleTextMessageUsesBridgeAndReplies(t *testing.T) {
 	}
 	if len(reactionSnap.reactionDeletes) != 1 || reactionSnap.reactionDeletes[0].messageID != "om_message" || reactionSnap.reactionDeletes[0].reactionID != "reaction-1" {
 		t.Fatalf("reaction deletes = %#v, want reaction-1 delete on om_message", reactionSnap.reactionDeletes)
+	}
+}
+
+func TestFeishuResponderStreamsTextUpdatesOneMessage(t *testing.T) {
+	sender := &fakeSender{}
+	resp := feishuResponder{sender: sender, chatID: "oc_chat"}
+
+	stream, err := resp.StartTextStream(context.Background())
+	if err != nil {
+		t.Fatalf("StartTextStream returned error: %v", err)
+	}
+	if err := stream.Update(context.Background(), "hello"); err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	if err := stream.Update(context.Background(), "hello world"); err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	if err := stream.Finish(context.Background(), "hello world"); err != nil {
+		t.Fatalf("Finish returned error: %v", err)
+	}
+
+	snap := sender.snapshot()
+	if len(snap.streamCreates) != 1 || snap.streamCreates[0].chatID != "oc_chat" || snap.streamCreates[0].text != "hello" {
+		t.Fatalf("stream creates = %#v, want one initial message", snap.streamCreates)
+	}
+	if len(snap.streamUpdates) != 1 || snap.streamUpdates[0].messageID != "om_stream" || snap.streamUpdates[0].text != "hello world" {
+		t.Fatalf("stream updates = %#v, want final update", snap.streamUpdates)
+	}
+	if len(snap.messages) != 0 {
+		t.Fatalf("messages = %#v, want no separate SendText calls", snap.messages)
+	}
+}
+
+func TestFeishuTextStreamCreateDoesNotCountAsEdit(t *testing.T) {
+	clock := newFakeClock()
+	stream := &feishuTextStream{
+		sender: &fakeSender{},
+		chatID: "oc_chat",
+		now:    clock.now,
+	}
+
+	if err := stream.Update(context.Background(), "hello"); err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	if stream.editCount != 0 {
+		t.Fatalf("editCount = %d, want 0 after create", stream.editCount)
+	}
+}
+
+func TestFeishuTextStreamUsesDynamicPreviewIntervals(t *testing.T) {
+	tests := []struct {
+		name      string
+		editCount int
+		interval  time.Duration
+	}{
+		{name: "first previews", editCount: 0, interval: 300 * time.Millisecond},
+		{name: "middle previews", editCount: 3, interval: 800 * time.Millisecond},
+		{name: "late previews", editCount: 8, interval: 1500 * time.Millisecond},
+		{name: "last previews", editCount: 14, interval: 2500 * time.Millisecond},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newFakeClock()
+			sender := &fakeSender{}
+			stream := &feishuTextStream{
+				sender:       sender,
+				chatID:       "oc_chat",
+				messageID:    "om_stream",
+				lastUpdateAt: clock.now(),
+				lastSentText: "before",
+				editCount:    tc.editCount,
+				now:          clock.now,
+			}
+
+			clock.advance(tc.interval - time.Millisecond)
+			if err := stream.Update(context.Background(), "too soon"); err != nil {
+				t.Fatalf("Update before interval returned error: %v", err)
+			}
+			if got := len(sender.snapshot().streamUpdates); got != 0 {
+				t.Fatalf("updates before interval = %d, want 0", got)
+			}
+
+			clock.advance(time.Millisecond)
+			if err := stream.Update(context.Background(), "on time"); err != nil {
+				t.Fatalf("Update at interval returned error: %v", err)
+			}
+			snap := sender.snapshot()
+			if len(snap.streamUpdates) != 1 || snap.streamUpdates[0].text != "on time" {
+				t.Fatalf("updates at interval = %#v, want one update", snap.streamUpdates)
+			}
+			if stream.editCount != tc.editCount+1 {
+				t.Fatalf("editCount = %d, want %d", stream.editCount, tc.editCount+1)
+			}
+		})
+	}
+}
+
+func TestFeishuTextStreamStopsPreviewAtBudgetButFinishUpdates(t *testing.T) {
+	clock := newFakeClock()
+	sender := &fakeSender{}
+	stream := &feishuTextStream{
+		sender:       sender,
+		chatID:       "oc_chat",
+		messageID:    "om_stream",
+		lastUpdateAt: clock.now(),
+		lastSentText: "preview",
+		editCount:    feishuMaxStreamPreviewEdits,
+		now:          clock.now,
+	}
+
+	clock.advance(10 * time.Second)
+	if err := stream.Update(context.Background(), "ignored preview"); err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	if got := len(sender.snapshot().streamUpdates); got != 0 {
+		t.Fatalf("preview updates after budget = %d, want 0", got)
+	}
+
+	if err := stream.Finish(context.Background(), "final answer"); err != nil {
+		t.Fatalf("Finish returned error: %v", err)
+	}
+	snap := sender.snapshot()
+	if len(snap.streamUpdates) != 1 || snap.streamUpdates[0].text != "final answer" {
+		t.Fatalf("updates after Finish = %#v, want final update", snap.streamUpdates)
+	}
+	if len(snap.messages) != 0 {
+		t.Fatalf("messages = %#v, want no fallback send", snap.messages)
+	}
+}
+
+func TestFeishuResponderFallsBackToSendWhenEditLimitReached(t *testing.T) {
+	sender := &fakeSender{updateTextErr: ErrFeishuMessageEditLimit}
+	resp := feishuResponder{sender: sender, chatID: "oc_chat"}
+
+	stream, err := resp.StartTextStream(context.Background())
+	if err != nil {
+		t.Fatalf("StartTextStream returned error: %v", err)
+	}
+	if err := stream.Update(context.Background(), "partial"); err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	if err := stream.Finish(context.Background(), "final answer"); err != nil {
+		t.Fatalf("Finish returned error: %v", err)
+	}
+
+	snap := sender.snapshot()
+	if len(snap.streamCreates) != 1 || snap.streamCreates[0].text != "partial" {
+		t.Fatalf("stream creates = %#v, want partial create", snap.streamCreates)
+	}
+	if len(snap.streamUpdates) != 1 || snap.streamUpdates[0].text != "final answer" {
+		t.Fatalf("stream updates = %#v, want attempted final update", snap.streamUpdates)
+	}
+	if len(snap.messages) != 1 || snap.messages[0].chatID != "oc_chat" || snap.messages[0].text != "final answer" {
+		t.Fatalf("messages = %#v, want fallback final answer", snap.messages)
 	}
 }
 

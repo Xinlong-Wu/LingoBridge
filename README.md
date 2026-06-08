@@ -181,6 +181,22 @@ sending.
 Feishu support uses a self-built app long connection. In 1:1 chats, all text
 messages are processed. In group chats, only messages that mention the bot are
 processed, and the mention token is removed before sending text to the LLM.
+LLM text replies are streamed by updating one Feishu rich text message in
+place. In-chat command replies, event command output, unsupported-message
+notices, and generated-image notices are still sent as normal one-shot
+messages. Long Feishu replies are split into multiple streamed rich text
+messages as they are generated, and each message keeps its own edit budget.
+Stream previews slow down as the reply grows and are capped to stay within
+Feishu's per-message edit limit. The final update is prioritized; if Feishu
+still rejects it, LingoBridge sends the final answer as a new rich text message.
+Long text splitting prefers line boundaries; WeChat keeps a 4000-character
+limit, while Feishu rich text uses a 30 KiB threshold and splits individual
+over-limit lines only at UTF-8 safe boundaries.
+The built-in Feishu runtime enables this code-level streaming path explicitly.
+Custom integrations can enable it by setting `core.Bot.EnableTextStreaming` to
+`true` and making their sender implement the optional `core.TextStreamSender`
+interface. Senders that do not implement that optional interface automatically
+fall back to normal chunked text sends.
 Extra Feishu events are registered from `platforms.feishu.events`. Each event
 item has `name`, `version`, and `run`; `run` may be one shell command string or
 a list of shell command strings. `version: "1.0"` events are registered with
@@ -285,7 +301,7 @@ internal/config/            # Shared config file, generic platforms.<platform> Y
 internal/platform/          # Platform registry and parameter/runtime handler registration
 internal/platform/wechat/   # WeChat frontend adapter: native events/API <-> core messages
 internal/platform/feishu/   # Feishu frontend adapter and its private config schema
-internal/platform/feishu/monitor/ # Feishu long-connection monitor, message adapter, and event hooks
+internal/platform/feishu/monitor/ # Feishu long-connection monitor, message/text-stream adapter, and event hooks
 internal/core/              # Middle layer: scoped platform config/data APIs, commands, sessions, LLM orchestration
 internal/store/             # Platform-scoped SQLite/history/media persistence
 internal/llm/               # Backend provider adapters: OpenAI-compatible and Anthropic APIs

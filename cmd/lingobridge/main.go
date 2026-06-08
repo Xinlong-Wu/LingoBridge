@@ -413,6 +413,7 @@ func promptCLIValue(reader *bufio.Reader, out io.Writer, prompt string, required
 
 type runtimeState struct {
 	stores   map[string]*store.Store
+	registry *platform.Registry
 	mu       sync.RWMutex
 	cfg      config.Config
 	runtimes map[string]platformRuntime
@@ -426,7 +427,11 @@ type platformRuntime struct {
 }
 
 func newRuntimeState(stores map[string]*store.Store, cfg config.Config) (*runtimeState, error) {
-	rs := &runtimeState{stores: stores}
+	registry, err := platform.NewDefaultRegistry()
+	if err != nil {
+		return nil, err
+	}
+	rs := &runtimeState{stores: stores, registry: registry}
 	if err := rs.updateConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -447,10 +452,17 @@ func (r *runtimeState) updateConfig(cfg config.Config) error {
 			runtimeLog.Info(context.Background(), "reset %d %s user model preference(s) to default model %q", resetCount, platformID, cfg.LLM.DefaultModel)
 		}
 		sm := session.NewManager(st, cfg.LLM)
+		handler := core.New(sm, cfg.LLM)
+		def, ok := r.registry.LookupAccountPlatform(platformID)
+		if !ok {
+			return fmt.Errorf("unsupported account platform %q", platformID)
+		}
+		handler.TextChunkLimit = def.TextChunkLimit
+		handler.EnableTextStreaming = def.EnableTextStreaming
 		runtimes[platformID] = platformRuntime{
 			store:   st,
 			sm:      sm,
-			handler: core.New(sm, cfg.LLM),
+			handler: handler,
 		}
 	}
 	digest, err := config.Digest(cfg)

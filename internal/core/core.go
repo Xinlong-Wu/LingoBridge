@@ -17,8 +17,7 @@ import (
 )
 
 const (
-	DefaultTextChunkLimit = 4000
-	AIErrorSummaryRunes   = 300
+	AIErrorSummaryRunes = 300
 )
 
 var (
@@ -39,6 +38,15 @@ type Handler interface {
 type Sender interface {
 	Send(ctx context.Context, msg OutboundMessage) error
 	StartTyping(ctx context.Context) func()
+}
+
+type TextStreamSender interface {
+	StartTextStream(ctx context.Context) (TextStream, error)
+}
+
+type TextStream interface {
+	Update(ctx context.Context, text string) error
+	Finish(ctx context.Context, text string) error
 }
 
 type InboundMessage struct {
@@ -73,23 +81,24 @@ type LLMFactory func(config.ResolvedModel) llm.Client
 type ResponseMutator func(userID, sessionID string, resp llm.Response) llm.Response
 
 type Bot struct {
-	Sessions       ConversationManager
-	LLMConfig      config.LLMConfig
-	LLMClients     map[string]llm.Client
-	mu             sync.Mutex
-	NewLLM         LLMFactory
-	MutateResponse ResponseMutator
-	ErrorNotice    func(error) string
-	TextChunkLimit int
+	Sessions            ConversationManager
+	LLMConfig           config.LLMConfig
+	LLMClients          map[string]llm.Client
+	mu                  sync.Mutex
+	NewLLM              LLMFactory
+	MutateResponse      ResponseMutator
+	ErrorNotice         func(error) string
+	TextChunkLimit      int
+	EnableTextStreaming bool
 }
 
 func New(sessions ConversationManager, cfg config.LLMConfig) *Bot {
 	return &Bot{
-		Sessions:       sessions,
-		LLMConfig:      cfg,
-		LLMClients:     map[string]llm.Client{},
-		NewLLM:         defaultLLMFactory,
-		TextChunkLimit: DefaultTextChunkLimit,
+		Sessions:            sessions,
+		LLMConfig:           cfg,
+		LLMClients:          map[string]llm.Client{},
+		NewLLM:              defaultLLMFactory,
+		EnableTextStreaming: false,
 	}
 }
 
@@ -154,12 +163,31 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 
 	msgs := ToLLMMessagesWithUserMessage(b.LLMConfig.SystemPrompt, conv, userMsg, b.LLMConfig.MaxHistory)
 
+	var textStream *replyTextStream
+	if b.EnableTextStreaming {
+		if streamSender, ok := sender.(TextStreamSender); ok {
+			textStream = newReplyTextStream(streamSender, b.chunkLimit())
+		}
+	}
+	var onChunk func(string) error
+	if textStream != nil {
+		onChunk = func(chunk string) error {
+			return textStream.OnChunk(ctx, chunk)
+		}
+	}
+
 	stopTyping := sender.StartTyping(ctx)
-	llmResponse, err := llmClient.ChatStream(b.LLMConfig.SystemPrompt, msgs, nil)
+	llmResponse, err := llmClient.ChatStream(b.LLMConfig.SystemPrompt, msgs, onChunk)
 	stopTyping()
 	if err != nil {
 		coreLog.Error(ctx, "LLM error provider=%s model=%s: %v", provider, modelName, err)
-		_ = sender.Send(ctx, OutboundMessage{Text: b.errorNotice(msg, err)})
+		notice := b.errorNotice(msg, err)
+		if textStream != nil && textStream.Started() {
+			if streamErr := textStream.Finish(ctx, notice); streamErr == nil {
+				return err
+			}
+		}
+		_ = sender.Send(ctx, OutboundMessage{Text: notice})
 		return err
 	}
 	if msg.MutateResponse != nil {
@@ -182,7 +210,15 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 
 	if llmResponse.Text != "" {
 		filtered := markdown.FilterText(llmResponse.Text)
-		for _, chunk := range SplitTextChunks(filtered, b.chunkLimit()) {
+		chunks := SplitTextChunks(filtered, b.chunkLimit())
+		start := 0
+		if textStream != nil {
+			if err := textStream.Finish(ctx, filtered); err != nil {
+				return err
+			}
+			start = textStream.FinishedChunks(len(chunks))
+		}
+		for _, chunk := range chunks[start:] {
 			if err := sender.Send(ctx, OutboundMessage{Text: chunk}); err != nil {
 				return err
 			}
@@ -238,11 +274,8 @@ func (b *Bot) llmForUser(userID string) (string, string, llm.Client, error) {
 }
 
 func (b *Bot) chunkLimit() int {
-	if b.TextChunkLimit < 0 {
-		return -1
-	}
 	if b.TextChunkLimit <= 0 {
-		return DefaultTextChunkLimit
+		return -1
 	}
 	return b.TextChunkLimit
 }
@@ -293,33 +326,6 @@ func TruncateRunes(s string, maxRunes int) string {
 		return s
 	}
 	return string(runes[:maxRunes]) + "..."
-}
-
-func SplitTextChunks(text string, limit int) []string {
-	if limit <= 0 {
-		return []string{text}
-	}
-	var chunks []string
-	for len(text) > 0 {
-		if len(text) <= limit {
-			chunks = append(chunks, text)
-			break
-		}
-
-		cut := limit
-		for cut > 0 && (text[cut]&0xC0) == 0x80 {
-			cut--
-		}
-		if cut == 0 {
-			cut = limit
-		}
-		chunks = append(chunks, text[:cut])
-		text = text[cut:]
-	}
-	if len(chunks) == 0 {
-		return []string{""}
-	}
-	return chunks
 }
 
 var ErrUnsupportedImage = errors.New("platform does not support sending images")

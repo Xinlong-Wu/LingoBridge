@@ -21,6 +21,11 @@ import (
 	"lingobridge/internal/store"
 )
 
+const (
+	WeChatTextChunkLimit = 4000
+	FeishuTextChunkLimit = 30 * 1024
+)
+
 type AccountNewOptions struct {
 	Name   string
 	Values any
@@ -53,6 +58,8 @@ type Definition struct {
 	CreateOrUpdateAccount func(ctx AccountNewContext, opts AccountNewOptions) error
 	NewRuntimePlatform    func(ctx RuntimeContext) (core.Platform, error)
 	CommandPolicy         commands.Policy
+	TextChunkLimit        int
+	EnableTextStreaming   bool
 }
 
 func DefaultAccountNewIO() AccountNewIO {
@@ -217,7 +224,9 @@ func wechatDefinition() Definition {
 		NewRuntimePlatform: func(ctx RuntimeContext) (core.Platform, error) {
 			return wechatmonitor.NewPlatform(ctx.Store, ctx.Sessions, ctx.LLMConfig, ctx.Account), nil
 		},
-		CommandPolicy: commands.DefaultPolicy(),
+		CommandPolicy:       commands.DefaultPolicy(),
+		TextChunkLimit:      WeChatTextChunkLimit,
+		EnableTextStreaming: false,
 	}
 }
 
@@ -266,6 +275,8 @@ func feishuDefinition() Definition {
 			}
 			return feishumonitor.NewPlatform(ctx.Account, feishuConfig, ctx.LogLevel), nil
 		},
-		CommandPolicy: commands.DefaultPolicy(),
+		CommandPolicy:       commands.DefaultPolicy(),
+		TextChunkLimit:      FeishuTextChunkLimit,
+		EnableTextStreaming: true,
 	}
 }
