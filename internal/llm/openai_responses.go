@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 
@@ -75,10 +76,27 @@ func (c *openaiResponsesClient) AssistantMessage(resp Response) (store.Message, 
 }
 
 type responsesRequest struct {
-	Model  string `json:"model"`
-	Input  []any  `json:"input"`
-	Stream bool   `json:"stream"`
-	Store  bool   `json:"store"`
+	Model             string                       `json:"model"`
+	Input             []any                        `json:"input"`
+	Instructions      string                       `json:"instructions,omitempty"`
+	Stream            bool                         `json:"stream"`
+	Store             bool                         `json:"store"`
+	ContextManagement []responsesContextManagement `json:"context_management,omitempty"`
+}
+
+type responsesContextManagement struct {
+	Type             string `json:"type"`
+	CompactThreshold int    `json:"compact_threshold"`
+}
+
+type responsesCompactRequest struct {
+	Model        string `json:"model"`
+	Input        []any  `json:"input"`
+	Instructions string `json:"instructions,omitempty"`
+}
+
+type responsesCompactOutput struct {
+	Output []json.RawMessage `json:"output"`
 }
 
 type responsesInputMessage struct {
@@ -93,7 +111,8 @@ type responsesInputContent struct {
 }
 
 type responsesOutput struct {
-	Output []responsesOutputItem `json:"output"`
+	Output    []responsesOutputItem `json:"output"`
+	RawOutput []json.RawMessage     `json:"-"`
 }
 
 type responsesOutputItem struct {
@@ -118,25 +137,93 @@ type responsesStreamEvent struct {
 	Response responsesOutput     `json:"response"`
 }
 
+func (o *responsesOutput) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Output []json.RawMessage `json:"output"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	o.RawOutput = raw.Output
+	o.Output = make([]responsesOutputItem, 0, len(raw.Output))
+	for _, itemRaw := range raw.Output {
+		var meta struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(itemRaw, &meta); err != nil {
+			return err
+		}
+		if meta.Type == openAIRefTypeCompaction {
+			o.Output = append(o.Output, responsesOutputItem{Type: meta.Type})
+			continue
+		}
+		var item responsesOutputItem
+		if err := json.Unmarshal(itemRaw, &item); err != nil {
+			return err
+		}
+		o.Output = append(o.Output, item)
+	}
+	return nil
+}
+
 func (c *openaiResponsesClient) Chat(systemPrompt string, messages []store.Message) (Response, error) {
-	return c.chatResponses(messages, false, nil)
+	return c.chatResponses(systemPrompt, messages, store.ProviderContext{}, CompactConfig{}, false, nil)
 }
 
 func (c *openaiResponsesClient) ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (Response, error) {
-	return c.chatResponses(messages, true, onChunk)
+	return c.chatResponses(systemPrompt, messages, store.ProviderContext{}, CompactConfig{}, true, onChunk)
 }
 
-func (c *openaiResponsesClient) chatResponses(messages []store.Message, stream bool, onChunk func(chunk string) error) (Response, error) {
-	input, err := c.convertToResponsesInput(messages)
+func (c *openaiResponsesClient) ChatStreamWithContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, onChunk func(chunk string) error) (Response, error) {
+	return c.chatResponses(systemPrompt, messages, providerContext, compact, true, onChunk)
+}
+
+func (c *openaiResponsesClient) CompactContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig) (store.ProviderContext, error) {
+	input, err := c.convertToResponsesInputWithContext(messages, providerContext)
+	if err != nil {
+		return store.ProviderContext{}, err
+	}
+	if len(input) == 0 {
+		return providerContext, nil
+	}
+
+	reqBody := responsesCompactRequest{
+		Model:        c.cfg.Model,
+		Input:        input,
+		Instructions: openAIInstructions(systemPrompt, compact.Instructions),
+	}
+	body, err := postJSON(c.httpClient, c.responsesCompactURL(), bearerHeaders(c.cfg.APIKey), reqBody, "responses compact")
+	if err != nil {
+		return store.ProviderContext{}, err
+	}
+
+	var out responsesCompactOutput
+	if err := json.Unmarshal(body, &out); err != nil {
+		return store.ProviderContext{}, fmt.Errorf("unmarshal responses compact: %w", err)
+	}
+	if len(out.Output) == 0 {
+		return store.ProviderContext{}, fmt.Errorf("responses compact returned no output")
+	}
+	return store.ProviderContext{
+		Provider: c.refProvider(),
+		Endpoint: openAIEndpointResponses,
+		Items:    out.Output,
+	}, nil
+}
+
+func (c *openaiResponsesClient) chatResponses(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, stream bool, onChunk func(chunk string) error) (Response, error) {
+	input, err := c.convertToResponsesInputWithContext(messages, providerContext)
 	if err != nil {
 		return Response{}, err
 	}
 
 	reqBody := responsesRequest{
-		Model:  c.cfg.Model,
-		Input:  input,
-		Stream: stream,
-		Store:  false,
+		Model:             c.cfg.Model,
+		Input:             input,
+		Instructions:      systemPrompt,
+		Stream:            stream,
+		Store:             false,
+		ContextManagement: openAIContextManagement(compact),
 	}
 
 	if stream {
@@ -156,14 +243,25 @@ func (c *openaiResponsesClient) chatResponses(messages []store.Message, stream b
 	if err != nil {
 		return Response{}, err
 	}
-	if resp.Text == "" && len(resp.Images) == 0 {
+	if resp.Text == "" && len(resp.Images) == 0 && resp.ProviderContext.IsEmpty() {
 		return Response{}, fmt.Errorf("no output_text or image_generation_call in responses")
 	}
 	return resp, nil
 }
 
 func (c *openaiResponsesClient) convertToResponsesInput(messages []store.Message) ([]any, error) {
+	return c.convertToResponsesInputWithContext(messages, store.ProviderContext{})
+}
+
+func (c *openaiResponsesClient) convertToResponsesInputWithContext(messages []store.Message, providerContext store.ProviderContext) ([]any, error) {
 	input := make([]any, 0, len(messages))
+	if providerContext.Provider == c.refProvider() && providerContext.Endpoint == openAIEndpointResponses {
+		for _, item := range providerContext.Items {
+			if len(item) > 0 {
+				input = append(input, item)
+			}
+		}
+	}
 	for _, m := range messages {
 		if m.Role == "system" {
 			continue
@@ -177,6 +275,32 @@ func (c *openaiResponsesClient) convertToResponsesInput(messages []store.Message
 		}
 	}
 	return input, nil
+}
+
+func openAIInstructions(systemPrompt, compactInstructions string) string {
+	systemPrompt = strings.TrimSpace(systemPrompt)
+	compactInstructions = strings.TrimSpace(compactInstructions)
+	if systemPrompt == "" {
+		return compactInstructions
+	}
+	if compactInstructions == "" {
+		return systemPrompt
+	}
+	return systemPrompt + "\n\nContext compaction instructions:\n" + compactInstructions
+}
+
+func openAIContextManagement(compact CompactConfig) []responsesContextManagement {
+	if compact.Mode == "false" || compact.ContextWindow <= 0 || compact.Threshold <= 0 {
+		return nil
+	}
+	return []responsesContextManagement{{
+		Type:             openAIRefTypeCompaction,
+		CompactThreshold: compactThresholdTokens(compact),
+	}}
+}
+
+func compactThresholdTokens(compact CompactConfig) int {
+	return int(math.Ceil(float64(compact.ContextWindow) * compact.Threshold))
 }
 
 func (c *openaiResponsesClient) responsesInputItems(m store.Message) (*responsesInputMessage, error) {
@@ -256,7 +380,11 @@ func parseResponsesStreamEvent(data string) string {
 func parseResponsesOutput(out responsesOutput) (Response, error) {
 	var resp Response
 	seenImages := map[string]bool{}
-	for _, item := range out.Output {
+	for i, item := range out.Output {
+		if item.Type == openAIRefTypeCompaction {
+			appendResponsesCompaction(&resp, rawResponsesOutputItem(out, i))
+			continue
+		}
 		if err := appendResponsesOutputItem(&resp, item, seenImages, true); err != nil {
 			return Response{}, err
 		}
@@ -309,7 +437,11 @@ func parseResponsesSSE(body io.Reader, onChunk func(chunk string) error) (Respon
 			}
 		case "response.completed":
 			includeText := textBuilder.Len() == 0
-			for _, item := range event.Response.Output {
+			for i, item := range event.Response.Output {
+				if item.Type == openAIRefTypeCompaction {
+					appendResponsesCompaction(&resp, rawResponsesOutputItem(event.Response, i))
+					continue
+				}
 				if item.ID != "" && knownImageItems[item.ID] && item.Result != "" {
 					if err := appendResponsesImage(&resp, item, seenImages); err != nil {
 						return false, err
@@ -327,6 +459,27 @@ func parseResponsesSSE(body io.Reader, onChunk func(chunk string) error) (Respon
 		return Response{}, err
 	}
 	return resp, nil
+}
+
+func rawResponsesOutputItem(out responsesOutput, index int) json.RawMessage {
+	if index >= 0 && index < len(out.RawOutput) && len(out.RawOutput[index]) > 0 {
+		return out.RawOutput[index]
+	}
+	if index >= 0 && index < len(out.Output) {
+		raw, _ := json.Marshal(out.Output[index])
+		return raw
+	}
+	return nil
+}
+
+func appendResponsesCompaction(resp *Response, raw json.RawMessage) {
+	if len(raw) == 0 {
+		return
+	}
+	resp.ProviderContext.Provider = openAIRefProvider
+	resp.ProviderContext.Endpoint = openAIEndpointResponses
+	resp.ProviderContext.Items = append(resp.ProviderContext.Items, raw)
+	resp.Compacted = true
 }
 
 func rememberResponsesImageItem(item responsesOutputItem, knownImageItems map[string]bool) {

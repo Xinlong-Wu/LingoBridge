@@ -42,7 +42,8 @@ You can also add model profiles from the CLI:
   --base-url https://api.openai.com/v1 \
   --api-key sk-your-openai-key \
   --id gpt-4o \
-  --endpoint responses
+  --endpoint responses \
+  --context-window 128000
 ```
 
 ### 3. Add a bot account
@@ -111,7 +112,7 @@ when relevant config changes.
 | `account new feishu [--name <name>] [--app-id <id>] [--app-secret <secret>] [--base-url <url>]` | Add a Feishu self-built app account, write Feishu config, and reload a running bot process |
 | `account list` | List all accounts with their platform |
 | `account delete <name>` | Delete an account from its platform data domain and reload a running bot process |
-| `model add <name> [--provider <openai\|anthropic>] [--base-url <url>] [--api-key <key>] [--id <model-id>] [--endpoint <mode>] [--default]` | Add an LLM model profile to config and optionally make it the default |
+| `model add <name> [--provider <openai\|anthropic>] [--base-url <url>] [--api-key <key>] [--id <model-id>] [--endpoint <mode>] [--context-window <tokens>] [--compact <true\|false\|auto>] [--compact-threshold <ratio>] [--compact-instructions <text>] [--default]` | Add an LLM model profile to config and optionally make it the default |
 | `run [--account <name>] [--verbose <all\|debug\|info\|warn\|error>]` | Start the bot loop with optional log level, default `info` |
 
 ## In-Chat Commands
@@ -129,6 +130,7 @@ Send these as WeChat or Feishu text messages to the bot:
 | `/archive [name]` | Archive a session |
 | `/clear` | Archive current session, start fresh |
 | `/model [name]` | Show or switch model profile |
+| `/compact` | Manually compact the current session context |
 
 Platforms can narrow or extend the shared command set through their platform
 definition. The current WeChat and Feishu adapters both enable the default
@@ -248,6 +250,10 @@ are not sent back to Feishu yet.
 | `llm.models.<name>.api_key` | — | API key for this model profile |
 | `llm.models.<name>.id` | — | Provider model ID, such as `deepseek-chat` or `gpt-4o` |
 | `llm.models.<name>.endpoint` | `chat` | Endpoint mode: `chat` or `responses` for OpenAI-compatible APIs, `messages` for Anthropic |
+| `llm.models.<name>.context_window` | — | Model context window in tokens; required for native-compact-capable endpoints when compact mode is `true` or `auto` |
+| `llm.models.<name>.compact.mode` | `auto` | Native compact mode: `true`, `false`, or `auto` |
+| `llm.models.<name>.compact.threshold` | `0.9` | Auto compact threshold as a fraction of `context_window` |
+| `llm.models.<name>.compact.instructions` | — | Optional provider instructions for what compacted context should preserve |
 | `llm.system_prompt` | `"You are a helpful assistant."` | System prompt |
 | `llm.max_history` | `0` | Max historical messages per request. `0` = no limit |
 | `platforms.<platform>` | — | Platform-private config block; each platform owns its internal schema |
@@ -259,6 +265,21 @@ are not sent back to Feishu yet.
 | `platforms.feishu.events[].run` | — | Shell command string or list of shell command strings to run for the event |
 Each model profile is independent. `provider`, `base_url`, `api_key`, and `id` are required; `endpoint` is optional and defaults to `chat`.
 For Anthropic model profiles, an omitted `endpoint` defaults to `messages`.
+Native context compaction defaults to `compact.mode: auto`. OpenAI-compatible
+profiles support native compact only with `endpoint: "responses"`; Anthropic
+profiles support it with `endpoint: "messages"` on Anthropic models that
+currently expose provider-native compaction. When the current provider supports
+native compact and the estimated request context exceeds
+`context_window * compact.threshold`, LingoBridge compacts older history,
+stores the returned provider-owned items under
+`provider_contexts.<modelProfile>`, and sends those items before later model
+input. `/compact` manually asks the current provider to compact the session:
+OpenAI Responses profiles call the provider compact endpoint directly, while
+Anthropic profiles rely on the provider's native compaction trigger and may not
+emit compacted context below that threshold. If `compact.mode: false`,
+automatic and manual compaction are disabled; if `compact.mode: true`,
+unsupported provider endpoints are rejected during config validation. Chat
+Completions-style endpoints do not receive a custom summarization fallback.
 Top-level `llm.model`, `llm.provider`, `llm.base_url`, `llm.api_key`, and `llm.endpoint` are no longer supported.
 The core config loader preserves `platforms.<platform>` as platform-private
 YAML and only validates that platform keys are safe registry IDs. Platform
@@ -278,12 +299,12 @@ saved per-user model preference that no longer exists back to
     wechat/
       data/
         lingobridge.db                   # WeChat accounts, sessions, user preferences, sync cursors
-        sessions/{userId}/{sessionId}.jsonl
+        sessions/{userId}/{sessionId}.jsonl # Conversation snapshots; may include compact provider_contexts
         media/{safeUserId}/{safeSessionId}/
     feishu/
       data/
         lingobridge.db                   # Feishu account metadata, sessions, user preferences
-        sessions/{userId}/{sessionId}.jsonl
+        sessions/{userId}/{sessionId}.jsonl # Conversation snapshots; may include compact provider_contexts
 ```
 
 Each platform has its own SQLite database and data directory. The middle layer

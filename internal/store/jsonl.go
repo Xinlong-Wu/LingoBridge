@@ -26,9 +26,22 @@ type Message struct {
 	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
+// ProviderContext stores opaque provider-native context items for one model profile.
+type ProviderContext struct {
+	Provider string            `json:"provider,omitempty"`
+	Endpoint string            `json:"endpoint,omitempty"`
+	Items    []json.RawMessage `json:"items,omitempty"`
+}
+
+// IsEmpty reports whether the context has no provider-owned items to round-trip.
+func (c ProviderContext) IsEmpty() bool {
+	return len(c.Items) == 0
+}
+
 // Conversation is a snapshot of a full conversation (one JSONL line).
 type Conversation struct {
-	Messages []Message `json:"messages"`
+	Messages         []Message                  `json:"messages"`
+	ProviderContexts map[string]ProviderContext `json:"provider_contexts,omitempty"`
 }
 
 // SessionDir returns the directory for a user's sessions in this platform store.

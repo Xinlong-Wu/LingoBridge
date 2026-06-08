@@ -21,6 +21,13 @@ llm:
       api_key: "sk-your-openai-key-here"
       id: "gpt-4o"
       endpoint: "responses"
+      context_window: 128000
+      # Optional provider-native context compaction. OpenAI requires
+      # endpoint: "responses"; Anthropic requires endpoint: "messages".
+      compact:
+        mode: auto
+        threshold: 0.9
+        instructions: "Preserve user preferences, durable facts, decisions, and open tasks."
 
     claude:
       provider: "anthropic"
@@ -28,6 +35,10 @@ llm:
       api_key: "sk-ant-your-key-here"
       id: "claude-sonnet-4-20250514"
       endpoint: "messages"
+      context_window: 200000
+      # Enable only for Anthropic models that currently support native compaction.
+      compact:
+        mode: false
 
   # System prompt sent to the LLM with every conversation.
   # Defaults to "You are a helpful assistant." if empty or omitted.

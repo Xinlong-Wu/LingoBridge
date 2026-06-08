@@ -44,6 +44,7 @@ var commandSpecs = []commandSpec{
 	{Name: "/archive", Help: "/archive [名称] - 归档会话"},
 	{Name: "/clear", Help: "/clear - 清空当前会话并开始新会话"},
 	{Name: "/model", Help: "/model [名称] - 查看或切换模型"},
+	{Name: "/compact", Help: "/compact - 手动压缩当前会话上下文"},
 }
 
 func DefaultPolicy() Policy {

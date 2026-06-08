@@ -27,10 +27,30 @@ type Client interface {
 	AssistantMessage(resp Response) (store.Message, error)
 }
 
+// CompactConfig controls provider-native context compaction for one request.
+type CompactConfig struct {
+	Mode          string
+	ContextWindow int
+	Threshold     float64
+	Instructions  string
+}
+
+// ContextCompactor explicitly compacts a slice of history through the provider.
+type ContextCompactor interface {
+	CompactContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig) (store.ProviderContext, error)
+}
+
+// ContextStreamingClient sends a request with provider-native context state.
+type ContextStreamingClient interface {
+	ChatStreamWithContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, onChunk func(chunk string) error) (Response, error)
+}
+
 // Response is the common LLM response shape across providers.
 type Response struct {
-	Text   string
-	Images []Image
+	Text            string
+	Images          []Image
+	ProviderContext store.ProviderContext
+	Compacted       bool
 }
 
 // InputAttachment is non-text user input before provider-specific preparation.
@@ -59,8 +79,12 @@ type Image struct {
 	Reference AttachmentRef
 }
 
-// ErrUnsupportedAttachment means the selected model cannot accept the supplied attachment.
-var ErrUnsupportedAttachment = errors.New("unsupported attachment")
+var (
+	// ErrUnsupportedAttachment means the selected model cannot accept the supplied attachment.
+	ErrUnsupportedAttachment = errors.New("unsupported attachment")
+	// ErrCompactionNotTriggered means the provider accepted a compact request but did not emit compacted context.
+	ErrCompactionNotTriggered = errors.New("provider-native compaction was not triggered")
+)
 
 // Config holds the LLM client configuration.
 type Config struct {
@@ -69,6 +93,7 @@ type Config struct {
 	APIKey   string
 	Model    string
 	Endpoint string // provider-specific endpoint mode
+	Compact  CompactConfig
 }
 
 // NewClient creates an LLM client based on the provider.

@@ -22,11 +22,12 @@ func validLLMConfig() LLMConfig {
 				Endpoint: "chat",
 			},
 			"claude": {
-				Provider: "anthropic",
-				BaseURL:  "https://api.anthropic.com",
-				APIKey:   "key",
-				ID:       "claude-sonnet-4-20250514",
-				Endpoint: "messages",
+				Provider:      "anthropic",
+				BaseURL:       "https://api.anthropic.com",
+				APIKey:        "key",
+				ID:            "claude-sonnet-4-20250514",
+				Endpoint:      "messages",
+				ContextWindow: 200000,
 			},
 		},
 	}
@@ -112,6 +113,149 @@ func TestLLMConfigDefaultsMissingEndpointToChat(t *testing.T) {
 	}
 	if resolved.Endpoint != "chat" {
 		t.Fatalf("resolved endpoint = %q, want chat", resolved.Endpoint)
+	}
+}
+
+func TestLLMConfigDefaultsCompactModeAndThreshold(t *testing.T) {
+	cfg := validLLMConfig()
+	model := cfg.Models["deepseek"]
+	model.Endpoint = "responses"
+	model.ContextWindow = 128000
+	cfg.Models["deepseek"] = model
+
+	resolved, err := cfg.ResolveModel("deepseek")
+	if err != nil {
+		t.Fatalf("ResolveModel returned error: %v", err)
+	}
+	if resolved.Compact.Mode != CompactModeAuto {
+		t.Fatalf("compact mode = %q, want auto", resolved.Compact.Mode)
+	}
+	if resolved.Compact.Threshold != DefaultCompactThreshold {
+		t.Fatalf("compact threshold = %v, want %v", resolved.Compact.Threshold, DefaultCompactThreshold)
+	}
+	if resolved.Compact.Instructions != "" {
+		t.Fatalf("compact instructions = %q, want empty", resolved.Compact.Instructions)
+	}
+}
+
+func TestLoadParsesCompactModes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path, err := ConfigPath()
+	if err != nil {
+		t.Fatalf("ConfigPath returned error: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	data := []byte(`llm:
+  default_model: "gpt"
+  models:
+    gpt:
+      provider: "openai"
+      base_url: "https://api.openai.com/v1"
+      api_key: "key"
+      id: "gpt-4o"
+      endpoint: "responses"
+      context_window: 128000
+      compact:
+        mode: true
+        threshold: 0.75
+    claude:
+      provider: "anthropic"
+      base_url: "https://api.anthropic.com"
+      api_key: "key"
+      id: "claude"
+      context_window: 200000
+      compact:
+        mode: auto
+    chat:
+      provider: "openai"
+      base_url: "https://api.example.com/v1"
+      api_key: "key"
+      id: "chat"
+      compact:
+        mode: false
+`)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if got := cfg.LLM.Models["gpt"].Compact.Mode; got != CompactModeTrue {
+		t.Fatalf("gpt compact mode = %q, want true", got)
+	}
+	if got := cfg.LLM.Models["gpt"].Compact.Threshold; got != 0.75 {
+		t.Fatalf("gpt compact threshold = %v, want 0.75", got)
+	}
+	if got := cfg.LLM.Models["claude"].Compact.Mode; got != CompactModeAuto {
+		t.Fatalf("claude compact mode = %q, want auto", got)
+	}
+	if got := cfg.LLM.Models["claude"].Compact.Threshold; got != DefaultCompactThreshold {
+		t.Fatalf("claude compact threshold = %v, want default", got)
+	}
+	if got := cfg.LLM.Models["chat"].Compact.Mode; got != CompactModeFalse {
+		t.Fatalf("chat compact mode = %q, want false", got)
+	}
+}
+
+func TestLLMConfigValidateTrueCompactRequiresSupportedEndpoint(t *testing.T) {
+	cfg := validLLMConfig()
+	model := cfg.Models["deepseek"]
+	model.Endpoint = "chat"
+	model.Compact.Mode = CompactModeTrue
+	cfg.Models["deepseek"] = model
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "compact requires endpoint responses") {
+		t.Fatalf("Validate error = %v, want compact endpoint error", err)
+	}
+}
+
+func TestLLMConfigValidateAutoAllowsUnsupportedEndpoint(t *testing.T) {
+	cfg := validLLMConfig()
+	model := cfg.Models["deepseek"]
+	model.Endpoint = "chat"
+	model.Compact.Mode = CompactModeAuto
+	cfg.Models["deepseek"] = model
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
+func TestLLMConfigValidateCompactRequiresContextWindowForSupportedEndpoint(t *testing.T) {
+	cfg := validLLMConfig()
+	model := cfg.Models["deepseek"]
+	model.Endpoint = "responses"
+	model.Compact.Mode = CompactModeAuto
+	cfg.Models["deepseek"] = model
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "context_window") {
+		t.Fatalf("Validate error = %v, want context_window error", err)
+	}
+}
+
+func TestLLMConfigValidateCompactThresholdRange(t *testing.T) {
+	cfg := validLLMConfig()
+	model := cfg.Models["claude"]
+	model.Compact.Threshold = 1.1
+	model.Compact.thresholdSet = true
+	cfg.Models["claude"] = model
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "compact.threshold") {
+		t.Fatalf("Validate error = %v, want compact.threshold error", err)
+	}
+
+	model.Compact.Threshold = 0
+	cfg.Models["claude"] = model
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "compact.threshold") {
+		t.Fatalf("Validate error = %v, want compact.threshold error", err)
 	}
 }
 

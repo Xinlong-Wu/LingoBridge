@@ -108,12 +108,21 @@ func defaultLLMFactory(model config.ResolvedModel) llm.Client {
 		APIKey:   model.APIKey,
 		Model:    model.ID,
 		Endpoint: model.Endpoint,
+		Compact: llm.CompactConfig{
+			Mode:          string(model.Compact.Mode),
+			ContextWindow: model.ContextWindow,
+			Threshold:     model.Compact.Threshold,
+			Instructions:  model.Compact.Instructions,
+		},
 	})
 }
 
 func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) error {
 	if msg.UserKey == "" {
 		return nil
+	}
+	if isCompactCommand(msg.CommandText) {
+		return b.handleCompactCommand(ctx, msg, sender)
 	}
 	if resp, handled, err := commands.HandleWithPolicy(msg.CommandText, msg.UserKey, b.Sessions, msg.CommandPolicy); handled {
 		if err != nil {
@@ -137,12 +146,13 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 		return err
 	}
 
-	modelName, provider, llmClient, err := b.llmForUser(msg.UserKey)
+	model, llmClient, err := b.llmForUser(msg.UserKey)
 	if err != nil {
 		coreLog.Error(ctx, "resolve LLM: %v", err)
 		_ = sender.Send(ctx, OutboundMessage{Text: "❌ 模型配置不可用，请检查配置。"})
 		return err
 	}
+	modelName, provider := model.Name, model.Provider
 
 	userMsg, err := b.prepareUserMessage(ctx, msg, sess.ID, llmClient)
 	if err != nil {
@@ -160,7 +170,27 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 		conv = &store.Conversation{}
 	}
 
-	msgs := ToLLMMessagesWithUserMessage(b.LLMConfig.SystemPrompt, conv, userMsg, b.LLMConfig.MaxHistory)
+	compact := llm.CompactConfig{
+		Mode:          string(model.Compact.Mode),
+		ContextWindow: model.ContextWindow,
+		Threshold:     model.Compact.Threshold,
+		Instructions:  model.Compact.Instructions,
+	}
+	historyForRequest := conv.Messages
+	providerContext := providerContextForModel(conv, modelName)
+	preCompacted := false
+	compactAllowed := automaticCompactAllowed(compact)
+	if compactAllowed {
+		var compactErr error
+		historyForRequest, providerContext, preCompacted, compactErr = b.prepareNativeContext(b.LLMConfig.SystemPrompt, historyForRequest, userMsg, providerContext, compact, llmClient)
+		if compactErr != nil {
+			coreLog.Error(ctx, "compact context failed provider=%s model=%s: %v", provider, modelName, compactErr)
+			_ = sender.Send(ctx, OutboundMessage{Text: b.errorNotice(msg, compactErr)})
+			return compactErr
+		}
+	}
+
+	msgs := ToLLMMessagesWithUserMessage(b.LLMConfig.SystemPrompt, &store.Conversation{Messages: historyForRequest}, userMsg, b.LLMConfig.MaxHistory)
 
 	var textStream *replyTextStream
 	if b.EnableTextStreaming {
@@ -176,7 +206,16 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 	}
 
 	stopTyping := sender.StartTyping(ctx)
-	llmResponse, err := llmClient.ChatStream(b.LLMConfig.SystemPrompt, msgs, onChunk)
+	var llmResponse llm.Response
+	if compactAllowed {
+		if contextClient, ok := llmClient.(llm.ContextStreamingClient); ok {
+			llmResponse, err = contextClient.ChatStreamWithContext(b.LLMConfig.SystemPrompt, msgs, providerContext, compact, onChunk)
+		} else {
+			llmResponse, err = llmClient.ChatStream(b.LLMConfig.SystemPrompt, msgs, onChunk)
+		}
+	} else {
+		llmResponse, err = llmClient.ChatStream(b.LLMConfig.SystemPrompt, msgs, onChunk)
+	}
 	stopTyping()
 	if err != nil {
 		coreLog.Error(ctx, "LLM error provider=%s model=%s: %v", provider, modelName, err)
@@ -201,7 +240,27 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 		_ = sender.Send(ctx, OutboundMessage{Text: b.errorNotice(msg, err)})
 		return err
 	}
-	conv.Messages = append(conv.Messages, userMsg, assistantHistory)
+	historyForSave := conv.Messages
+	if compactAllowed {
+		if preCompacted {
+			historyForSave = historyForRequest
+		}
+		if llmResponse.Compacted {
+			historyForSave = retainRecentMessages(historyForSave, nativeContextKeepRecentMessages)
+		}
+		if !llmResponse.ProviderContext.IsEmpty() {
+			providerContext = llmResponse.ProviderContext
+		}
+		if preCompacted || llmResponse.Compacted || !providerContext.IsEmpty() {
+			if conv.ProviderContexts == nil {
+				conv.ProviderContexts = map[string]store.ProviderContext{}
+			}
+			if !providerContext.IsEmpty() {
+				conv.ProviderContexts[modelName] = providerContext
+			}
+		}
+	}
+	conv.Messages = append(historyForSave, userMsg, assistantHistory)
 
 	if err := b.Sessions.SaveHistory(msg.UserKey, sess.ID, conv); err != nil {
 		coreLog.Warn(ctx, "save history: %v", err)
@@ -242,16 +301,16 @@ func (b *Bot) prepareUserMessage(ctx context.Context, msg InboundMessage, sessio
 	return llmClient.PrepareUserMessage(msg.LLMText, nil)
 }
 
-func (b *Bot) llmForUser(userID string) (string, string, llm.Client, error) {
+func (b *Bot) llmForUser(userID string) (config.ResolvedModel, llm.Client, error) {
 	modelName, err := b.Sessions.CurrentModel(userID)
 	if err != nil {
-		return "", "", nil, err
+		return config.ResolvedModel{}, nil, err
 	}
 	model, err := b.LLMConfig.ResolveModel(modelName)
 	if err != nil {
 		model, err = b.LLMConfig.ResolveModel(b.LLMConfig.DefaultModel)
 		if err != nil {
-			return "", "", nil, err
+			return config.ResolvedModel{}, nil, err
 		}
 	}
 	newLLM := b.NewLLM
@@ -268,7 +327,7 @@ func (b *Bot) llmForUser(userID string) (string, string, llm.Client, error) {
 		client = newLLM(model)
 		b.LLMClients[model.Name] = client
 	}
-	return model.Name, model.Provider, client, nil
+	return model, client, nil
 }
 
 func (b *Bot) chunkLimit() int {

@@ -516,6 +516,497 @@ func TestOpenAIResponsesRequestDisablesStore(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesRequestIncludesInstructions(t *testing.T) {
+	var reqBody responsesRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q, want /v1/responses", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{
+		openaiBase: openaiBase{
+			cfg: Config{
+				BaseURL: server.URL,
+				APIKey:  "key",
+				Model:   "gpt-test",
+			},
+			httpClient: server.Client(),
+		},
+	}
+	if _, err := client.Chat("system prompt", []store.Message{{Role: "user", Content: "hi"}}); err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if reqBody.Instructions != "system prompt" {
+		t.Fatalf("instructions = %q, want system prompt", reqBody.Instructions)
+	}
+}
+
+func TestOpenAIResponsesRequestIncludesContextManagement(t *testing.T) {
+	var reqBody responsesRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q, want /v1/responses", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{
+		openaiBase: openaiBase{
+			cfg: Config{
+				BaseURL: server.URL,
+				APIKey:  "key",
+				Model:   "gpt-test",
+			},
+			httpClient: server.Client(),
+		},
+	}
+	_, err := client.ChatStreamWithContext("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{
+		Mode:          "auto",
+		ContextWindow: 100,
+		Threshold:     0.9,
+	}, nil)
+	if err != nil {
+		t.Fatalf("ChatStreamWithContext returned error: %v", err)
+	}
+	if len(reqBody.ContextManagement) != 1 {
+		t.Fatalf("context_management = %#v, want one compact entry", reqBody.ContextManagement)
+	}
+	entry := reqBody.ContextManagement[0]
+	if entry.Type != "compaction" || entry.CompactThreshold != 90 {
+		t.Fatalf("context_management entry = %#v, want compaction threshold 90", entry)
+	}
+}
+
+func TestOpenAIResponsesCompactContextRoundTripsOutput(t *testing.T) {
+	var compactReq map[string]any
+	var responseReq map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/responses/compact":
+			if err := json.NewDecoder(r.Body).Decode(&compactReq); err != nil {
+				t.Fatalf("decode compact request: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"output":[{"type":"compaction","content":"old summary"}]}`))
+		case "/v1/responses":
+			if err := json.NewDecoder(r.Body).Decode(&responseReq); err != nil {
+				t.Fatalf("decode responses request: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{
+		openaiBase: openaiBase{
+			cfg: Config{
+				BaseURL: server.URL,
+				APIKey:  "key",
+				Model:   "gpt-test",
+			},
+			httpClient: server.Client(),
+		},
+	}
+	ctx, err := client.CompactContext("system", []store.Message{{Role: "user", Content: "old"}}, store.ProviderContext{}, CompactConfig{Instructions: "preserve decisions"})
+	if err != nil {
+		t.Fatalf("CompactContext returned error: %v", err)
+	}
+	if ctx.Provider != "openai" || ctx.Endpoint != "responses" || len(ctx.Items) != 1 {
+		t.Fatalf("provider context = %#v, want one openai responses item", ctx)
+	}
+	if got := compactReq["instructions"].(string); !strings.Contains(got, "system") || !strings.Contains(got, "preserve decisions") {
+		t.Fatalf("compact instructions = %q", got)
+	}
+
+	resp, err := client.chatResponses("system", []store.Message{{Role: "user", Content: "new"}}, ctx, CompactConfig{}, false, nil)
+	if err != nil {
+		t.Fatalf("chatResponses returned error: %v", err)
+	}
+	if resp.Text != "ok" {
+		t.Fatalf("response text = %q, want ok", resp.Text)
+	}
+	input := responseReq["input"].([]any)
+	first := input[0].(map[string]any)
+	if first["type"] != "compaction" || first["content"] != "old summary" {
+		t.Fatalf("first input = %#v, want compaction item", first)
+	}
+}
+
+func TestOpenAIResponsesStreamWithContextRoundTripsOutput(t *testing.T) {
+	var responseReq map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("path = %q, want /v1/responses", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&responseReq); err != nil {
+			t.Fatalf("decode responses request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n"))
+		w.Write([]byte("data: [DONE]\n"))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{
+		openaiBase: openaiBase{
+			cfg: Config{
+				BaseURL: server.URL,
+				APIKey:  "key",
+				Model:   "gpt-test",
+			},
+			httpClient: server.Client(),
+		},
+	}
+	ctx := store.ProviderContext{
+		Provider: "openai",
+		Endpoint: "responses",
+		Items:    []json.RawMessage{json.RawMessage(`{"type":"compaction","content":"old summary"}`)},
+	}
+	resp, err := client.ChatStreamWithContext("system", []store.Message{{Role: "user", Content: "new"}}, ctx, CompactConfig{}, nil)
+	if err != nil {
+		t.Fatalf("ChatStreamWithContext returned error: %v", err)
+	}
+	if resp.Text != "ok" {
+		t.Fatalf("response text = %q, want ok", resp.Text)
+	}
+	input := responseReq["input"].([]any)
+	first := input[0].(map[string]any)
+	if first["type"] != "compaction" || first["content"] != "old summary" {
+		t.Fatalf("first input = %#v, want compaction item", first)
+	}
+}
+
+func TestOpenAIResponsesParsesCompactionOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]},{"type":"compaction","content":"summary"}]}`))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{
+		openaiBase: openaiBase{
+			cfg: Config{
+				BaseURL: server.URL,
+				APIKey:  "key",
+				Model:   "gpt-test",
+			},
+			httpClient: server.Client(),
+		},
+	}
+	resp, err := client.Chat("system", []store.Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if resp.Text != "ok" || !resp.Compacted || resp.ProviderContext.IsEmpty() {
+		t.Fatalf("response = %#v, want text and compaction context", resp)
+	}
+}
+
+func TestOpenAIResponsesStreamParsesCompletedCompactionOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n"))
+		w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"compaction\",\"content\":\"summary\"}]}}\n"))
+		w.Write([]byte("data: [DONE]\n"))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{
+		openaiBase: openaiBase{
+			cfg: Config{
+				BaseURL: server.URL,
+				APIKey:  "key",
+				Model:   "gpt-test",
+			},
+			httpClient: server.Client(),
+		},
+	}
+	resp, err := client.ChatStream("system", []store.Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("ChatStream returned error: %v", err)
+	}
+	if resp.Text != "ok" || !resp.Compacted || resp.ProviderContext.IsEmpty() {
+		t.Fatalf("response = %#v, want text and compaction context", resp)
+	}
+}
+
+func TestAnthropicChatParsesCompactionBlock(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"content":[{"type":"text","text":"ok"},{"type":"compaction","content":"summary"}]}`))
+	}))
+	defer server.Close()
+
+	client := &anthropicClient{
+		cfg: Config{
+			BaseURL: server.URL,
+			APIKey:  "key",
+			Model:   "claude-test",
+		},
+		httpClient: server.Client(),
+	}
+	resp, err := client.Chat("system", []store.Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if resp.Text != "ok" || !resp.Compacted || resp.ProviderContext.IsEmpty() {
+		t.Fatalf("response = %#v, want text and compaction context", resp)
+	}
+}
+
+func TestAnthropicChatIgnoresEmptyCompactionBlock(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"content":[{"type":"text","text":"ok"},{"type":"compaction","content":null},{"type":"compaction"}]}`))
+	}))
+	defer server.Close()
+
+	client := &anthropicClient{
+		cfg: Config{
+			BaseURL: server.URL,
+			APIKey:  "key",
+			Model:   "claude-test",
+		},
+		httpClient: server.Client(),
+	}
+	resp, err := client.Chat("system", []store.Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if resp.Text != "ok" || resp.Compacted || !resp.ProviderContext.IsEmpty() {
+		t.Fatalf("response = %#v, want text and no empty compaction context", resp)
+	}
+}
+
+func TestAnthropicCompactContextSendsBetaAndRoundTripsCompaction(t *testing.T) {
+	var gotBeta string
+	var reqBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBeta = r.Header.Get("anthropic-beta")
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"content":[{"type":"compaction","content":"new summary"}]}`))
+	}))
+	defer server.Close()
+
+	client := &anthropicClient{
+		cfg: Config{
+			BaseURL: server.URL,
+			APIKey:  "key",
+			Model:   "claude-test",
+		},
+		httpClient: server.Client(),
+	}
+	ctx := store.ProviderContext{
+		Provider: "anthropic",
+		Endpoint: "messages",
+		Items:    []json.RawMessage{json.RawMessage(`{"type":"compaction","content":"old summary"}`)},
+	}
+	compacted, err := client.CompactContext("system", []store.Message{{Role: "user", Content: "hi"}}, ctx, CompactConfig{
+		Mode:          "auto",
+		ContextWindow: 100,
+		Threshold:     0.9,
+		Instructions:  "keep decisions",
+	})
+	if err != nil {
+		t.Fatalf("CompactContext returned error: %v", err)
+	}
+	if gotBeta != anthropicCompactBeta {
+		t.Fatalf("anthropic-beta = %q, want %q", gotBeta, anthropicCompactBeta)
+	}
+	contextManagement := reqBody["context_management"].(map[string]any)
+	edits := contextManagement["edits"].([]any)
+	edit := edits[0].(map[string]any)
+	if edit["type"] != "compact_20260112" || edit["instructions"] != "keep decisions" {
+		t.Fatalf("context edit = %#v, want compact edit", edit)
+	}
+	if edit["pause_after_compaction"] != true {
+		t.Fatalf("context edit = %#v, want pause_after_compaction true", edit)
+	}
+	trigger := edit["trigger"].(map[string]any)
+	if trigger["type"] != "input_tokens" || int(trigger["value"].(float64)) != anthropicMinCompactTriggerTokens {
+		t.Fatalf("trigger = %#v, want input_tokens minimum threshold", trigger)
+	}
+	messages := reqBody["messages"].([]any)
+	firstMessage := messages[0].(map[string]any)
+	firstContent := firstMessage["content"].([]any)[0].(map[string]any)
+	if firstMessage["role"] != "assistant" || firstContent["type"] != "compaction" || firstContent["content"] != "old summary" {
+		t.Fatalf("first message = %#v, want assistant compaction context", firstMessage)
+	}
+	if compacted.Provider != "anthropic" || compacted.Endpoint != "messages" || len(compacted.Items) != 1 {
+		t.Fatalf("compacted context = %#v, want one anthropic compaction item", compacted)
+	}
+}
+
+func TestAnthropicCompactContextReturnsNotTriggeredWithoutCompaction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"content":[{"type":"text","text":"not compacted"}]}`))
+	}))
+	defer server.Close()
+
+	client := &anthropicClient{
+		cfg: Config{
+			BaseURL: server.URL,
+			APIKey:  "key",
+			Model:   "claude-test",
+		},
+		httpClient: server.Client(),
+	}
+	_, err := client.CompactContext("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{
+		Mode:          "auto",
+		ContextWindow: 100,
+		Threshold:     0.9,
+	})
+	if !errors.Is(err, ErrCompactionNotTriggered) {
+		t.Fatalf("CompactContext error = %v, want ErrCompactionNotTriggered", err)
+	}
+}
+
+func TestAnthropicChatStreamWithContextSendsCompactionManagementAndBeta(t *testing.T) {
+	var gotBeta string
+	var reqBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBeta = r.Header.Get("anthropic-beta")
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"ok\"}}\n"))
+		w.Write([]byte("data: [DONE]\n"))
+	}))
+	defer server.Close()
+
+	client := &anthropicClient{
+		cfg: Config{
+			BaseURL: server.URL,
+			APIKey:  "key",
+			Model:   "claude-test",
+		},
+		httpClient: server.Client(),
+	}
+	resp, err := client.ChatStreamWithContext("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{
+		Mode:          "auto",
+		ContextWindow: 100,
+		Threshold:     0.9,
+	}, nil)
+	if err != nil {
+		t.Fatalf("ChatStreamWithContext returned error: %v", err)
+	}
+	if resp.Text != "ok" {
+		t.Fatalf("response text = %q, want ok", resp.Text)
+	}
+	if gotBeta != anthropicCompactBeta {
+		t.Fatalf("anthropic-beta = %q, want %q", gotBeta, anthropicCompactBeta)
+	}
+	contextManagement := reqBody["context_management"].(map[string]any)
+	edits := contextManagement["edits"].([]any)
+	edit := edits[0].(map[string]any)
+	if edit["type"] != "compact_20260112" {
+		t.Fatalf("context edit = %#v, want compact edit", edit)
+	}
+	if _, ok := edit["pause_after_compaction"]; ok {
+		t.Fatalf("context edit = %#v, want no pause_after_compaction for normal stream", edit)
+	}
+	trigger := edit["trigger"].(map[string]any)
+	if trigger["type"] != "input_tokens" || int(trigger["value"].(float64)) != anthropicMinCompactTriggerTokens {
+		t.Fatalf("trigger = %#v, want input_tokens minimum threshold", trigger)
+	}
+}
+
+func TestAnthropicChatStreamWithoutContextOmitsCompactionManagement(t *testing.T) {
+	var gotBeta string
+	var reqBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBeta = r.Header.Get("anthropic-beta")
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"ok\"}}\n"))
+		w.Write([]byte("data: [DONE]\n"))
+	}))
+	defer server.Close()
+
+	client := &anthropicClient{
+		cfg: Config{
+			BaseURL: server.URL,
+			APIKey:  "key",
+			Model:   "claude-test",
+		},
+		httpClient: server.Client(),
+	}
+	resp, err := client.ChatStream("system", []store.Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("ChatStream returned error: %v", err)
+	}
+	if resp.Text != "ok" {
+		t.Fatalf("response text = %q, want ok", resp.Text)
+	}
+	if gotBeta != "" {
+		t.Fatalf("anthropic-beta = %q, want empty", gotBeta)
+	}
+	if _, ok := reqBody["context_management"]; ok {
+		t.Fatalf("request body = %#v, want no context_management", reqBody)
+	}
+}
+
+func TestAnthropicStreamParsesCompactionDelta(t *testing.T) {
+	input := strings.Join([]string{
+		`data: {"type":"content_block_start","content_block":{"type":"compaction","content":null}}`,
+		`data: {"type":"content_block_delta","delta":{"type":"compaction_delta","content":"summary "}}`,
+		`data: {"type":"content_block_delta","delta":{"type":"compaction_delta","content":"part"}}`,
+		"data: [DONE]",
+	}, "\n")
+
+	resp, err := parseAnthropicSSE(strings.NewReader(input), nil)
+	if err != nil {
+		t.Fatalf("parseAnthropicSSE returned error: %v", err)
+	}
+	if !resp.Compacted || resp.ProviderContext.Provider != "anthropic" || len(resp.ProviderContext.Items) != 1 {
+		t.Fatalf("response = %#v, want one compaction context", resp)
+	}
+	var block map[string]any
+	if err := json.Unmarshal(resp.ProviderContext.Items[0], &block); err != nil {
+		t.Fatalf("unmarshal compaction block: %v", err)
+	}
+	if block["type"] != "compaction" || block["content"] != "summary part" {
+		t.Fatalf("compaction block = %#v, want combined content", block)
+	}
+}
+
+func TestAnthropicStreamIgnoresEmptyCompactionStart(t *testing.T) {
+	input := strings.Join([]string{
+		`data: {"type":"content_block_start","content_block":{"type":"compaction","content":null}}`,
+		"data: [DONE]",
+	}, "\n")
+
+	resp, err := parseAnthropicSSE(strings.NewReader(input), nil)
+	if err != nil {
+		t.Fatalf("parseAnthropicSSE returned error: %v", err)
+	}
+	if resp.Compacted || !resp.ProviderContext.IsEmpty() {
+		t.Fatalf("response = %#v, want no context from empty compaction start", resp)
+	}
+}
+
 func TestParseResponsesOutputWithImage(t *testing.T) {
 	imageB64 := base64.StdEncoding.EncodeToString([]byte("image-bytes"))
 	resp, err := parseResponsesOutput(responsesOutput{Output: []responsesOutputItem{

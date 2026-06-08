@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -119,6 +120,37 @@ func (f *fakeLLM) AssistantMessage(resp llm.Response) (store.Message, error) {
 	return store.Message{Role: "assistant", Content: resp.Text}, nil
 }
 
+type fakeNativeLLM struct {
+	fakeLLM
+	compactedMessages []store.Message
+	contextMessages   []store.Message
+	context           store.ProviderContext
+	compactErr        error
+}
+
+func (f *fakeNativeLLM) CompactContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig) (store.ProviderContext, error) {
+	f.compactedMessages = append([]store.Message(nil), messages...)
+	if f.compactErr != nil {
+		return store.ProviderContext{}, f.compactErr
+	}
+	return store.ProviderContext{
+		Provider: "openai",
+		Endpoint: "responses",
+		Items:    []json.RawMessage{json.RawMessage(`{"type":"compaction","content":"summary"}`)},
+	}, nil
+}
+
+func (f *fakeNativeLLM) ChatStreamWithContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, onChunk func(chunk string) error) (llm.Response, error) {
+	f.called = true
+	f.messages = messages
+	f.contextMessages = append([]store.Message(nil), messages...)
+	f.context = providerContext
+	if f.resp.Text == "" {
+		f.resp.Text = "hello"
+	}
+	return f.resp, nil
+}
+
 type fakeSender struct {
 	sent       []OutboundMessage
 	typing     int
@@ -221,6 +253,278 @@ func TestHandleTextSavesConversationAndSendsReply(t *testing.T) {
 	}
 	if sender.typing != 1 || sender.stopTyping != 1 {
 		t.Fatalf("typing start/stop = %d/%d, want 1/1", sender.typing, sender.stopTyping)
+	}
+}
+
+func TestHandleTextCompactsNativeContextAndSavesRecentHistory(t *testing.T) {
+	var history []store.Message
+	for i := 0; i < nativeContextKeepRecentMessages+3; i++ {
+		history = append(history, store.Message{Role: "user", Content: "old message " + string(rune('a'+i))})
+	}
+	sessions := &fakeSessions{
+		conv: &store.Conversation{Messages: history},
+	}
+	client := &fakeNativeLLM{}
+	cfg := config.LLMConfig{
+		DefaultModel: "deepseek",
+		Models: map[string]config.LLMModelConfig{
+			"deepseek": {
+				Provider:      "openai",
+				BaseURL:       "https://llm.test",
+				APIKey:        "key",
+				ID:            "model",
+				Endpoint:      "responses",
+				ContextWindow: 4,
+				Compact:       config.LLMCompactConfig{Mode: config.CompactModeAuto, Threshold: 0.25},
+			},
+		},
+		SystemPrompt: "system",
+	}
+	b := &Bot{
+		Sessions:            sessions,
+		LLMConfig:           cfg,
+		LLMClients:          map[string]llm.Client{},
+		NewLLM:              func(config.ResolvedModel) llm.Client { return client },
+		TextChunkLimit:      testTextChunkLimit,
+		EnableTextStreaming: true,
+	}
+	sender := &fakeSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "new", LLMText: "new"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(client.compactedMessages) != 3 {
+		t.Fatalf("compacted messages = %d, want 3 old messages", len(client.compactedMessages))
+	}
+	if len(client.contextMessages) != nativeContextKeepRecentMessages+2 {
+		t.Fatalf("context request messages = %d, want system + recent history + new", len(client.contextMessages))
+	}
+	for _, msg := range client.contextMessages {
+		if msg.Content == "old message a" {
+			t.Fatalf("request included compacted old message: %#v", client.contextMessages)
+		}
+	}
+	if client.context.IsEmpty() {
+		t.Fatal("provider context was not passed to context-aware request")
+	}
+	if sessions.saved == nil {
+		t.Fatal("history was not saved")
+	}
+	if got, want := len(sessions.saved.Messages), nativeContextKeepRecentMessages+2; got != want {
+		t.Fatalf("saved messages = %d, want %d", got, want)
+	}
+	if sessions.saved.Messages[0].Content != "old message d" {
+		t.Fatalf("first saved message = %#v, want first retained recent message", sessions.saved.Messages[0])
+	}
+	ctx := sessions.saved.ProviderContexts["deepseek"]
+	if ctx.Provider != "openai" || ctx.Endpoint != "responses" || len(ctx.Items) != 1 {
+		t.Fatalf("saved provider context = %#v, want openai responses compact context", ctx)
+	}
+}
+
+func TestHandleTextContinuesWhenNativeCompactNotTriggered(t *testing.T) {
+	var history []store.Message
+	for i := 0; i < nativeContextKeepRecentMessages+3; i++ {
+		history = append(history, store.Message{Role: "user", Content: "old message " + string(rune('a'+i))})
+	}
+	sessions := &fakeSessions{
+		conv: &store.Conversation{Messages: history},
+	}
+	client := &fakeNativeLLM{compactErr: llm.ErrCompactionNotTriggered}
+	cfg := config.LLMConfig{
+		DefaultModel: "deepseek",
+		Models: map[string]config.LLMModelConfig{
+			"deepseek": {
+				Provider:      "openai",
+				BaseURL:       "https://llm.test",
+				APIKey:        "key",
+				ID:            "model",
+				Endpoint:      "responses",
+				ContextWindow: 4,
+				Compact:       config.LLMCompactConfig{Mode: config.CompactModeAuto, Threshold: 0.25},
+			},
+		},
+		SystemPrompt: "system",
+	}
+	b := &Bot{
+		Sessions:            sessions,
+		LLMConfig:           cfg,
+		LLMClients:          map[string]llm.Client{},
+		NewLLM:              func(config.ResolvedModel) llm.Client { return client },
+		TextChunkLimit:      testTextChunkLimit,
+		EnableTextStreaming: true,
+	}
+	sender := &fakeSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "new", LLMText: "new"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(client.compactedMessages) != 3 {
+		t.Fatalf("compacted messages = %d, want attempted compaction of 3 old messages", len(client.compactedMessages))
+	}
+	if !client.called {
+		t.Fatal("LLM request was not sent after compaction was not triggered")
+	}
+	if sessions.saved == nil {
+		t.Fatal("history was not saved")
+	}
+	if got, want := len(sessions.saved.Messages), len(history)+2; got != want {
+		t.Fatalf("saved messages = %d, want original history plus user/assistant %d", got, want)
+	}
+	if len(sessions.saved.ProviderContexts) != 0 {
+		t.Fatalf("provider contexts = %#v, want none when compaction was not triggered", sessions.saved.ProviderContexts)
+	}
+	if len(sender.sent) != 1 || sender.sent[0].Text != "hello" {
+		t.Fatalf("sent = %#v, want normal reply", sender.sent)
+	}
+}
+
+func TestHandleCompactCommandCompactsAndSavesRecentHistory(t *testing.T) {
+	var history []store.Message
+	for i := 0; i < nativeContextKeepRecentMessages+2; i++ {
+		history = append(history, store.Message{Role: "user", Content: "old message " + string(rune('a'+i))})
+	}
+	sessions := &fakeSessions{conv: &store.Conversation{Messages: history}}
+	client := &fakeNativeLLM{}
+	cfg := config.LLMConfig{
+		DefaultModel: "deepseek",
+		Models: map[string]config.LLMModelConfig{
+			"deepseek": {
+				Provider:      "openai",
+				BaseURL:       "https://llm.test",
+				APIKey:        "key",
+				ID:            "model",
+				Endpoint:      "responses",
+				ContextWindow: 128000,
+				Compact:       config.LLMCompactConfig{Mode: config.CompactModeAuto, Threshold: 0.9},
+			},
+		},
+		SystemPrompt: "system",
+	}
+	b := &Bot{
+		Sessions:       sessions,
+		LLMConfig:      cfg,
+		LLMClients:     map[string]llm.Client{},
+		NewLLM:         func(config.ResolvedModel) llm.Client { return client },
+		TextChunkLimit: testTextChunkLimit,
+	}
+	sender := &fakeSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "/compact", LLMText: "/compact"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(client.compactedMessages) != 2 {
+		t.Fatalf("compacted messages = %d, want 2", len(client.compactedMessages))
+	}
+	if sessions.saved == nil {
+		t.Fatal("history was not saved")
+	}
+	if got, want := len(sessions.saved.Messages), nativeContextKeepRecentMessages; got != want {
+		t.Fatalf("saved messages = %d, want %d", got, want)
+	}
+	if sessions.saved.ProviderContexts["deepseek"].IsEmpty() {
+		t.Fatalf("saved provider contexts = %#v, want compact context", sessions.saved.ProviderContexts)
+	}
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0].Text, "已压缩") {
+		t.Fatalf("sent = %#v, want compact success", sender.sent)
+	}
+}
+
+func TestHandleCompactCommandNotTriggeredDoesNotSave(t *testing.T) {
+	var history []store.Message
+	for i := 0; i < nativeContextKeepRecentMessages+2; i++ {
+		history = append(history, store.Message{Role: "user", Content: "old message " + string(rune('a'+i))})
+	}
+	sessions := &fakeSessions{conv: &store.Conversation{Messages: history}}
+	client := &fakeNativeLLM{compactErr: llm.ErrCompactionNotTriggered}
+	cfg := config.LLMConfig{
+		DefaultModel: "deepseek",
+		Models: map[string]config.LLMModelConfig{
+			"deepseek": {
+				Provider:      "openai",
+				BaseURL:       "https://llm.test",
+				APIKey:        "key",
+				ID:            "model",
+				Endpoint:      "responses",
+				ContextWindow: 128000,
+				Compact:       config.LLMCompactConfig{Mode: config.CompactModeAuto, Threshold: 0.9},
+			},
+		},
+		SystemPrompt: "system",
+	}
+	b := &Bot{
+		Sessions:       sessions,
+		LLMConfig:      cfg,
+		LLMClients:     map[string]llm.Client{},
+		NewLLM:         func(config.ResolvedModel) llm.Client { return client },
+		TextChunkLimit: testTextChunkLimit,
+	}
+	sender := &fakeSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "/compact", LLMText: "/compact"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(client.compactedMessages) != 2 {
+		t.Fatalf("compacted messages = %d, want attempted compact of 2 old messages", len(client.compactedMessages))
+	}
+	if sessions.saved != nil {
+		t.Fatalf("saved = %#v, want no saved history when compaction was not triggered", sessions.saved)
+	}
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0].Text, "未达到供应商原生压缩触发阈值") {
+		t.Fatalf("sent = %#v, want not-triggered compact notice", sender.sent)
+	}
+}
+
+func TestHandleCompactCommandDisabledByMode(t *testing.T) {
+	sessions := &fakeSessions{conv: &store.Conversation{Messages: []store.Message{{Role: "user", Content: "old"}}}}
+	client := &fakeNativeLLM{}
+	cfg := config.LLMConfig{
+		DefaultModel: "deepseek",
+		Models: map[string]config.LLMModelConfig{
+			"deepseek": {
+				Provider: "openai",
+				BaseURL:  "https://llm.test",
+				APIKey:   "key",
+				ID:       "model",
+				Endpoint: "chat",
+				Compact:  config.LLMCompactConfig{Mode: config.CompactModeFalse, Threshold: 0.9},
+			},
+		},
+		SystemPrompt: "system",
+	}
+	b := &Bot{
+		Sessions:   sessions,
+		LLMConfig:  cfg,
+		LLMClients: map[string]llm.Client{},
+		NewLLM:     func(config.ResolvedModel) llm.Client { return client },
+	}
+	sender := &fakeSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "/compact", LLMText: "/compact"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(client.compactedMessages) != 0 {
+		t.Fatalf("compacted messages = %#v, want no compaction", client.compactedMessages)
+	}
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0].Text, "已禁用") {
+		t.Fatalf("sent = %#v, want disabled compact error", sender.sent)
+	}
+}
+
+func TestHandleCompactCommandUnsupportedProviderErrors(t *testing.T) {
+	sessions := &fakeSessions{conv: &store.Conversation{Messages: []store.Message{{Role: "user", Content: "old"}}}}
+	client := &fakeLLM{}
+	b := testBot(sessions, client)
+	sender := &fakeSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "/compact", LLMText: "/compact"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if client.called {
+		t.Fatal("LLM chat was called for unsupported /compact")
+	}
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0].Text, "不支持上下文压缩") {
+		t.Fatalf("sent = %#v, want unsupported compact error", sender.sent)
 	}
 }
 

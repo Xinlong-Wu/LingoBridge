@@ -279,7 +279,7 @@ func TestEnsureConfigInitializedCreatesFirstModelAsDefault(t *testing.T) {
 
 func TestEnsureConfigInitializedRepromptsInvalidEndpoint(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	input := strings.NewReader("first\nopenai\nhttps://api.example.com/v1\nkey\nmodel\nresponse\nresponses\n")
+	input := strings.NewReader("first\nopenai\nhttps://api.example.com/v1\nkey\nmodel\nresponse\nresponses\n128000\n")
 	var out bytes.Buffer
 
 	if err := ensureConfigInitialized(input, &out); err != nil {
@@ -309,6 +309,7 @@ func TestCmdModelAddWritesConfig(t *testing.T) {
 		"--api-key", "key",
 		"--id", "gpt-4o",
 		"--endpoint", "responses",
+		"--context-window", "128000",
 		"--default",
 	}, strings.NewReader(""), &out)
 	if err != nil {

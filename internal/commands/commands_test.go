@@ -114,7 +114,7 @@ func TestHandleHelp(t *testing.T) {
 	if !handled {
 		t.Fatal("Handle did not handle /help")
 	}
-	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/clear", "/model"} {
+	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/clear", "/model", "/compact"} {
 		if !strings.Contains(resp, want) {
 			t.Fatalf("response = %q, want %s", resp, want)
 		}
@@ -123,7 +123,7 @@ func TestHandleHelp(t *testing.T) {
 
 func TestHelpTextIncludesDefaultCommands(t *testing.T) {
 	resp := HelpText(DefaultPolicy())
-	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/clear", "/model"} {
+	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/clear", "/model", "/compact"} {
 		if !strings.Contains(resp, want) {
 			t.Fatalf("response = %q, want %s", resp, want)
 		}

@@ -23,21 +23,42 @@ type LLMConfig struct {
 
 // LLMModelConfig holds one complete LLM profile.
 type LLMModelConfig struct {
-	Provider string `yaml:"provider"` // "openai" or "anthropic"
-	BaseURL  string `yaml:"base_url"` // API base URL
-	APIKey   string `yaml:"api_key"`  // API key
-	ID       string `yaml:"id"`       // Provider model identifier
-	Endpoint string `yaml:"endpoint"` // Provider endpoint mode
+	Provider      string           `yaml:"provider"`                 // "openai" or "anthropic"
+	BaseURL       string           `yaml:"base_url"`                 // API base URL
+	APIKey        string           `yaml:"api_key"`                  // API key
+	ID            string           `yaml:"id"`                       // Provider model identifier
+	Endpoint      string           `yaml:"endpoint"`                 // Provider endpoint mode
+	ContextWindow int              `yaml:"context_window,omitempty"` // Model context window in tokens
+	Compact       LLMCompactConfig `yaml:"compact,omitempty"`        // Provider-native context compaction
 }
+
+// LLMCompactConfig enables provider-native context compaction for one model.
+type LLMCompactConfig struct {
+	Mode         CompactMode `yaml:"mode,omitempty"`
+	Threshold    float64     `yaml:"threshold,omitempty"`
+	Instructions string      `yaml:"instructions,omitempty"`
+	thresholdSet bool
+}
+
+// CompactMode controls whether provider-native compaction is enabled.
+type CompactMode string
+
+const (
+	CompactModeAuto  CompactMode = "auto"
+	CompactModeTrue  CompactMode = "true"
+	CompactModeFalse CompactMode = "false"
+)
 
 // ResolvedModel is an effective LLM profile selected for a user.
 type ResolvedModel struct {
-	Name     string
-	Provider string
-	BaseURL  string
-	APIKey   string
-	ID       string
-	Endpoint string
+	Name          string
+	Provider      string
+	BaseURL       string
+	APIKey        string
+	ID            string
+	Endpoint      string
+	ContextWindow int
+	Compact       LLMCompactConfig
 }
 
 // Config is the top-level configuration.
@@ -49,6 +70,7 @@ type Config struct {
 const DefaultSystemPrompt = "You are a helpful assistant."
 const DefaultModelEndpoint = "chat"
 const DefaultAnthropicEndpoint = "messages"
+const DefaultCompactThreshold = 0.9
 
 var (
 	// ErrConfigNotFound is returned when ~/.lingobridge/config.yaml does not exist.
@@ -56,6 +78,77 @@ var (
 	// ErrModelExists is returned when adding a duplicate model profile.
 	ErrModelExists = errors.New("model profile already exists")
 )
+
+// UnmarshalYAML accepts compact.mode as YAML bool true/false or the string "auto".
+func (m *CompactMode) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		switch value.Tag {
+		case "!!bool":
+			if strings.EqualFold(value.Value, "true") {
+				*m = CompactModeTrue
+				return nil
+			}
+			if strings.EqualFold(value.Value, "false") {
+				*m = CompactModeFalse
+				return nil
+			}
+		default:
+			mode := CompactMode(strings.ToLower(strings.TrimSpace(value.Value)))
+			switch mode {
+			case "", CompactModeAuto, CompactModeTrue, CompactModeFalse:
+				*m = mode
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("compact.mode must be true, false, or auto")
+}
+
+// MarshalYAML emits true/false modes as YAML booleans and auto as a string.
+func (m CompactMode) MarshalYAML() (any, error) {
+	switch m {
+	case CompactModeTrue:
+		return true, nil
+	case CompactModeFalse:
+		return false, nil
+	case "", CompactModeAuto:
+		return string(CompactModeAuto), nil
+	default:
+		return nil, fmt.Errorf("compact.mode must be true, false, or auto")
+	}
+}
+
+// ParseCompactMode parses a CLI/config string compact mode.
+func ParseCompactMode(value string) (CompactMode, error) {
+	mode := CompactMode(strings.ToLower(strings.TrimSpace(value)))
+	switch mode {
+	case CompactModeAuto, CompactModeTrue, CompactModeFalse:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("compact mode must be true, false, or auto")
+	}
+}
+
+// UnmarshalYAML tracks whether threshold was explicitly configured.
+func (c *LLMCompactConfig) UnmarshalYAML(value *yaml.Node) error {
+	type rawCompact struct {
+		Mode         CompactMode `yaml:"mode"`
+		Threshold    *float64    `yaml:"threshold"`
+		Instructions string      `yaml:"instructions"`
+	}
+	var raw rawCompact
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	c.Mode = raw.Mode
+	c.Instructions = raw.Instructions
+	c.thresholdSet = raw.Threshold != nil
+	if raw.Threshold != nil {
+		c.Threshold = *raw.Threshold
+	}
+	return nil
+}
 
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() Config {
@@ -263,8 +356,9 @@ func (c *LLMConfig) ApplyDefaults() {
 	for name, model := range c.Models {
 		if model.Endpoint == "" {
 			model.Endpoint = DefaultEndpointForProvider(model.Provider)
-			c.Models[name] = model
 		}
+		model.Compact = defaultCompactConfig(model.Compact)
+		c.Models[name] = model
 	}
 }
 
@@ -336,15 +430,31 @@ func validateModelProfile(name string, model LLMModelConfig) error {
 	if model.ID == "" {
 		return fmt.Errorf("llm.models.%s.id is required", name)
 	}
+	compact := defaultCompactConfig(model.Compact)
+	if model.ContextWindow < 0 {
+		return fmt.Errorf("llm.models.%s.context_window must be >= 0", name)
+	}
+	if compact.Threshold <= 0 || compact.Threshold > 1 {
+		return fmt.Errorf("llm.models.%s.compact.threshold must be > 0 and <= 1", name)
+	}
 	switch model.Provider {
 	case "openai":
 		if !IsValidEndpointForProvider(model.Provider, endpoint) {
 			return fmt.Errorf("llm.models.%s.endpoint must be chat or responses for openai; use responses, not response", name)
 		}
+		if compact.Mode == CompactModeTrue && !SupportsNativeCompact(model.Provider, endpoint) {
+			return fmt.Errorf("llm.models.%s.compact requires endpoint responses for openai", name)
+		}
 	case "anthropic":
 		if !IsValidEndpointForProvider(model.Provider, endpoint) {
 			return fmt.Errorf("llm.models.%s.endpoint must be messages for anthropic", name)
 		}
+		if compact.Mode == CompactModeTrue && !SupportsNativeCompact(model.Provider, endpoint) {
+			return fmt.Errorf("llm.models.%s.compact requires endpoint messages for anthropic", name)
+		}
+	}
+	if compact.Mode != CompactModeFalse && SupportsNativeCompact(model.Provider, endpoint) && model.ContextWindow <= 0 {
+		return fmt.Errorf("llm.models.%s.context_window is required when compact is enabled or auto for this provider endpoint", name)
 	}
 	return nil
 }
@@ -369,6 +479,7 @@ func AddModel(cfg *Config, name string, model LLMModelConfig, makeDefault bool) 
 	if model.Endpoint == "" {
 		model.Endpoint = DefaultEndpointForProvider(model.Provider)
 	}
+	model.Compact = defaultCompactConfig(model.Compact)
 	if err := validateModelProfile(name, model); err != nil {
 		return err
 	}
@@ -415,13 +526,40 @@ func (c LLMConfig) ResolveModel(name string) (ResolvedModel, error) {
 		endpoint = DefaultEndpointForProvider(model.Provider)
 	}
 	return ResolvedModel{
-		Name:     name,
-		Provider: model.Provider,
-		BaseURL:  model.BaseURL,
-		APIKey:   model.APIKey,
-		ID:       model.ID,
-		Endpoint: endpoint,
+		Name:          name,
+		Provider:      model.Provider,
+		BaseURL:       model.BaseURL,
+		APIKey:        model.APIKey,
+		ID:            model.ID,
+		Endpoint:      endpoint,
+		ContextWindow: model.ContextWindow,
+		Compact:       defaultCompactConfig(model.Compact),
 	}, nil
+}
+
+func defaultCompactConfig(cfg LLMCompactConfig) LLMCompactConfig {
+	if cfg.Mode == "" {
+		cfg.Mode = CompactModeAuto
+	}
+	if !cfg.thresholdSet && cfg.Threshold == 0 {
+		cfg.Threshold = DefaultCompactThreshold
+	}
+	return cfg
+}
+
+// SupportsNativeCompact reports whether a provider endpoint has native compact support.
+func SupportsNativeCompact(provider, endpoint string) bool {
+	if endpoint == "" {
+		endpoint = DefaultEndpointForProvider(provider)
+	}
+	switch provider {
+	case "openai":
+		return endpoint == "responses"
+	case "anthropic":
+		return endpoint == DefaultAnthropicEndpoint
+	default:
+		return false
+	}
 }
 
 func rejectLegacyLLMFields(data []byte) error {

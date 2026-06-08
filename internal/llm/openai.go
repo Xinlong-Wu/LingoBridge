@@ -12,6 +12,7 @@ const (
 	openAIRefProvider                = "openai"
 	openAIRefTypeFile                = "file"
 	openAIRefTypeImageGenerationCall = "image_generation_call"
+	openAIRefTypeCompaction          = "compaction"
 )
 
 type openaiBase struct {
@@ -49,6 +50,10 @@ func (c *openaiBase) chatCompletionsURL() string {
 
 func (c *openaiBase) responsesURL() string {
 	return openAIURL(c.cfg.BaseURL, "/responses")
+}
+
+func (c *openaiBase) responsesCompactURL() string {
+	return openAIURL(c.cfg.BaseURL, "/responses/compact")
 }
 
 func openAIURL(baseURL, path string) string {

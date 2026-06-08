@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -190,7 +191,7 @@ func printAccountUsage() {
 
 func printModelUsage() {
 	fmt.Println("Usage:")
-	fmt.Println("  lingobridge model add <name> [--provider <openai|anthropic>] [--base-url <url>] [--api-key <key>] [--id <model-id>] [--endpoint <mode>] [--default]")
+	fmt.Println("  lingobridge model add <name> [--provider <openai|anthropic>] [--base-url <url>] [--api-key <key>] [--id <model-id>] [--endpoint <mode>] [--context-window <tokens>] [--compact <true|false|auto>] [--compact-threshold <ratio>] [--compact-instructions <text>] [--default]")
 }
 
 func newFlagSet(name string) *flag.FlagSet {
@@ -285,6 +286,10 @@ func cmdModelAdd(args []string, in io.Reader, out io.Writer) error {
 	apiKey := fs.String("api-key", "", "model API key")
 	modelID := fs.String("id", "", "provider model ID")
 	endpoint := fs.String("endpoint", "", "endpoint mode")
+	contextWindow := fs.Int("context-window", 0, "model context window in tokens")
+	compactMode := fs.String("compact", "", "compact mode: true, false, or auto")
+	compactThreshold := fs.Float64("compact-threshold", 0, "compact threshold ratio")
+	compactInstructions := fs.String("compact-instructions", "", "compact instructions")
 	makeDefault := fs.Bool("default", false, "set as default model")
 	if err := fs.Parse(args[1:]); err != nil {
 		printModelUsage()
@@ -303,11 +308,23 @@ func cmdModelAdd(args []string, in io.Reader, out io.Writer) error {
 		return fmt.Errorf("%w: %s", config.ErrModelExists, name)
 	}
 	model := config.LLMModelConfig{
-		Provider: *provider,
-		BaseURL:  *baseURL,
-		APIKey:   *apiKey,
-		ID:       *modelID,
-		Endpoint: *endpoint,
+		Provider:      *provider,
+		BaseURL:       *baseURL,
+		APIKey:        *apiKey,
+		ID:            *modelID,
+		Endpoint:      *endpoint,
+		ContextWindow: *contextWindow,
+		Compact: config.LLMCompactConfig{
+			Threshold:    *compactThreshold,
+			Instructions: *compactInstructions,
+		},
+	}
+	if strings.TrimSpace(*compactMode) != "" {
+		mode, err := config.ParseCompactMode(*compactMode)
+		if err != nil {
+			return err
+		}
+		model.Compact.Mode = mode
 	}
 	name, model, err = promptModelProfile(name, model, in, out)
 	if err != nil {
@@ -368,7 +385,20 @@ func promptModelProfile(name string, model config.LLMModelConfig, in io.Reader, 
 			return "", model, err
 		}
 	}
+	if model.ContextWindow <= 0 && compactCanAutoUseEndpoint(model.Provider, model.Endpoint, model.Compact.Mode) {
+		model.ContextWindow, err = promptCLIInt(reader, out, "上下文窗口 tokens（compact auto 需要）: ", true, 0)
+		if err != nil {
+			return "", model, err
+		}
+	}
 	return strings.TrimSpace(name), model, nil
+}
+
+func compactCanAutoUseEndpoint(provider, endpoint string, mode config.CompactMode) bool {
+	if mode == "" {
+		mode = config.CompactModeAuto
+	}
+	return mode != config.CompactModeFalse && config.SupportsNativeCompact(strings.TrimSpace(provider), strings.TrimSpace(endpoint))
 }
 
 func promptEndpoint(reader *bufio.Reader, out io.Writer, provider, defaultEndpoint string) (string, error) {
@@ -408,6 +438,27 @@ func promptCLIValue(reader *bufio.Reader, out io.Writer, prompt string, required
 		if err == io.EOF {
 			return "", fmt.Errorf("missing required input")
 		}
+	}
+}
+
+func promptCLIInt(reader *bufio.Reader, out io.Writer, prompt string, required bool, defaultValue int) (int, error) {
+	defaultText := ""
+	if defaultValue > 0 {
+		defaultText = strconv.Itoa(defaultValue)
+	}
+	for {
+		value, err := promptCLIValue(reader, out, prompt, required, defaultText)
+		if err != nil {
+			return 0, err
+		}
+		if strings.TrimSpace(value) == "" && !required {
+			return 0, nil
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err == nil && n > 0 {
+			return n, nil
+		}
+		fmt.Fprintln(out, "请输入大于 0 的整数。")
 	}
 }
 
