@@ -439,11 +439,7 @@ type wechatSender struct {
 
 func (s wechatSender) Send(ctx context.Context, msg core.OutboundMessage) error {
 	if msg.Text != "" {
-		filtered := filterWechatMarkdownText(msg.Text)
-		if filtered == "" {
-			return nil
-		}
-		return s.bot.sendText(s.toUserID, filtered, s.contextToken)
+		return s.bot.sendText(s.toUserID, msg.Text, s.contextToken)
 	}
 	if len(msg.Image.Data) > 0 || msg.Image.Filename != "" || msg.Image.LocalPath != "" {
 		return s.bot.sendImage(s.toUserID, s.contextToken, msg.Image)

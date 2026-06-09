@@ -180,11 +180,9 @@ Image understanding currently requires an OpenAI-compatible model profile with
 `请描述这张图片。` as the user prompt.
 
 Long text replies are automatically split into multiple WeChat messages before
-sending. Before sending WeChat text, the WeChat monitor applies its private
-markdown-to-WeChat filter to remove unsupported Markdown wrappers while keeping
-the readable content. When provider-native context compaction starts, WeChat
-sends a progress text message; after compacted context is saved, it sends the
-compact success summary as another text message.
+sending. When provider-native context compaction starts, WeChat sends a progress
+text message; after compacted context is saved, it sends the compact success
+summary as another text message.
 
 ### Feishu
 
@@ -351,7 +349,7 @@ internal/config/            # Shared config load/save, paths, LLM profile defaul
 internal/platform/          # Platform registry and shared platform definition types
 internal/platform/builtins/ # Built-in WeChat/Feishu account/runtime definition registration
 internal/platform/wechat/   # WeChat frontend adapter: native events/API <-> core messages
-internal/platform/wechat/monitor/ # WeChat monitor, reply sender, media handling, and markdown-to-WeChat filtering
+internal/platform/wechat/monitor/ # WeChat monitor, reply sender, and media handling
 internal/platform/feishu/   # Feishu frontend adapter and its private config schema
 internal/platform/feishu/monitor/ # Feishu long-connection monitor, message/text-stream adapter, and event hooks
 internal/core/              # Middle layer: scoped platform config/data APIs, commands, sessions, LLM orchestration

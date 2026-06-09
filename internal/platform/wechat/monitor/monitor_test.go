@@ -941,7 +941,7 @@ func TestProcessOneTypingErrorDoesNotBlockReply(t *testing.T) {
 	}
 }
 
-func TestProcessOneFiltersMarkdownBeforeSendingText(t *testing.T) {
+func TestProcessOneSendsRawMarkdownText(t *testing.T) {
 	b, client, _, llmClient := newTestBot()
 	llmClient.response.Text = "Commands:\n```bash\nsudo dnf update -y\n```\ninline `code`"
 
@@ -949,21 +949,22 @@ func TestProcessOneFiltersMarkdownBeforeSendingText(t *testing.T) {
 		t.Fatalf("processOne returned error: %v", err)
 	}
 
-	want := "Commands:\nsudo dnf update -y\n\ninline code"
+	want := llmClient.response.Text
 	if got := lastSentText(t, client); got != want {
-		t.Fatalf("sent text = %q, want filtered markdown %q", got, want)
+		t.Fatalf("sent text = %q, want raw markdown %q", got, want)
 	}
 }
 
-func TestWechatSenderSkipsEmptyTextAfterMarkdownFilter(t *testing.T) {
+func TestWechatSenderSendsMarkdownImageSyntaxAsText(t *testing.T) {
 	b, client, _, _ := newTestBot()
 	sender := wechatSender{bot: b, toUserID: "user", contextToken: "context"}
 
-	if err := sender.Send(context.Background(), core.OutboundMessage{Text: "![alt](https://example.test/image.png)"}); err != nil {
+	text := "![alt](https://example.test/image.png)"
+	if err := sender.Send(context.Background(), core.OutboundMessage{Text: text}); err != nil {
 		t.Fatalf("Send returned error: %v", err)
 	}
-	if len(client.sent) != 0 {
-		t.Fatalf("sent messages = %d, want none", len(client.sent))
+	if got := lastSentText(t, client); got != text {
+		t.Fatalf("sent text = %q, want raw markdown image syntax %q", got, text)
 	}
 }
 
