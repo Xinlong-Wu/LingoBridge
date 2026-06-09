@@ -117,6 +117,15 @@ type responsesFunctionCallOutput struct {
 	Output string `json:"output"`
 }
 
+type responsesFunctionCallInput struct {
+	ID        string `json:"id,omitempty"`
+	Type      string `json:"type"`
+	Status    string `json:"status,omitempty"`
+	CallID    string `json:"call_id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
 type responsesTool struct {
 	Type        string          `json:"type"`
 	Name        string          `json:"name"`
@@ -699,7 +708,14 @@ func appendResponsesToolCall(resp *ToolResponse, item responsesOutputItem, raw j
 		Arguments: args,
 	})
 	if len(raw) == 0 {
-		raw, _ = json.Marshal(item)
+		raw, _ = json.Marshal(responsesFunctionCallInput{
+			ID:        item.ID,
+			Type:      "function_call",
+			Status:    item.Status,
+			CallID:    callID,
+			Name:      item.Name,
+			Arguments: item.Arguments,
+		})
 	}
 	if len(raw) > 0 {
 		resp.ToolState.Provider = openAIRefProvider

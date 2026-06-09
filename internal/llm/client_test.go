@@ -598,6 +598,55 @@ func TestOpenAIResponsesToolCallingRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesStreamingToolStateOmitsMessageContent(t *testing.T) {
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		bodies = append(bodies, req)
+		if len(bodies) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"feishu_docs_search\",\"arguments\":\"{\\\"query\\\":\\\"roadmap\\\"}\"}}\n\n"))
+			w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{openaiBase: openaiBase{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "gpt-test"}, httpClient: server.Client()}}
+	tools := []ToolSpec{{Name: "feishu_docs_search", Description: "search", Parameters: json.RawMessage(`{"type":"object"}`)}}
+	first, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, ToolState{}, nil, func(string) error { return nil })
+	if err != nil {
+		t.Fatalf("ChatStreamWithTools first returned error: %v", err)
+	}
+	if len(first.ToolCalls) != 1 || first.ToolCalls[0].ID != "call_1" {
+		t.Fatalf("tool calls = %#v, want call_1", first.ToolCalls)
+	}
+
+	if _, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []ToolResult{{CallID: "call_1", Name: "feishu_docs_search", Content: `{"ok":true}`}}, nil); err != nil {
+		t.Fatalf("ChatStreamWithTools second returned error: %v", err)
+	}
+	input := bodies[1]["input"].([]any)
+	var functionCall map[string]any
+	for _, item := range input {
+		m, _ := item.(map[string]any)
+		if m["type"] == "function_call" && m["call_id"] == "call_1" {
+			functionCall = m
+			break
+		}
+	}
+	if functionCall == nil {
+		t.Fatalf("second input = %#v, want previous function_call item", input)
+	}
+	if _, ok := functionCall["content"]; ok {
+		t.Fatalf("function_call input = %#v, did not want content field", functionCall)
+	}
+}
+
 func TestOpenAIChatToolCallingRoundTrip(t *testing.T) {
 	var bodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

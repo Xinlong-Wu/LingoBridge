@@ -301,6 +301,7 @@ func (b *Bot) chatWithoutTools(client llm.Client, compactAllowed bool, providerC
 func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, systemPrompt string, msgs []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, compactAllowed bool, tools []Tool, onChunk func(string) error) (llm.Response, []store.ToolTrace, error) {
 	specs := toolSpecs(tools)
 	if len(specs) == 0 {
+		coreLog.Warn(ctx, "tool calling requested with %d tool entries but no valid tool specs; falling back to plain chat", len(tools))
 		baseClient, ok := client.(llm.Client)
 		if !ok {
 			return llm.Response{}, nil, fmt.Errorf("tool-capable client does not implement base chat")
@@ -314,6 +315,7 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 		maxCalls = defaultMaxToolCalls
 	}
 	lookup := toolMap(tools)
+	coreLog.Debug(ctx, "tool loop start tools=%d max_calls=%d timeout=%s result_limit=%d", len(specs), maxCalls, effectiveToolTimeout(b.ToolTimeout), effectiveToolResultLimit(b.ToolResultLimit))
 	var traces []store.ToolTrace
 	var previous llm.ToolState
 	var results []llm.ToolResult
@@ -329,23 +331,48 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 			return llm.Response{}, traces, err
 		}
 		if len(resp.ToolCalls) == 0 {
+			coreLog.Debug(ctx, "tool loop finish calls=%d traces=%d text_len=%d images=%d", totalCalls, len(traces), len(resp.Text), len(resp.Images))
 			return resp.Response, traces, nil
 		}
 		if totalCalls+len(resp.ToolCalls) > maxCalls {
-			return llm.Response{}, traces, fmt.Errorf("tool call limit exceeded: %d > %d", totalCalls+len(resp.ToolCalls), maxCalls)
+			err := fmt.Errorf("tool call limit exceeded: %d > %d", totalCalls+len(resp.ToolCalls), maxCalls)
+			coreLog.Warn(ctx, "%v", err)
+			return llm.Response{}, traces, err
 		}
 
 		previous = resp.ToolState
 		results = results[:0]
+		coreLog.Debug(ctx, "model requested tool calls count=%d total_before=%d", len(resp.ToolCalls), totalCalls)
 		for _, call := range resp.ToolCalls {
 			call.Name = strings.TrimSpace(call.Name)
+			if _, ok := lookup[call.Name]; !ok {
+				coreLog.Warn(ctx, "model requested unavailable tool name=%s call_id=%s", call.Name, call.ID)
+			}
 			totalCalls++
 			result, trace := runTool(ctx, lookup[call.Name], call, b.ToolTimeout, b.ToolResultLimit)
 			results = append(results, result)
 			traces = append(traces, trace)
-			coreLog.Debug(ctx, "tool call name=%s status=%s duration_ms=%d", trace.Name, trace.Status, trace.DurationMillis)
+			if trace.Status == "error" {
+				coreLog.Warn(ctx, "tool call failed name=%s call_id=%s duration_ms=%d error=%s", trace.Name, trace.CallID, trace.DurationMillis, truncateText(trace.Error, defaultToolTraceTextLimit))
+			} else {
+				coreLog.Debug(ctx, "tool call finished name=%s call_id=%s status=%s duration_ms=%d", trace.Name, trace.CallID, trace.Status, trace.DurationMillis)
+			}
 		}
 	}
+}
+
+func effectiveToolTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return defaultToolTimeout
+	}
+	return timeout
+}
+
+func effectiveToolResultLimit(limit int) int {
+	if limit <= 0 {
+		return defaultToolResultLimit
+	}
+	return limit
 }
 
 func (b *Bot) prepareUserMessage(ctx context.Context, msg InboundMessage, sessionID string, llmClient llm.Client) (store.Message, error) {
