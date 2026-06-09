@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"lingobridge/internal/config"
 	"lingobridge/internal/core"
@@ -31,15 +29,9 @@ const (
 	typingKeepalive     = 5 * time.Second
 	defaultImagePrompt  = "请描述这张图片。"
 	maxVisionImageBytes = 20 * 1024 * 1024
-	aiErrorSummaryRunes = 300
 )
 
-var (
-	bearerTokenPattern = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]+`)
-	openAIKeyPattern   = regexp.MustCompile(`sk-[A-Za-z0-9_-]{8,}`)
-	hexTokenPattern    = regexp.MustCompile(`\b[0-9a-fA-F]{32,}\b`)
-	wechatLog          = logging.For("wechat")
-)
+var wechatLog = logging.For("wechat")
 
 type cursorStore interface {
 	GetSyncBuf(accountID string) (string, error)
@@ -56,24 +48,12 @@ type wechatClient interface {
 	NotifyStop() error
 }
 
-type conversationManager interface {
-	core.ConversationManager
-	GetOrCreateCurrentSession(userID string) (*store.Session, error)
-	LoadHistory(userID, sessionID string) (*store.Conversation, error)
-	SaveHistory(userID, sessionID string, conv *store.Conversation) error
-}
-
-type llmFactory func(config.ResolvedModel) llm.Client
 type imageDownloader func(item *api.ImageItem) ([]byte, string, error)
 type mediaSaver func(userID, sessionID, role string, index int, mimeType string, data []byte) (*store.MediaFile, error)
 
 type bot struct {
 	client        wechatClient
 	cursors       cursorStore
-	sessions      conversationManager
-	cfg           config.LLMConfig
-	llmClients    map[string]llm.Client
-	newLLM        llmFactory
 	typingTick    time.Duration
 	cdnBaseURL    string
 	cdnClient     *http.Client
@@ -119,25 +99,11 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 	b := &bot{
 		client:     client,
 		cursors:    p.store,
-		sessions:   p.sessions,
-		cfg:        p.cfg,
-		llmClients: map[string]llm.Client{},
-		newLLM:     defaultLLMFactory,
 		cdnBaseURL: defaultWeixinCDNBaseURL,
 		handler:    handler,
 		saveMedia:  p.store.SaveMediaFile,
 	}
 	return b.runAccount(ctx, acc)
-}
-
-func defaultLLMFactory(model config.ResolvedModel) llm.Client {
-	return llm.NewClient(llm.Config{
-		Provider: model.Provider,
-		BaseURL:  model.BaseURL,
-		APIKey:   model.APIKey,
-		Model:    model.ID,
-		Endpoint: model.Endpoint,
-	})
 }
 
 func (b *bot) runAccount(ctx context.Context, acc store.Account) error {
@@ -235,7 +201,7 @@ func (b *bot) processOne(msg *api.WeixinMessage) error {
 	wechatLog.Debug(context.Background(), "msg from=%s len=%d", fromUserID, len(llmText))
 
 	if strings.HasPrefix(strings.TrimSpace(commandText), "/") {
-		return b.coreHandler().Handle(context.Background(), core.InboundMessage{
+		return b.handleCore(context.Background(), core.InboundMessage{
 			Platform:    store.PlatformWeChat,
 			UserKey:     fromUserID,
 			CommandText: commandText,
@@ -451,11 +417,18 @@ func (b *bot) replyWithLLM(fromUserID, contextToken, text string, msg *api.Weixi
 			return client.PrepareUserMessage(prompt, attachments)
 		}
 	}
-	return b.coreHandler().Handle(context.Background(), in, wechatSender{
+	return b.handleCore(context.Background(), in, wechatSender{
 		bot:          b,
 		toUserID:     fromUserID,
 		contextToken: contextToken,
 	})
+}
+
+func (b *bot) handleCore(ctx context.Context, msg core.InboundMessage, sender core.Sender) error {
+	if b.handler == nil {
+		return fmt.Errorf("core handler is not configured")
+	}
+	return b.handler.Handle(ctx, msg, sender)
 }
 
 type wechatSender struct {
@@ -490,65 +463,8 @@ func (s wechatSender) FinishCompactNotice(ctx context.Context, handle core.Compa
 	return s.bot.sendText(s.toUserID, core.CompactSuccessText(notice), s.contextToken)
 }
 
-func (b *bot) coreHandler() core.Handler {
-	if b.handler != nil {
-		return b.handler
-	}
-	return b.coreBot()
-}
-
-func (b *bot) coreBot() *core.Bot {
-	if b.llmClients == nil {
-		b.llmClients = map[string]llm.Client{}
-	}
-	br := core.New(b.sessions, b.cfg)
-	br.LLMClients = b.llmClients
-	br.NewLLM = func(model config.ResolvedModel) llm.Client {
-		if b.newLLM != nil {
-			return b.newLLM(model)
-		}
-		return defaultLLMFactory(model)
-	}
-	br.TextChunkLimit = -1
-	br.MutateResponse = b.persistResponseImages
-	br.ErrorNotice = func(err error) string {
-		if errors.Is(err, llm.ErrUnsupportedAttachment) {
-			return imageInputErrorText(err)
-		}
-		return aiErrorNotice(err)
-	}
-	return br
-}
-
 func aiErrorNotice(err error) string {
-	summary := summarizeError(err, aiErrorSummaryRunes)
-	if summary == "" {
-		summary = "未知错误"
-	}
-	return "❌ AI 响应失败：" + summary
-}
-
-func summarizeError(err error, maxRunes int) string {
-	if err == nil {
-		return ""
-	}
-	summary := err.Error()
-	summary = bearerTokenPattern.ReplaceAllString(summary, "Bearer [REDACTED]")
-	summary = openAIKeyPattern.ReplaceAllString(summary, "sk-[REDACTED]")
-	summary = hexTokenPattern.ReplaceAllString(summary, "[REDACTED]")
-	summary = strings.Join(strings.Fields(summary), " ")
-	return truncateRunes(summary, maxRunes)
-}
-
-func truncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return ""
-	}
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes]) + "..."
+	return core.AIErrorNotice(err)
 }
 
 func (b *bot) persistResponseImages(userID, sessionID string, resp llm.Response) llm.Response {
@@ -580,34 +496,8 @@ func (b *bot) saveMediaFile(userID, sessionID, role string, index int, mimeType 
 	return saver(userID, sessionID, role, index, mimeType, data)
 }
 
-func (b *bot) llmForUser(userID string) (string, llm.Client, error) {
-	modelName, err := b.sessions.CurrentModel(userID)
-	if err != nil {
-		return "", nil, err
-	}
-	model, err := b.cfg.ResolveModel(modelName)
-	if err != nil {
-		model, err = b.cfg.ResolveModel(b.cfg.DefaultModel)
-		if err != nil {
-			return "", nil, err
-		}
-	}
-	if b.llmClients == nil {
-		b.llmClients = map[string]llm.Client{}
-	}
-	if b.newLLM == nil {
-		b.newLLM = defaultLLMFactory
-	}
-	client, ok := b.llmClients[model.Name]
-	if !ok {
-		client = b.newLLM(model)
-		b.llmClients[model.Name] = client
-	}
-	return model.Name, client, nil
-}
-
 func (b *bot) sendText(toUserID, text, contextToken string) error {
-	chunks := splitTextChunks(text, textChunkLimit)
+	chunks := core.SplitTextChunksByRunes(text, textChunkLimit)
 	for i, chunk := range chunks {
 		msg := message.BuildTextMessage(toUserID, chunk, contextToken)
 		if err := b.client.SendMessage(msg); err != nil {
@@ -634,45 +524,6 @@ func (b *bot) sendImage(toUserID, contextToken string, image llm.Image) error {
 		return err
 	}
 	return nil
-}
-
-func splitTextChunks(text string, limit int) []string {
-	if limit <= 0 {
-		return []string{text}
-	}
-
-	runes := []rune(text)
-	if len(runes) <= limit {
-		return []string{text}
-	}
-
-	chunks := make([]string, 0, len(runes)/limit+1)
-	for start := 0; start < len(runes); {
-		end := start + limit
-		if end >= len(runes) {
-			chunks = append(chunks, string(runes[start:]))
-			break
-		}
-
-		split := findChunkSplit(runes, start, end)
-		chunks = append(chunks, string(runes[start:split]))
-		start = split
-	}
-	return chunks
-}
-
-func findChunkSplit(runes []rune, start, end int) int {
-	for i := end - 1; i >= start; i-- {
-		if runes[i] == '\n' {
-			return i + 1
-		}
-	}
-	for i := end - 1; i >= start; i-- {
-		if unicode.IsSpace(runes[i]) {
-			return i + 1
-		}
-	}
-	return end
 }
 
 func (b *bot) sendTyping(toUserID, contextToken string, status int) {

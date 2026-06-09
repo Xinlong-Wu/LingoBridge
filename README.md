@@ -345,15 +345,17 @@ again with the current CLI if needed.
 LingoBridge uses a multi-platform frontend, shared middle layer, and multi-provider backend structure:
 
 ```
-cmd/lingobridge/            # CLI entrypoint and process orchestration
-internal/config/            # Shared config file, generic platforms.<platform> YAML preservation
-internal/platform/          # Platform registry and parameter/runtime handler registration
+cmd/lingobridge/            # Thin CLI entrypoint
+internal/app/               # CLI dispatch, account catalog, model setup, runtime orchestration, reload wiring
+internal/config/            # Shared config load/save, paths, LLM profile defaults/validation, platforms.<platform> YAML preservation
+internal/platform/          # Platform registry and shared platform definition types
+internal/platform/builtins/ # Built-in WeChat/Feishu account/runtime definition registration
 internal/platform/wechat/   # WeChat frontend adapter: native events/API <-> core messages
 internal/platform/wechat/monitor/ # WeChat monitor, reply sender, media handling, and markdown-to-WeChat filtering
 internal/platform/feishu/   # Feishu frontend adapter and its private config schema
 internal/platform/feishu/monitor/ # Feishu long-connection monitor, message/text-stream adapter, and event hooks
 internal/core/              # Middle layer: scoped platform config/data APIs, commands, sessions, LLM orchestration
-internal/store/             # Platform-scoped SQLite/history/media persistence
+internal/store/             # Platform-scoped SQLite accounts/sessions/preferences/cursors, JSONL history, media persistence
 internal/llm/               # Backend provider adapters: OpenAI-compatible and Anthropic APIs
 internal/session/           # Session manager backed by the scoped store
 internal/commands/          # Shared in-chat slash commands
@@ -363,10 +365,11 @@ internal/control/           # Local Unix-socket reload control API
 
 In-chat slash commands live in `internal/commands/` and are shared by every
 platform adapter unless that platform's command policy disables them.
-Platforms register account parameter handlers with the registry. The CLI and
-runtime create a `core.PlatformContext` for the active platform, and platform
-code uses that context to persist its own config and data without receiving
-access to other platform stores.
+Built-in platforms register account parameter handlers and runtime factories
+through `internal/platform/builtins`. The app layer and runtime create a
+`core.PlatformContext` for the active platform, and platform code uses that
+context to persist its own config and data without receiving access to other
+platform stores.
 
 ## Tech Stack
 

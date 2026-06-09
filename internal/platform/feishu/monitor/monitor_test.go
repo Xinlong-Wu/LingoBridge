@@ -37,6 +37,14 @@ type fakeProcessor struct {
 	release     chan struct{}
 }
 
+type fakeProcessorSnapshot struct {
+	userID      string
+	text        string
+	commandText string
+	called      bool
+	calls       int
+}
+
 func (f *fakeProcessor) Handle(ctx context.Context, msg core.InboundMessage, sender core.Sender) error {
 	f.mu.Lock()
 	f.called = true
@@ -104,6 +112,18 @@ type fakeSender struct {
 	addReactionErr    error
 	deleteReactionErr error
 	updateTextErr     error
+}
+
+type fakeSenderSnapshot struct {
+	chatID          string
+	text            string
+	called          bool
+	messages        []sentText
+	streamCreates   []sentText
+	replyCreates    []replyText
+	streamUpdates   []updatedText
+	reactionAdds    []reactionAdd
+	reactionDeletes []reactionDelete
 }
 
 type fakeClock struct {
@@ -208,10 +228,10 @@ func (l *fakeSDKLogger) Error(context.Context, ...interface{}) {
 	l.errors++
 }
 
-func (f *fakeProcessor) snapshot() fakeProcessor {
+func (f *fakeProcessor) snapshot() fakeProcessorSnapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return fakeProcessor{
+	return fakeProcessorSnapshot{
 		userID:      f.userID,
 		text:        f.text,
 		commandText: f.commandText,
@@ -220,7 +240,7 @@ func (f *fakeProcessor) snapshot() fakeProcessor {
 	}
 }
 
-func (f *fakeSender) snapshot() fakeSender {
+func (f *fakeSender) snapshot() fakeSenderSnapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	messages := append([]sentText(nil), f.messages...)
@@ -229,7 +249,7 @@ func (f *fakeSender) snapshot() fakeSender {
 	streamUpdates := append([]updatedText(nil), f.streamUpdates...)
 	reactionAdds := append([]reactionAdd(nil), f.reactionAdds...)
 	reactionDeletes := append([]reactionDelete(nil), f.reactionDeletes...)
-	return fakeSender{
+	return fakeSenderSnapshot{
 		chatID:          f.chatID,
 		text:            f.text,
 		called:          f.called,
@@ -242,7 +262,7 @@ func (f *fakeSender) snapshot() fakeSender {
 	}
 }
 
-func waitForProcessorCalls(t *testing.T, processor *fakeProcessor, want int) fakeProcessor {
+func waitForProcessorCalls(t *testing.T, processor *fakeProcessor, want int) fakeProcessorSnapshot {
 	t.Helper()
 	deadline := time.After(time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -260,7 +280,7 @@ func waitForProcessorCalls(t *testing.T, processor *fakeProcessor, want int) fak
 	}
 }
 
-func waitForSentMessages(t *testing.T, sender *fakeSender, want int) fakeSender {
+func waitForSentMessages(t *testing.T, sender *fakeSender, want int) fakeSenderSnapshot {
 	t.Helper()
 	deadline := time.After(time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -278,7 +298,7 @@ func waitForSentMessages(t *testing.T, sender *fakeSender, want int) fakeSender 
 	}
 }
 
-func waitForReplyCreates(t *testing.T, sender *fakeSender, want int) fakeSender {
+func waitForReplyCreates(t *testing.T, sender *fakeSender, want int) fakeSenderSnapshot {
 	t.Helper()
 	deadline := time.After(time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -296,7 +316,7 @@ func waitForReplyCreates(t *testing.T, sender *fakeSender, want int) fakeSender 
 	}
 }
 
-func waitForReactionAdds(t *testing.T, sender *fakeSender, want int) fakeSender {
+func waitForReactionAdds(t *testing.T, sender *fakeSender, want int) fakeSenderSnapshot {
 	t.Helper()
 	deadline := time.After(time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -314,7 +334,7 @@ func waitForReactionAdds(t *testing.T, sender *fakeSender, want int) fakeSender 
 	}
 }
 
-func waitForReactionDeletes(t *testing.T, sender *fakeSender, want int) fakeSender {
+func waitForReactionDeletes(t *testing.T, sender *fakeSender, want int) fakeSenderSnapshot {
 	t.Helper()
 	deadline := time.After(time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)

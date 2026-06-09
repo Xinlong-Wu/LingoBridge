@@ -969,6 +969,26 @@ func TestSplitTextChunksKeepsRuneWhenLimitSmallerThanRune(t *testing.T) {
 	}
 }
 
+func TestSplitTextChunksByRunesUsesCharacterLimit(t *testing.T) {
+	text := strings.Repeat("界", 5)
+	chunks := SplitTextChunksByRunes(text, 2)
+
+	if len(chunks) != 3 {
+		t.Fatalf("chunks = %#v, want 3 chunks", chunks)
+	}
+	for i, chunk := range chunks {
+		if !utf8.ValidString(chunk) {
+			t.Fatalf("chunk %d is invalid UTF-8: %q", i+1, chunk)
+		}
+		if got := len([]rune(chunk)); got > 2 {
+			t.Fatalf("chunk %d rune length = %d, want <= 2", i+1, got)
+		}
+	}
+	if got := strings.Join(chunks, ""); got != text {
+		t.Fatalf("joined chunks = %q, want %q", got, text)
+	}
+}
+
 func testBot(sessions *fakeSessions, client *fakeLLM) *Bot {
 	cfg := config.LLMConfig{
 		DefaultModel: "deepseek",

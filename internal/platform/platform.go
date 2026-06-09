@@ -2,7 +2,6 @@ package platform
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -13,17 +12,8 @@ import (
 	"lingobridge/internal/config"
 	"lingobridge/internal/core"
 	"lingobridge/internal/logging"
-	"lingobridge/internal/platform/feishu"
-	feishumonitor "lingobridge/internal/platform/feishu/monitor"
-	"lingobridge/internal/platform/wechat/login"
-	wechatmonitor "lingobridge/internal/platform/wechat/monitor"
 	"lingobridge/internal/session"
 	"lingobridge/internal/store"
-)
-
-const (
-	WeChatTextChunkLimit = 4000
-	FeishuTextChunkLimit = 25 * 1024
 )
 
 type AccountNewOptions struct {
@@ -94,16 +84,6 @@ func (p policyPlatform) Run(ctx context.Context, handler core.Handler) error {
 func (h policyHandler) Handle(ctx context.Context, msg core.InboundMessage, sender core.Sender) error {
 	msg.CommandPolicy = h.policy
 	return h.next.Handle(ctx, msg, sender)
-}
-
-func NewDefaultRegistry() (*Registry, error) {
-	r := NewRegistry()
-	for _, def := range []Definition{wechatDefinition(), feishuDefinition()} {
-		if err := r.Register(def); err != nil {
-			return nil, err
-		}
-	}
-	return r, nil
 }
 
 func NewRegistry() *Registry {
@@ -179,113 +159,4 @@ func (d Definition) RuntimePlatform(ctx RuntimeContext) (core.Platform, error) {
 
 func normalizePlatformName(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
-}
-
-func newAccountFlagSet(name string) *flag.FlagSet {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	return fs
-}
-
-func normalizeAccountName(name string) string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "default"
-	}
-	return name
-}
-
-func normalizeAccountNewIO(io AccountNewIO) AccountNewIO {
-	if io.In == nil {
-		io.In = os.Stdin
-	}
-	if io.Out == nil {
-		io.Out = os.Stdout
-	}
-	return io
-}
-
-func wechatDefinition() Definition {
-	return Definition{
-		ID:              store.PlatformWeChat,
-		Aliases:         []string{"weixin", "微信"},
-		AccountNewUsage: "lingobridge account new weixin [--name <name>]",
-		ParseAccountNewFlags: func(args []string, io AccountNewIO) (AccountNewOptions, error) {
-			fs := newAccountFlagSet("account new weixin")
-			name := fs.String("name", "default", "account name")
-			if err := fs.Parse(args); err != nil {
-				return AccountNewOptions{}, err
-			}
-			if fs.NArg() > 0 {
-				return AccountNewOptions{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
-			}
-			return AccountNewOptions{Name: normalizeAccountName(*name)}, nil
-		},
-		CreateOrUpdateAccount: func(ctx AccountNewContext, opts AccountNewOptions) error {
-			if err := login.Login(ctx.Platform.DataStore(), opts.Name); err != nil {
-				return fmt.Errorf("login failed: %w", err)
-			}
-			return nil
-		},
-		NewRuntimePlatform: func(ctx RuntimeContext) (core.Platform, error) {
-			return wechatmonitor.NewPlatform(ctx.Store, ctx.Sessions, ctx.LLMConfig, ctx.Account), nil
-		},
-		CommandPolicy:       commands.DefaultPolicy(),
-		TextChunkLimit:      WeChatTextChunkLimit,
-		EnableTextStreaming: false,
-	}
-}
-
-func feishuDefinition() Definition {
-	return Definition{
-		ID:              store.PlatformFeishu,
-		Aliases:         []string{"飞书"},
-		AccountNewUsage: "lingobridge account new feishu [--name <name>] [--app-id <id>] [--app-secret <secret>] [--base-url <url>]",
-		ParseAccountNewFlags: func(args []string, io AccountNewIO) (AccountNewOptions, error) {
-			accountIO := normalizeAccountNewIO(io)
-			values, err := feishu.ParseAccountNewFlags(args, accountIO.In, accountIO.Out)
-			if err != nil {
-				return AccountNewOptions{}, err
-			}
-			return AccountNewOptions{
-				Name:   normalizeAccountName(values.Name),
-				Values: values,
-			}, nil
-		},
-		CreateOrUpdateAccount: func(ctx AccountNewContext, opts AccountNewOptions) error {
-			values, ok := opts.Values.(feishu.AccountNewOptions)
-			if !ok {
-				return fmt.Errorf("invalid feishu account options")
-			}
-			if err := feishu.UpsertAccountConfig(ctx.Platform, opts.Name, feishu.AccountConfig{
-				AppID:     values.AppID,
-				AppSecret: values.AppSecret,
-				BaseURL:   values.BaseURL,
-			}); err != nil {
-				return err
-			}
-			acc, err := feishu.NewAccount(opts.Name, values.AppID, values.AppSecret, values.BaseURL)
-			if err != nil {
-				return err
-			}
-			if err := ctx.Platform.DataStore().SaveAccount(acc); err != nil {
-				return fmt.Errorf("save account: %w", err)
-			}
-			fmt.Printf("✅ 已添加飞书账户: %s (%s)\n", acc.Name, acc.ID)
-			return nil
-		},
-		DeleteAccount: func(ctx AccountDeleteContext) error {
-			return feishu.DeleteAccountConfig(ctx.Platform, ctx.Account.Name)
-		},
-		NewRuntimePlatform: func(ctx RuntimeContext) (core.Platform, error) {
-			feishuConfig, err := feishu.LoadConfig(ctx.Platform)
-			if err != nil {
-				return nil, err
-			}
-			return feishumonitor.NewPlatform(ctx.Account, feishuConfig, ctx.LogLevel), nil
-		},
-		CommandPolicy:       commands.DefaultPolicy(),
-		TextChunkLimit:      FeishuTextChunkLimit,
-		EnableTextStreaming: true,
-	}
 }

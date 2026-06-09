@@ -2,6 +2,7 @@ package core
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -10,6 +11,45 @@ func SplitTextChunks(text string, limit int) []string {
 		return []string{text}
 	}
 	return splitTextChunksByLine(text, limit)
+}
+
+func SplitTextChunksByRunes(text string, limit int) []string {
+	if limit <= 0 {
+		return []string{text}
+	}
+
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return []string{text}
+	}
+
+	chunks := make([]string, 0, len(runes)/limit+1)
+	for start := 0; start < len(runes); {
+		end := start + limit
+		if end >= len(runes) {
+			chunks = append(chunks, string(runes[start:]))
+			break
+		}
+
+		split := findRuneChunkSplit(runes, start, end)
+		chunks = append(chunks, string(runes[start:split]))
+		start = split
+	}
+	return chunks
+}
+
+func findRuneChunkSplit(runes []rune, start, end int) int {
+	for i := end - 1; i >= start; i-- {
+		if runes[i] == '\n' {
+			return i + 1
+		}
+	}
+	for i := end - 1; i >= start; i-- {
+		if unicode.IsSpace(runes[i]) {
+			return i + 1
+		}
+	}
+	return end
 }
 
 func splitTextChunksByLine(text string, limit int) []string {

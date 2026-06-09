@@ -2,9 +2,7 @@ package core
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 
@@ -15,16 +13,7 @@ import (
 	"lingobridge/internal/store"
 )
 
-const (
-	AIErrorSummaryRunes = 300
-)
-
-var (
-	bearerTokenPattern = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]+`)
-	openAIKeyPattern   = regexp.MustCompile(`sk-[A-Za-z0-9_-]{8,}`)
-	hexTokenPattern    = regexp.MustCompile(`\b[0-9a-fA-F]{32,}\b`)
-	coreLog            = logging.For("core")
-)
+var coreLog = logging.For("core")
 
 type Platform interface {
 	Run(ctx context.Context, handler Handler) error
@@ -99,22 +88,6 @@ func New(sessions ConversationManager, cfg config.LLMConfig) *Bot {
 		NewLLM:              defaultLLMFactory,
 		EnableTextStreaming: false,
 	}
-}
-
-func defaultLLMFactory(model config.ResolvedModel) llm.Client {
-	return llm.NewClient(llm.Config{
-		Provider: model.Provider,
-		BaseURL:  model.BaseURL,
-		APIKey:   model.APIKey,
-		Model:    model.ID,
-		Endpoint: model.Endpoint,
-		Compact: llm.CompactConfig{
-			Mode:          string(model.Compact.Mode),
-			ContextWindow: model.ContextWindow,
-			Threshold:     model.Compact.Threshold,
-			Instructions:  model.Compact.Instructions,
-		},
-	})
 }
 
 func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) error {
@@ -315,35 +288,6 @@ func (b *Bot) prepareUserMessage(ctx context.Context, msg InboundMessage, sessio
 	return llmClient.PrepareUserMessage(msg.LLMText, nil)
 }
 
-func (b *Bot) llmForUser(userID string) (config.ResolvedModel, llm.Client, error) {
-	modelName, err := b.Sessions.CurrentModel(userID)
-	if err != nil {
-		return config.ResolvedModel{}, nil, err
-	}
-	model, err := b.LLMConfig.ResolveModel(modelName)
-	if err != nil {
-		model, err = b.LLMConfig.ResolveModel(b.LLMConfig.DefaultModel)
-		if err != nil {
-			return config.ResolvedModel{}, nil, err
-		}
-	}
-	newLLM := b.NewLLM
-	if newLLM == nil {
-		newLLM = defaultLLMFactory
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.LLMClients == nil {
-		b.LLMClients = map[string]llm.Client{}
-	}
-	client, ok := b.LLMClients[model.Name]
-	if !ok {
-		client = newLLM(model)
-		b.LLMClients[model.Name] = client
-	}
-	return model, client, nil
-}
-
 func (b *Bot) chunkLimit() int {
 	if b.TextChunkLimit <= 0 {
 		return -1
@@ -367,36 +311,3 @@ func (b *Bot) errorNotice(msg InboundMessage, err error) string {
 	}
 	return AIErrorNotice(err)
 }
-
-func AIErrorNotice(err error) string {
-	summary := SummarizeError(err, AIErrorSummaryRunes)
-	if summary == "" {
-		summary = "未知错误"
-	}
-	return "❌ AI 响应失败：" + summary
-}
-
-func SummarizeError(err error, maxRunes int) string {
-	if err == nil {
-		return ""
-	}
-	summary := err.Error()
-	summary = bearerTokenPattern.ReplaceAllString(summary, "Bearer [REDACTED]")
-	summary = openAIKeyPattern.ReplaceAllString(summary, "sk-[REDACTED]")
-	summary = hexTokenPattern.ReplaceAllString(summary, "[REDACTED]")
-	summary = strings.Join(strings.Fields(summary), " ")
-	return TruncateRunes(summary, maxRunes)
-}
-
-func TruncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return ""
-	}
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes]) + "..."
-}
-
-var ErrUnsupportedImage = errors.New("platform does not support sending images")

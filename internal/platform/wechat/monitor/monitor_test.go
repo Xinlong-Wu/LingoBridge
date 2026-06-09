@@ -286,15 +286,15 @@ func newTestBot() (*bot, *fakeWechatClient, *fakeConversationManager, *fakeLLM) 
 		modelByUser: map[string]string{"user": "deepseek"},
 	}
 	llmClient := &fakeLLM{response: llm.Response{Text: "hello"}}
+	handler := core.New(sessions, testLLMConfig())
+	handler.LLMClients = map[string]llm.Client{"deepseek": llmClient}
+	handler.NewLLM = func(model config.ResolvedModel) llm.Client {
+		return &fakeLLM{response: llm.Response{Text: model.Name}}
+	}
 	return &bot{
-		client:     client,
-		cursors:    &fakeCursorStore{},
-		sessions:   sessions,
-		cfg:        testLLMConfig(),
-		llmClients: map[string]llm.Client{"deepseek": llmClient},
-		newLLM: func(model config.ResolvedModel) llm.Client {
-			return &fakeLLM{response: llm.Response{Text: model.Name}}
-		},
+		client:  client,
+		cursors: &fakeCursorStore{},
+		handler: handler,
 		saveMedia: func(userID, sessionID, role string, index int, mimeType string, data []byte) (*store.MediaFile, error) {
 			ext := "png"
 			if mimeType == "image/jpeg" {
@@ -1009,7 +1009,7 @@ func TestProcessOneReturnsErrorWhenReplyChunkSendFails(t *testing.T) {
 
 func TestSplitTextChunksPreservesMultibyteText(t *testing.T) {
 	text := "你好🙂世界\n" + strings.Repeat("再见🙂 ", 5)
-	chunks := splitTextChunks(text, 7)
+	chunks := core.SplitTextChunksByRunes(text, 7)
 
 	if len(chunks) < 2 {
 		t.Fatalf("chunks = %d, want multiple chunks", len(chunks))
@@ -1028,8 +1028,8 @@ func TestSplitTextChunksPreservesMultibyteText(t *testing.T) {
 }
 
 func TestProcessOneSlashCommand(t *testing.T) {
-	b, client, _, llmClient := newTestBot()
-	b.sessions.(*fakeConversationManager).sessions = []store.Session{
+	b, client, sessions, llmClient := newTestBot()
+	sessions.sessions = []store.Session{
 		{ID: "session", UserID: "user", Name: "default", Current: true},
 	}
 
@@ -1079,8 +1079,8 @@ func TestProcessOneQuotedTextMessage(t *testing.T) {
 }
 
 func TestProcessOneQuotedSlashCommandUsesPlainText(t *testing.T) {
-	b, client, _, llmClient := newTestBot()
-	b.sessions.(*fakeConversationManager).sessions = []store.Session{
+	b, client, sessions, llmClient := newTestBot()
+	sessions.sessions = []store.Session{
 		{ID: "session", UserID: "user", Name: "default", Current: true},
 	}
 	msg := &api.WeixinMessage{
@@ -1236,14 +1236,14 @@ func TestAIErrorNoticeRedactsSecrets(t *testing.T) {
 }
 
 func TestAIErrorNoticeTruncatesLongErrors(t *testing.T) {
-	got := aiErrorNotice(errors.New(strings.Repeat("界", aiErrorSummaryRunes+20)))
+	got := aiErrorNotice(errors.New(strings.Repeat("界", core.AIErrorSummaryRunes+20)))
 	prefix := "❌ AI 响应失败："
 	body := strings.TrimPrefix(got, prefix)
 	if !strings.HasSuffix(body, "...") {
 		t.Fatalf("notice = %q, want ellipsis", got)
 	}
-	if len([]rune(strings.TrimSuffix(body, "..."))) != aiErrorSummaryRunes {
-		t.Fatalf("summary rune len = %d, want %d", len([]rune(strings.TrimSuffix(body, "..."))), aiErrorSummaryRunes)
+	if len([]rune(strings.TrimSuffix(body, "..."))) != core.AIErrorSummaryRunes {
+		t.Fatalf("summary rune len = %d, want %d", len([]rune(strings.TrimSuffix(body, "..."))), core.AIErrorSummaryRunes)
 	}
 }
 
@@ -1251,7 +1251,7 @@ func TestProcessOneUsesUserModelPreference(t *testing.T) {
 	b, client, sessions, defaultLLM := newTestBot()
 	preferredLLM := &fakeLLM{response: llm.Response{Text: "from gpt4o"}}
 	sessions.modelByUser["user"] = "gpt4o"
-	b.newLLM = func(model config.ResolvedModel) llm.Client {
+	b.handler.(*core.Bot).NewLLM = func(model config.ResolvedModel) llm.Client {
 		if model.Name != "gpt4o" {
 			t.Fatalf("created model = %s, want gpt4o", model.Name)
 		}
@@ -1303,11 +1303,8 @@ func TestRunAccountStopsOnContextCancel(t *testing.T) {
 func TestRunAccountCancelsDuringGetUpdates(t *testing.T) {
 	client := &blockingWechatClient{ready: make(chan struct{})}
 	b := &bot{
-		client:     client,
-		cursors:    &fakeCursorStore{},
-		sessions:   &fakeConversationManager{},
-		cfg:        testLLMConfig(),
-		llmClients: map[string]llm.Client{"deepseek": &fakeLLM{}},
+		client:  client,
+		cursors: &fakeCursorStore{},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

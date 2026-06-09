@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -13,6 +13,7 @@ import (
 	"lingobridge/internal/core"
 	"lingobridge/internal/logging"
 	"lingobridge/internal/platform"
+	"lingobridge/internal/platform/builtins"
 	"lingobridge/internal/platform/feishu"
 	"lingobridge/internal/runner"
 	"lingobridge/internal/store"
@@ -132,8 +133,8 @@ func TestCmdAccountNewRejectsOldPlatformFlag(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	err := cmdAccountNew([]string{"--platform", "feishu", "--name", "fsbot"})
-	if !errors.Is(err, errUsage) {
-		t.Fatalf("cmdAccountNew error = %v, want errUsage", err)
+	if !errors.Is(err, ErrUsage) {
+		t.Fatalf("cmdAccountNew error = %v, want ErrUsage", err)
 	}
 }
 
@@ -368,8 +369,8 @@ func TestRuntimeStateEnablesTextStreamingOnlyForFeishu(t *testing.T) {
 	if wechatRuntime.handler.EnableTextStreaming {
 		t.Fatal("wechat EnableTextStreaming = true, want false")
 	}
-	if wechatRuntime.handler.TextChunkLimit != platform.WeChatTextChunkLimit {
-		t.Fatalf("wechat TextChunkLimit = %d, want %d", wechatRuntime.handler.TextChunkLimit, platform.WeChatTextChunkLimit)
+	if wechatRuntime.handler.TextChunkLimit != builtins.WeChatTextChunkLimit {
+		t.Fatalf("wechat TextChunkLimit = %d, want %d", wechatRuntime.handler.TextChunkLimit, builtins.WeChatTextChunkLimit)
 	}
 	_, feishuRuntime, ok := state.snapshot(store.PlatformFeishu)
 	if !ok {
@@ -378,8 +379,8 @@ func TestRuntimeStateEnablesTextStreamingOnlyForFeishu(t *testing.T) {
 	if !feishuRuntime.handler.EnableTextStreaming {
 		t.Fatal("feishu EnableTextStreaming = false, want true")
 	}
-	if feishuRuntime.handler.TextChunkLimit != platform.FeishuTextChunkLimit {
-		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishuRuntime.handler.TextChunkLimit, platform.FeishuTextChunkLimit)
+	if feishuRuntime.handler.TextChunkLimit != builtins.FeishuTextChunkLimit {
+		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishuRuntime.handler.TextChunkLimit, builtins.FeishuTextChunkLimit)
 	}
 }
 

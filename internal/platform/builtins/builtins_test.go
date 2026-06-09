@@ -1,19 +1,20 @@
-package platform
+package builtins
 
 import (
 	"testing"
 
 	"lingobridge/internal/config"
 	"lingobridge/internal/core"
+	"lingobridge/internal/platform"
 	"lingobridge/internal/platform/feishu"
 	"lingobridge/internal/session"
 	"lingobridge/internal/store"
 )
 
 func TestDefaultRegistryLookupAliases(t *testing.T) {
-	registry, err := NewDefaultRegistry()
+	registry, err := NewRegistry()
 	if err != nil {
-		t.Fatalf("NewDefaultRegistry returned error: %v", err)
+		t.Fatalf("NewRegistry returned error: %v", err)
 	}
 
 	tests := map[string]string{
@@ -35,9 +36,9 @@ func TestDefaultRegistryLookupAliases(t *testing.T) {
 }
 
 func TestLookupAccountPlatformDoesNotFallback(t *testing.T) {
-	registry, err := NewDefaultRegistry()
+	registry, err := NewRegistry()
 	if err != nil {
-		t.Fatalf("NewDefaultRegistry returned error: %v", err)
+		t.Fatalf("NewRegistry returned error: %v", err)
 	}
 
 	if _, ok := registry.LookupAccountPlatform(""); ok {
@@ -46,9 +47,9 @@ func TestLookupAccountPlatformDoesNotFallback(t *testing.T) {
 }
 
 func TestDefaultDefinitionsSetCoreRuntimeOptions(t *testing.T) {
-	registry, err := NewDefaultRegistry()
+	registry, err := NewRegistry()
 	if err != nil {
-		t.Fatalf("NewDefaultRegistry returned error: %v", err)
+		t.Fatalf("NewRegistry returned error: %v", err)
 	}
 
 	wechat, ok := registry.LookupAccountPlatform(store.PlatformWeChat)
@@ -73,7 +74,7 @@ func TestDefaultDefinitionsSetCoreRuntimeOptions(t *testing.T) {
 		t.Fatalf("FeishuTextChunkLimit = %d, want %d", FeishuTextChunkLimit, 25*1024)
 	}
 	if feishu.TextChunkLimit != FeishuTextChunkLimit {
-		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishu.TextChunkLimit, 25*1024)
+		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishu.TextChunkLimit, FeishuTextChunkLimit)
 	}
 	if !feishu.EnableTextStreaming {
 		t.Fatal("feishu EnableTextStreaming = false, want true")
@@ -82,9 +83,9 @@ func TestDefaultDefinitionsSetCoreRuntimeOptions(t *testing.T) {
 
 func TestDefaultDefinitionsCreateRuntimePlatforms(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	registry, err := NewDefaultRegistry()
+	registry, err := NewRegistry()
 	if err != nil {
-		t.Fatalf("NewDefaultRegistry returned error: %v", err)
+		t.Fatalf("NewRegistry returned error: %v", err)
 	}
 	wechatStore, err := store.Open(store.PlatformWeChat)
 	if err != nil {
@@ -131,7 +132,7 @@ func TestDefaultDefinitionsCreateRuntimePlatforms(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewPlatformContext(%q) returned error: %v", account.Platform, err)
 		}
-		p, err := def.RuntimePlatform(RuntimeContext{
+		p, err := def.RuntimePlatform(platform.RuntimeContext{
 			Store:     tc.st,
 			Sessions:  sm,
 			Platform:  platformCtx,
