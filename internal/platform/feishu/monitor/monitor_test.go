@@ -322,22 +322,44 @@ func TestNormalizeP2PTextMessage(t *testing.T) {
 	}
 }
 
-func TestNormalizeGroupMessageRequiresBotMention(t *testing.T) {
-	if _, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"hi"}`, nil)); ok {
-		t.Fatal("group message without bot mention was accepted")
+func TestNormalizeGroupMessageWithoutMentionMetadataUsesGroupKey(t *testing.T) {
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"hi"}`, nil))
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if in.UserID != "feishu:group:oc_chat" || in.Text != "hi" {
+		t.Fatalf("incoming = %#v", in)
 	}
 }
 
 func TestNormalizeGroupMentionStripsMentionKey(t *testing.T) {
 	mentions := []*larkim.MentionEvent{
-		larkim.NewMentionEventBuilder().Key("@_user_1").MentionedType("app").Build(),
+		larkim.NewMentionEventBuilder().Key("@_bot_1").MentionedType("app").Build(),
+		larkim.NewMentionEventBuilder().Key("@_user_1").MentionedType("user").Build(),
 	}
-	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"@_user_1 hello"}`, mentions))
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"@_bot_1 hello @_user_1"}`, mentions))
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
-	if in.UserID != "feishu:oc_chat:ou_user" || in.Text != "hello" {
+	if in.UserID != "feishu:group:oc_chat" || in.Text != "hello @_user_1" {
 		t.Fatalf("incoming = %#v", in)
+	}
+}
+
+func TestNormalizeGroupMessagesShareChatUserKey(t *testing.T) {
+	mentions := []*larkim.MentionEvent{
+		larkim.NewMentionEventBuilder().Key("@_bot_1").MentionedType("app").Build(),
+	}
+	first, ok := normalizeEvent(context.Background(), feishuEventWithSender("group", "text", `{"text":"@_bot_1 first"}`, mentions, "ou_user_one"))
+	if !ok {
+		t.Fatal("first normalizeEvent returned ok=false")
+	}
+	second, ok := normalizeEvent(context.Background(), feishuEventWithSender("group", "text", `{"text":"@_bot_1 second"}`, mentions, "ou_user_two"))
+	if !ok {
+		t.Fatal("second normalizeEvent returned ok=false")
+	}
+	if first.UserID != "feishu:group:oc_chat" || second.UserID != "feishu:group:oc_chat" {
+		t.Fatalf("group user keys = %q/%q, want shared chat key", first.UserID, second.UserID)
 	}
 }
 
@@ -1158,13 +1180,21 @@ func feishuEvent(chatType, messageType, content string, mentions []*larkim.Menti
 }
 
 func feishuEventWithIDs(chatType, messageType, content string, mentions []*larkim.MentionEvent, messageID, eventID string) *larkim.P2MessageReceiveV1 {
+	return feishuEventWithSenderAndIDs(chatType, messageType, content, mentions, "ou_user", messageID, eventID)
+}
+
+func feishuEventWithSender(chatType, messageType, content string, mentions []*larkim.MentionEvent, senderOpenID string) *larkim.P2MessageReceiveV1 {
+	return feishuEventWithSenderAndIDs(chatType, messageType, content, mentions, senderOpenID, "om_message", "event_message")
+}
+
+func feishuEventWithSenderAndIDs(chatType, messageType, content string, mentions []*larkim.MentionEvent, senderOpenID, messageID, eventID string) *larkim.P2MessageReceiveV1 {
 	return &larkim.P2MessageReceiveV1{
 		EventV2Base: &larkevent.EventV2Base{
 			Header: &larkevent.EventHeader{EventID: eventID},
 		},
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: larkim.NewEventSenderBuilder().
-				SenderId(larkim.NewUserIdBuilder().OpenId("ou_user").Build()).
+				SenderId(larkim.NewUserIdBuilder().OpenId(senderOpenID).Build()).
 				SenderType("user").
 				Build(),
 			Message: larkim.NewEventMessageBuilder().

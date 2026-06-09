@@ -188,8 +188,9 @@ compact success summary as another text message.
 ### Feishu
 
 Feishu support uses a self-built app long connection. In 1:1 chats, all text
-messages are processed. In group chats, only messages that mention the bot are
-processed, and the mention token is removed before sending text to the LLM.
+messages are processed. In group chats, Feishu delivers messages that mention
+the bot, and the bot mention token is removed before sending text to the LLM
+when Feishu includes mention metadata.
 LLM text replies are streamed by updating one Feishu rich text message in
 place. In-chat command replies, event command output, unsupported-message
 notices, and generated-image notices are still sent as normal one-shot
@@ -239,9 +240,9 @@ platforms:
           - "printf '%s' \"$LINGOBRIDGE_COMMAND_HELP\""
 ```
 
-Feishu conversation history is isolated per user in 1:1 chats and per
-`chat_id + user` in group chats, so multiple people in the same group do not
-share one session by accident.
+Feishu conversation history is isolated per user in 1:1 chats and shared by
+`chat_id` in group chats, so everyone who mentions the bot in the same group
+continues the same group session.
 
 Feishu image, file, video, and voice messages are acknowledged with an
 unsupported-message notice in this first version. Generated images from the LLM

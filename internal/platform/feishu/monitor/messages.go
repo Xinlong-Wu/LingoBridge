@@ -39,13 +39,10 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1) (inco
 	}
 
 	chatType := deref(msg.ChatType)
-	if chatType != "p2p" && !mentionsBot(msg.Mentions) {
-		return incomingMessage{}, false
-	}
 
 	userKey := "feishu:" + openID
 	if chatType != "p2p" {
-		userKey = "feishu:" + chatID + ":" + openID
+		userKey = "feishu:group:" + chatID
 	}
 
 	if deref(msg.MessageType) != "text" {
@@ -60,15 +57,6 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1) (inco
 	return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, Text: text}, true
 }
 
-func mentionsBot(mentions []*larkim.MentionEvent) bool {
-	for _, mention := range mentions {
-		if deref(mention.MentionedType) == "app" {
-			return true
-		}
-	}
-	return false
-}
-
 func extractText(raw string, mentions []*larkim.MentionEvent) (string, error) {
 	var content textContent
 	if err := json.Unmarshal([]byte(raw), &content); err != nil {
@@ -76,7 +64,11 @@ func extractText(raw string, mentions []*larkim.MentionEvent) (string, error) {
 	}
 	text := content.Text
 	for _, mention := range mentions {
-		if key := deref(mention.Key); key != "" {
+		if deref(mention.MentionedType) == "app" {
+			key := deref(mention.Key)
+			if key == "" {
+				continue
+			}
 			text = strings.ReplaceAll(text, key, "")
 		}
 	}
