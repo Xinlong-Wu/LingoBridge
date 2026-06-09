@@ -375,21 +375,52 @@ func TestNormalizeGroupMessageWithoutMentionMetadataUsesGroupKey(t *testing.T) {
 
 func TestNormalizeGroupMentionStripsMentionKey(t *testing.T) {
 	mentions := []*larkim.MentionEvent{
-		feishuMention("@_bot_1", "bot", testBotOpenID),
-		feishuMention("@_user_1", "user", "ou_alice"),
+		feishuMentionWithName("@_bot_1", "bot", testBotOpenID, "", "LingoBridge"),
+		feishuMentionWithName("@_user_1", "user", "ou_alice", "", "Alice"),
 	}
 	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"@_bot_1 hello @_user_1"}`, mentions), testBotOpenID)
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
-	if in.UserID != "feishu:group:oc_chat" || in.Text != "hello @_user_1" {
+	if in.UserID != "feishu:group:oc_chat" || in.Text != "hello @Alice" {
 		t.Fatalf("incoming = %#v", in)
 	}
+	assertMentions(t, in.Mentions, feishuMention{Key: "@_user_1", Name: "Alice", OpenID: "ou_alice"})
+}
+
+func TestNormalizeTextMentionMetadataDeduplicatesByOpenID(t *testing.T) {
+	mentions := []*larkim.MentionEvent{
+		feishuMentionWithName("@_user_1", "user", "ou_alice", "", "Alice"),
+		feishuMentionWithName("@_user_2", "user", "ou_alice", "", "Alice"),
+	}
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"@_user_1 and @_user_2"}`, mentions), testBotOpenID)
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if in.Text != "@Alice and @Alice" {
+		t.Fatalf("incoming text = %q, want both mention keys replaced", in.Text)
+	}
+	assertMentions(t, in.Mentions, feishuMention{Key: "@_user_1", Name: "Alice", OpenID: "ou_alice"})
+}
+
+func TestNormalizeTextMentionMetadataDeduplicatesByUserID(t *testing.T) {
+	mentions := []*larkim.MentionEvent{
+		feishuMentionWithName("@_user_1", "user", "", "alice_user_id", "Alice"),
+		feishuMentionWithName("@_user_2", "user", "", "alice_user_id", "Alice"),
+	}
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"@_user_1 and @_user_2"}`, mentions), testBotOpenID)
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if in.Text != "@Alice and @Alice" {
+		t.Fatalf("incoming text = %q, want both mention keys replaced", in.Text)
+	}
+	assertMentions(t, in.Mentions, feishuMention{Key: "@_user_1", Name: "Alice", UserID: "alice_user_id"})
 }
 
 func TestNormalizeGroupMentionKeepsOtherBotMentionKey(t *testing.T) {
 	mentions := []*larkim.MentionEvent{
-		feishuMention("@_bot_1", "bot", "ou_other_bot"),
+		feishuMentionEvent("@_bot_1", "bot", "ou_other_bot"),
 	}
 	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"@_bot_1 /help"}`, mentions), testBotOpenID)
 	if !ok {
@@ -402,7 +433,7 @@ func TestNormalizeGroupMentionKeepsOtherBotMentionKey(t *testing.T) {
 
 func TestNormalizeGroupMessagesShareChatUserKey(t *testing.T) {
 	mentions := []*larkim.MentionEvent{
-		feishuMention("@_bot_1", "app", testBotOpenID),
+		feishuMentionEvent("@_bot_1", "app", testBotOpenID),
 	}
 	first, ok := normalizeEvent(context.Background(), feishuEventWithSender("group", "text", `{"text":"@_bot_1 first"}`, mentions, "ou_user_one"), testBotOpenID)
 	if !ok {
@@ -441,6 +472,29 @@ func TestNormalizePostMessageConvertsTitleAndParagraphsToMarkdown(t *testing.T) 
 	}
 }
 
+func TestNormalizePostMessageReplacesMentionsInTitle(t *testing.T) {
+	mentions := []*larkim.MentionEvent{
+		feishuMentionWithName("@_bot_1", "bot", testBotOpenID, "", "LingoBridge"),
+		feishuMentionWithName("@_user_1", "user", "ou_alice", "", "Alice"),
+	}
+	content := `{
+		"title":"@_bot_1 for @_user_1",
+		"content":[
+			[{"tag":"text","text":"Body"}]
+		]
+	}`
+
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "post", content, mentions), testBotOpenID)
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	want := "# for @Alice\n\nBody"
+	if in.Text != want || in.Unsupported {
+		t.Fatalf("incoming = %#v, want text %q", in, want)
+	}
+	assertMentions(t, in.Mentions, feishuMention{Key: "@_user_1", Name: "Alice", OpenID: "ou_alice"})
+}
+
 func TestNormalizePostMessageConvertsRichElementsToMarkdown(t *testing.T) {
 	content := `{
 		"content":[
@@ -477,12 +531,12 @@ func TestNormalizePostMessageConvertsRichElementsToMarkdown(t *testing.T) {
 
 func TestNormalizePostMessageHandlesMentions(t *testing.T) {
 	mentions := []*larkim.MentionEvent{
-		feishuMention("@_bot_1", "app", testBotOpenID),
+		feishuMentionEvent("@_bot_1", "app", testBotOpenID),
 	}
 	content := `{
 		"content":[[
 			{"tag":"text","text":"@_bot_1 hello "},
-			{"tag":"at","user_name":"Alice"},
+			{"tag":"at","user_name":"Alice","open_id":"ou_alice"},
 			{"tag":"at","user_name":"LingoBridge","mentioned_type":"bot","open_id":"ou_bot"}
 		]]
 	}`
@@ -494,6 +548,48 @@ func TestNormalizePostMessageHandlesMentions(t *testing.T) {
 	if in.UserID != "feishu:group:oc_chat" || in.Text != "hello @Alice" || in.Unsupported {
 		t.Fatalf("incoming = %#v", in)
 	}
+	assertMentions(t, in.Mentions, feishuMention{Name: "Alice", OpenID: "ou_alice"})
+}
+
+func TestNormalizePostMentionMetadataDeduplicatesEventAndElement(t *testing.T) {
+	mentions := []*larkim.MentionEvent{
+		feishuMentionWithName("@_user_1", "user", "ou_alice", "", "Alice"),
+	}
+	content := `{
+		"content":[[
+			{"tag":"text","text":"@_user_1 and "},
+			{"tag":"at","user_name":"Alice","open_id":"ou_alice"}
+		]]
+	}`
+
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "post", content, mentions), testBotOpenID)
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if in.Text != "@Alice and @Alice" || in.Unsupported {
+		t.Fatalf("incoming = %#v", in)
+	}
+	assertMentions(t, in.Mentions, feishuMention{Key: "@_user_1", Name: "Alice", OpenID: "ou_alice"})
+}
+
+func TestNormalizePostMentionMetadataMergesSameKeyWithElementIdentity(t *testing.T) {
+	mentions := []*larkim.MentionEvent{
+		feishuMentionWithName("@_user_1", "user", "", "", "Alice"),
+	}
+	content := `{
+		"content":[[
+			{"tag":"at","key":"@_user_1","user_name":"Alice","open_id":"ou_alice"}
+		]]
+	}`
+
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "post", content, mentions), testBotOpenID)
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if in.Text != "@Alice" || in.Unsupported {
+		t.Fatalf("incoming = %#v", in)
+	}
+	assertMentions(t, in.Mentions, feishuMention{Key: "@_user_1", Name: "Alice", OpenID: "ou_alice"})
 }
 
 func TestNormalizePostMessageKeepsOtherBotMention(t *testing.T) {
@@ -689,6 +785,100 @@ func TestFeishuResponderStreamsGroupReplyThenUpdatesIt(t *testing.T) {
 	}
 	if len(snap.streamCreates) != 0 || len(snap.messages) != 0 {
 		t.Fatalf("stream creates/messages = %#v/%#v, want none", snap.streamCreates, snap.messages)
+	}
+}
+
+func TestFeishuResponderRendersMatchedMentionOnSend(t *testing.T) {
+	sender := &fakeSender{}
+	resp := feishuResponder{
+		sender: sender,
+		chatID: "oc_chat",
+		mentions: []feishuMention{
+			{Name: "Alice", OpenID: "ou_alice"},
+		},
+	}
+
+	if err := resp.Send(context.Background(), core.OutboundMessage{Text: "@Alice hello @Bob foo@Alice.com @AliceBob @Alice."}); err != nil {
+		t.Fatalf("Send returned error: %v", err)
+	}
+
+	snap := sender.snapshot()
+	want := `<at user_id="ou_alice">Alice</at> hello @Bob foo@Alice.com @AliceBob <at user_id="ou_alice">Alice</at>.`
+	if len(snap.messages) != 1 || snap.messages[0].text != want {
+		t.Fatalf("messages = %#v, want %q", snap.messages, want)
+	}
+}
+
+func TestFeishuResponderKeepsAmbiguousMentionOnSend(t *testing.T) {
+	sender := &fakeSender{}
+	resp := feishuResponder{
+		sender: sender,
+		chatID: "oc_chat",
+		mentions: []feishuMention{
+			{Name: "Alice", OpenID: "ou_alice_one"},
+			{Name: "Alice", OpenID: "ou_alice_two"},
+		},
+	}
+
+	if err := resp.Send(context.Background(), core.OutboundMessage{Text: "@Alice hello"}); err != nil {
+		t.Fatalf("Send returned error: %v", err)
+	}
+
+	snap := sender.snapshot()
+	if len(snap.messages) != 1 || snap.messages[0].text != "@Alice hello" {
+		t.Fatalf("messages = %#v, want raw text", snap.messages)
+	}
+}
+
+func TestFeishuResponderKeepsMentionWithoutTargetIDOnSend(t *testing.T) {
+	sender := &fakeSender{}
+	resp := feishuResponder{
+		sender: sender,
+		chatID: "oc_chat",
+		mentions: []feishuMention{
+			{Name: "Alice", OpenID: "ou_alice"},
+			{Name: "Alice"},
+		},
+	}
+
+	if err := resp.Send(context.Background(), core.OutboundMessage{Text: "@Alice hello"}); err != nil {
+		t.Fatalf("Send returned error: %v", err)
+	}
+
+	snap := sender.snapshot()
+	if len(snap.messages) != 1 || snap.messages[0].text != "@Alice hello" {
+		t.Fatalf("messages = %#v, want raw text", snap.messages)
+	}
+}
+
+func TestFeishuResponderStreamsRawPreviewAndRendersMentionOnFinish(t *testing.T) {
+	sender := &fakeSender{}
+	resp := feishuResponder{
+		sender: sender,
+		chatID: "oc_chat",
+		mentions: []feishuMention{
+			{Name: "Alice", OpenID: "ou_alice"},
+		},
+	}
+
+	stream, err := resp.StartTextStream(context.Background())
+	if err != nil {
+		t.Fatalf("StartTextStream returned error: %v", err)
+	}
+	if err := stream.Update(context.Background(), "@Alice thinking"); err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	if err := stream.Finish(context.Background(), "@Alice final"); err != nil {
+		t.Fatalf("Finish returned error: %v", err)
+	}
+
+	snap := sender.snapshot()
+	if len(snap.streamCreates) != 1 || snap.streamCreates[0].text != "@Alice thinking" {
+		t.Fatalf("stream creates = %#v, want raw preview", snap.streamCreates)
+	}
+	want := `<at user_id="ou_alice">Alice</at> final`
+	if len(snap.streamUpdates) != 1 || snap.streamUpdates[0].text != want {
+		t.Fatalf("stream updates = %#v, want rendered final %q", snap.streamUpdates, want)
 	}
 }
 
@@ -1601,14 +1791,33 @@ func feishuEvent(chatType, messageType, content string, mentions []*larkim.Menti
 	return feishuEventWithIDs(chatType, messageType, content, mentions, "om_message", "event_message")
 }
 
-func feishuMention(key, mentionedType, openID string) *larkim.MentionEvent {
+func feishuMentionEvent(key, mentionedType, openID string) *larkim.MentionEvent {
+	return feishuMentionWithName(key, mentionedType, openID, "", "")
+}
+
+func feishuMentionWithName(key, mentionedType, openID, userID, name string) *larkim.MentionEvent {
 	builder := larkim.NewMentionEventBuilder().
 		Key(key).
 		MentionedType(mentionedType)
-	if openID != "" {
-		builder.Id(larkim.NewUserIdBuilder().OpenId(openID).Build())
+	if name != "" {
+		builder.Name(name)
+	}
+	if openID != "" || userID != "" {
+		builder.Id(larkim.NewUserIdBuilder().OpenId(openID).UserId(userID).Build())
 	}
 	return builder.Build()
+}
+
+func assertMentions(t *testing.T, got []feishuMention, want ...feishuMention) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("mentions = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("mentions[%d] = %#v, want %#v", i, got[i], want[i])
+		}
+	}
 }
 
 func feishuEventWithIDs(chatType, messageType, content string, mentions []*larkim.MentionEvent, messageID, eventID string) *larkim.P2MessageReceiveV1 {

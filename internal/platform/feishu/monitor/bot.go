@@ -37,15 +37,17 @@ type feishuResponder struct {
 	chatID           string
 	messageID        string
 	replyToMessageID string
+	mentions         []feishuMention
 }
 
 func (r feishuResponder) Send(ctx context.Context, msg core.OutboundMessage) error {
 	if msg.Text != "" {
+		text := r.renderMentions(msg.Text)
 		if r.replyToMessageID != "" {
-			_, err := r.sender.CreateReplyText(ctx, r.replyToMessageID, msg.Text)
+			_, err := r.sender.CreateReplyText(ctx, r.replyToMessageID, text)
 			return err
 		}
-		return r.sender.SendText(ctx, r.chatID, msg.Text)
+		return r.sender.SendText(ctx, r.chatID, text)
 	}
 	if len(msg.Image.Data) > 0 || msg.Image.Filename != "" || msg.Image.LocalPath != "" {
 		return core.ErrUnsupportedImage
@@ -62,6 +64,7 @@ func (r feishuResponder) StartTextStream(ctx context.Context) (core.TextStream, 
 		sender:           r.sender,
 		chatID:           r.chatID,
 		replyToMessageID: r.replyToMessageID,
+		renderFinalText:  r.renderMentions,
 		now:              time.Now,
 	}, nil
 }
@@ -79,6 +82,10 @@ func (r feishuResponder) createText(ctx context.Context, text string) (string, e
 		return r.sender.CreateReplyText(ctx, r.replyToMessageID, text)
 	}
 	return r.sender.CreateText(ctx, r.chatID, text)
+}
+
+func (r feishuResponder) renderMentions(text string) string {
+	return renderFeishuMentions(text, r.mentions)
 }
 
 func (r feishuResponder) FinishCompactNotice(ctx context.Context, handle core.CompactNoticeHandle, notice core.CompactNotice) error {
@@ -137,7 +144,7 @@ func logReceivedMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) {
 
 func (b *bot) processMessage(in incomingMessage) {
 	ctx := b.processingContext()
-	resp := feishuResponder{sender: b.sender, chatID: in.ChatID, messageID: in.MessageID, replyToMessageID: in.ReplyToMessageID}
+	resp := feishuResponder{sender: b.sender, chatID: in.ChatID, messageID: in.MessageID, replyToMessageID: in.ReplyToMessageID, mentions: in.Mentions}
 	if in.Unsupported {
 		if err := resp.Send(ctx, core.OutboundMessage{Text: unsupportedMessageText}); err != nil {
 			feishuLog.Warn(ctx, "send unsupported feishu message notice failed chat=%s: %v", in.ChatID, err)

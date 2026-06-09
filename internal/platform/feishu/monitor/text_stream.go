@@ -20,6 +20,7 @@ type feishuTextStream struct {
 	lastSentText     string
 	editCount        int
 	editLimited      bool
+	renderFinalText  func(string) string
 	now              func() time.Time
 }
 
@@ -50,6 +51,7 @@ func (s *feishuTextStream) Finish(ctx context.Context, text string) error {
 	if text == "" {
 		return nil
 	}
+	text = s.finalText(text)
 	if s.messageID == "" {
 		return s.create(ctx, text)
 	}
@@ -67,6 +69,13 @@ func (s *feishuTextStream) Finish(ctx context.Context, text string) error {
 		return err
 	}
 	return nil
+}
+
+func (s *feishuTextStream) finalText(text string) string {
+	if s.renderFinalText != nil {
+		return s.renderFinalText(text)
+	}
+	return text
 }
 
 func (s *feishuTextStream) create(ctx context.Context, text string) error {
