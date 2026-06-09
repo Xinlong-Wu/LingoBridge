@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -175,7 +176,8 @@ func printUsage() {
 	fmt.Println("  lingobridge account new <weixin|feishu> [platform options]")
 	fmt.Println("                                           Add a bot account")
 	fmt.Println("  lingobridge account list                   List all accounts")
-	fmt.Println("  lingobridge account delete <name>          Delete an account")
+	fmt.Println("  lingobridge account delete <name|platform/name>")
+	fmt.Println("                                           Delete an account")
 	fmt.Println("  lingobridge model add <name> [model options]")
 	fmt.Println("                                           Add an LLM model profile")
 	fmt.Println("  lingobridge run [--account <name>] [--verbose <all|debug|info|warn|error>]")
@@ -186,7 +188,7 @@ func printAccountUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  lingobridge account new <weixin|feishu> [platform options]")
 	fmt.Println("  lingobridge account list")
-	fmt.Println("  lingobridge account delete <name>")
+	fmt.Println("  lingobridge account delete <name|platform/name>")
 }
 
 func printModelUsage() {
@@ -248,6 +250,64 @@ func (c *accountCatalog) ListAccounts() ([]store.Account, error) {
 		accounts = append(accounts, platformAccounts...)
 	}
 	return accounts, nil
+}
+
+func accountDisplayName(a store.Account) string {
+	return a.Platform + "/" + a.Name
+}
+
+func sortedAccounts(accounts []store.Account) []store.Account {
+	out := append([]store.Account(nil), accounts...)
+	sort.Slice(out, func(i, j int) bool {
+		left := accountDisplayName(out[i])
+		right := accountDisplayName(out[j])
+		if left != right {
+			return left < right
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+func resolveAccountSelector(selector string, accounts []store.Account, registry *platform.Registry) (store.Account, error) {
+	selector = strings.TrimSpace(selector)
+	if platformName, accountName, ok := strings.Cut(selector, "/"); ok {
+		def, ok := registry.Lookup(platformName)
+		if !ok {
+			return store.Account{}, fmt.Errorf("unsupported platform %q; use one of: %s", platformName, strings.Join(registry.PlatformNames(), ", "))
+		}
+		matches := make([]store.Account, 0, 1)
+		for _, a := range accounts {
+			if a.Platform == def.ID && a.Name == accountName {
+				matches = append(matches, a)
+			}
+		}
+		return resolveAccountMatches(selector, matches)
+	}
+
+	matches := make([]store.Account, 0, 1)
+	for _, a := range accounts {
+		if a.Name == selector {
+			matches = append(matches, a)
+		}
+	}
+	return resolveAccountMatches(selector, matches)
+}
+
+func resolveAccountMatches(selector string, matches []store.Account) (store.Account, error) {
+	switch len(matches) {
+	case 0:
+		return store.Account{}, fmt.Errorf("account %q not found", selector)
+	case 1:
+		return matches[0], nil
+	default:
+		var b strings.Builder
+		fmt.Fprintf(&b, "account %q is ambiguous; specify platform/name:", selector)
+		for _, a := range sortedAccounts(matches) {
+			fmt.Fprintf(&b, "\n  - %s", accountDisplayName(a))
+		}
+		return store.Account{}, errors.New(b.String())
+	}
 }
 
 func ensureConfigInitialized(in io.Reader, out io.Writer) error {
@@ -782,22 +842,22 @@ func cmdAccountList(args []string) error {
 	}
 
 	fmt.Println("Accounts:")
-	for _, a := range accounts {
+	for _, a := range sortedAccounts(accounts) {
 		status := "✓"
 		if !a.Enabled {
 			status = "✗"
 		}
-		fmt.Printf("  %s %s [%s] (id: %s)\n", status, a.Name, a.Platform, a.ID)
+		fmt.Printf("  %s %s (id: %s)\n", status, accountDisplayName(a), a.ID)
 	}
 	return nil
 }
 
 func cmdAccountDelete(args []string) error {
 	if len(args) < 1 {
-		fmt.Println("Usage: lingobridge account delete <name>")
+		fmt.Println("Usage: lingobridge account delete <name|platform/name>")
 		return errUsage
 	}
-	name := strings.Join(args, " ")
+	selector := strings.TrimSpace(strings.Join(args, " "))
 
 	registry, err := platform.NewDefaultRegistry()
 	if err != nil {
@@ -814,26 +874,43 @@ func cmdAccountDelete(args []string) error {
 		return fmt.Errorf("list accounts: %w", err)
 	}
 
-	var target store.Account
-	for _, a := range accounts {
-		if a.Name == name {
-			target = a
-			break
-		}
-	}
-	if target.ID == "" {
-		return fmt.Errorf("account %q not found", name)
+	target, err := resolveAccountSelector(selector, accounts, registry)
+	if err != nil {
+		return err
 	}
 
 	st, ok := catalog.stores[target.Platform]
 	if !ok {
 		return fmt.Errorf("store for platform %q is not open", target.Platform)
 	}
+	def, ok := registry.LookupAccountPlatform(target.Platform)
+	if !ok {
+		return fmt.Errorf("unsupported account platform %q", target.Platform)
+	}
+	var deletePlatformAccount func() error
+	if def.DeleteAccount != nil {
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		platformCtx, err := core.NewPlatformContext(target.Platform, &cfg, st, config.Save)
+		if err != nil {
+			return err
+		}
+		deletePlatformAccount = func() error {
+			return def.DeleteAccount(platform.AccountDeleteContext{Platform: platformCtx, Account: target})
+		}
+	}
 	if err := st.DeleteAccount(target.ID); err != nil {
 		return fmt.Errorf("delete account: %w", err)
 	}
+	if deletePlatformAccount != nil {
+		if err := deletePlatformAccount(); err != nil {
+			return fmt.Errorf("delete %s account config: %w", target.Platform, err)
+		}
+	}
 
-	fmt.Printf("Deleted account: %s\n", name)
+	fmt.Printf("Deleted account: %s\n", accountDisplayName(target))
 	notifyRunningProcess()
 	return nil
 }
@@ -847,7 +924,7 @@ func notifyRunningProcess() {
 	case err == nil:
 		fmt.Println("Reloaded running lingobridge process.")
 	case errors.Is(err, control.ErrUnavailable):
-		fmt.Println("No running lingobridge process found; start or restart 'lingobridge run' to pick up changes.")
+		fmt.Println("Note: No running lingobridge process found; start or restart 'lingobridge run' to pick up changes.")
 	default:
 		fmt.Printf("Warning: notify running process failed: %v\n", err)
 	}

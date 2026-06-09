@@ -40,6 +40,11 @@ type AccountNewContext struct {
 	Platform *core.PlatformContext
 }
 
+type AccountDeleteContext struct {
+	Platform *core.PlatformContext
+	Account  store.Account
+}
+
 type RuntimeContext struct {
 	Store     *store.Store
 	Sessions  *session.Manager
@@ -56,6 +61,7 @@ type Definition struct {
 	AccountNewUsage       string
 	ParseAccountNewFlags  func(args []string, io AccountNewIO) (AccountNewOptions, error)
 	CreateOrUpdateAccount func(ctx AccountNewContext, opts AccountNewOptions) error
+	DeleteAccount         func(ctx AccountDeleteContext) error
 	NewRuntimePlatform    func(ctx RuntimeContext) (core.Platform, error)
 	CommandPolicy         commands.Policy
 	TextChunkLimit        int
@@ -267,6 +273,9 @@ func feishuDefinition() Definition {
 			}
 			fmt.Printf("✅ 已添加飞书账户: %s (%s)\n", acc.Name, acc.ID)
 			return nil
+		},
+		DeleteAccount: func(ctx AccountDeleteContext) error {
+			return feishu.DeleteAccountConfig(ctx.Platform, ctx.Account.Name)
 		},
 		NewRuntimePlatform: func(ctx RuntimeContext) (core.Platform, error) {
 			feishuConfig, err := feishu.LoadConfig(ctx.Platform)

@@ -106,6 +106,66 @@ func TestUpsertAndResolveAccountConfig(t *testing.T) {
 	}
 }
 
+func TestDeleteAccountConfigRemovesOnlyNamedAccount(t *testing.T) {
+	cfg := config.DefaultConfig()
+	platformCtx, err := core.NewPlatformContext(store.PlatformFeishu, &cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+	if err := platformCtx.SetPlatformConfig(store.PlatformFeishu, Config{
+		Accounts: map[string]AccountConfig{
+			"fsbot": {AppID: "cli_xxx", AppSecret: "secret"},
+			"other": {AppID: "cli_other", AppSecret: "other-secret"},
+		},
+		Events: []EventConfig{{Name: "p2p_chat_create", Version: "1.0", Run: ShellRun{"echo hello"}}},
+	}); err != nil {
+		t.Fatalf("SetPlatformConfig returned error: %v", err)
+	}
+
+	if err := DeleteAccountConfig(platformCtx, "missing"); err != nil {
+		t.Fatalf("DeleteAccountConfig missing returned error: %v", err)
+	}
+	before, err := LoadConfig(platformCtx)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if len(before.Accounts) != 2 {
+		t.Fatalf("accounts after missing delete = %#v, want two accounts", before.Accounts)
+	}
+
+	if err := DeleteAccountConfig(platformCtx, "fsbot"); err != nil {
+		t.Fatalf("DeleteAccountConfig returned error: %v", err)
+	}
+	after, err := LoadConfig(platformCtx)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if _, ok := after.Accounts["fsbot"]; ok {
+		t.Fatalf("fsbot account config was not deleted: %#v", after.Accounts)
+	}
+	if other, ok := after.Accounts["other"]; !ok || other.AppID != "cli_other" {
+		t.Fatalf("other account config = %#v ok=%v", other, ok)
+	}
+	if len(after.Events) != 1 || after.Events[0].Name != "p2p_chat_create" {
+		t.Fatalf("events = %#v, want preserved event", after.Events)
+	}
+}
+
+func TestDeleteAccountConfigMissingPlatformConfigIsNoop(t *testing.T) {
+	cfg := config.DefaultConfig()
+	platformCtx, err := core.NewPlatformContext(store.PlatformFeishu, &cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+
+	if err := DeleteAccountConfig(platformCtx, "missing"); err != nil {
+		t.Fatalf("DeleteAccountConfig returned error: %v", err)
+	}
+	if _, ok := cfg.Platforms[store.PlatformFeishu]; ok {
+		t.Fatalf("feishu platform config was created by noop delete: %#v", cfg.Platforms[store.PlatformFeishu])
+	}
+}
+
 func TestLoadConfigParsesEventRuns(t *testing.T) {
 	var node yaml.Node
 	if err := yaml.Unmarshal([]byte(`accounts:

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -141,6 +143,159 @@ func TestCmdAccountNewUnknownPlatform(t *testing.T) {
 	err := cmdAccountNew([]string{"unknown"})
 	if err == nil {
 		t.Fatal("cmdAccountNew returned nil error, want unsupported platform error")
+	}
+}
+
+func TestCmdAccountDeleteUniqueNameDeletesAndNotesWithoutRun(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	writeTestConfig(t)
+	saveTestAccount(t, store.Account{
+		ID:              "wechat:test",
+		Name:            "default",
+		Platform:        store.PlatformWeChat,
+		Token:           "token",
+		BaseURL:         "base",
+		UserID:          "user",
+		CredentialsJSON: "{}",
+		Enabled:         true,
+	})
+
+	out, err := captureStdout(t, func() error {
+		return cmdAccountDelete([]string{"default"})
+	})
+	if err != nil {
+		t.Fatalf("cmdAccountDelete returned error: %v", err)
+	}
+	if !strings.Contains(out, "Deleted account: wechat/default") {
+		t.Fatalf("output = %q, want deleted account", out)
+	}
+	if !strings.Contains(out, "Note: No running lingobridge process found") {
+		t.Fatalf("output = %q, want no-run note", out)
+	}
+	if accounts := listTestAccounts(t, store.PlatformWeChat); len(accounts) != 0 {
+		t.Fatalf("wechat accounts = %#v, want empty after delete", accounts)
+	}
+}
+
+func TestCmdAccountDeleteAmbiguousNameRequiresPlatformName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	writeTestConfig(t)
+	saveTestAccount(t, store.Account{
+		ID:              "wechat:test",
+		Name:            "default",
+		Platform:        store.PlatformWeChat,
+		CredentialsJSON: "{}",
+		Enabled:         true,
+	})
+	saveTestAccount(t, store.Account{
+		ID:              "feishu:cli_xxx",
+		Name:            "default",
+		Platform:        store.PlatformFeishu,
+		CredentialsJSON: "{}",
+		Enabled:         true,
+	})
+
+	err := cmdAccountDelete([]string{"default"})
+	if err == nil {
+		t.Fatal("cmdAccountDelete returned nil error, want ambiguous account error")
+	}
+	for _, want := range []string{"ambiguous", "feishu/default", "wechat/default"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want %q", err, want)
+		}
+	}
+	if accounts := listTestAccounts(t, store.PlatformWeChat); len(accounts) != 1 {
+		t.Fatalf("wechat accounts = %#v, want unchanged", accounts)
+	}
+	if accounts := listTestAccounts(t, store.PlatformFeishu); len(accounts) != 1 {
+		t.Fatalf("feishu accounts = %#v, want unchanged", accounts)
+	}
+}
+
+func TestCmdAccountDeletePlatformSelectorDeletesMatchingAccountAndFeishuConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	writeTestConfig(t)
+	saveTestAccount(t, store.Account{
+		ID:              "wechat:test",
+		Name:            "default",
+		Platform:        store.PlatformWeChat,
+		CredentialsJSON: "{}",
+		Enabled:         true,
+	})
+	saveTestAccount(t, store.Account{
+		ID:              "feishu:cli_xxx",
+		Name:            "default",
+		Platform:        store.PlatformFeishu,
+		BaseURL:         feishu.DefaultBaseURL,
+		UserID:          "cli_xxx",
+		CredentialsJSON: "{}",
+		Enabled:         true,
+	})
+	upsertTestFeishuAccountConfig(t, "default", "cli_xxx")
+
+	out, err := captureStdout(t, func() error {
+		return cmdAccountDelete([]string{"feishu/default"})
+	})
+	if err != nil {
+		t.Fatalf("cmdAccountDelete returned error: %v", err)
+	}
+	if !strings.Contains(out, "Deleted account: feishu/default") {
+		t.Fatalf("output = %q, want feishu/default delete", out)
+	}
+	if accounts := listTestAccounts(t, store.PlatformFeishu); len(accounts) != 0 {
+		t.Fatalf("feishu accounts = %#v, want empty after delete", accounts)
+	}
+	if accounts := listTestAccounts(t, store.PlatformWeChat); len(accounts) != 1 || accounts[0].Name != "default" {
+		t.Fatalf("wechat accounts = %#v, want default account preserved", accounts)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	platformCtx, err := core.NewPlatformContext(store.PlatformFeishu, &cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+	_, ok, err := feishu.ResolveAccountConfig(platformCtx, "default")
+	if err != nil {
+		t.Fatalf("ResolveAccountConfig returned error: %v", err)
+	}
+	if ok {
+		t.Fatal("feishu account config still exists after account delete")
+	}
+}
+
+func TestCmdAccountListShowsPlatformName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	saveTestAccount(t, store.Account{
+		ID:              "wechat:test",
+		Name:            "default",
+		Platform:        store.PlatformWeChat,
+		CredentialsJSON: "{}",
+		Enabled:         true,
+	})
+	saveTestAccount(t, store.Account{
+		ID:              "feishu:cli_xxx",
+		Name:            "default",
+		Platform:        store.PlatformFeishu,
+		CredentialsJSON: "{}",
+		Enabled:         true,
+	})
+
+	out, err := captureStdout(t, func() error {
+		return cmdAccountList(nil)
+	})
+	if err != nil {
+		t.Fatalf("cmdAccountList returned error: %v", err)
+	}
+	for _, want := range []string{"feishu/default", "wechat/default"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output = %q, want %q", out, want)
+		}
+	}
+	if strings.Contains(out, "default [feishu]") || strings.Contains(out, "default [wechat]") {
+		t.Fatalf("output = %q, want platform/name format", out)
 	}
 }
 
@@ -364,6 +519,74 @@ func newFakeAccountNewRegistry(t *testing.T) *platform.Registry {
 		t.Fatalf("Register returned error: %v", err)
 	}
 	return registry
+}
+
+func captureStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe returned error: %v", err)
+	}
+	os.Stdout = w
+	errRun := fn()
+	if err := w.Close(); err != nil {
+		os.Stdout = old
+		t.Fatalf("close stdout pipe: %v", err)
+	}
+	os.Stdout = old
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout pipe: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close stdout reader: %v", err)
+	}
+	return string(out), errRun
+}
+
+func saveTestAccount(t *testing.T, account store.Account) {
+	t.Helper()
+	st, err := store.Open(account.Platform)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer st.Close()
+	if err := st.SaveAccount(account); err != nil {
+		t.Fatalf("SaveAccount returned error: %v", err)
+	}
+}
+
+func listTestAccounts(t *testing.T, platformID string) []store.Account {
+	t.Helper()
+	st, err := store.Open(platformID)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer st.Close()
+	accounts, err := st.ListAccounts()
+	if err != nil {
+		t.Fatalf("ListAccounts returned error: %v", err)
+	}
+	return accounts
+}
+
+func upsertTestFeishuAccountConfig(t *testing.T, name, appID string) {
+	t.Helper()
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	platformCtx, err := core.NewPlatformContext(store.PlatformFeishu, &cfg, nil, config.Save)
+	if err != nil {
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+	if err := feishu.UpsertAccountConfig(platformCtx, name, feishu.AccountConfig{
+		AppID:     appID,
+		AppSecret: "secret",
+	}); err != nil {
+		t.Fatalf("UpsertAccountConfig returned error: %v", err)
+	}
 }
 
 func writeTestConfig(t *testing.T) {

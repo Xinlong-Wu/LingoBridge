@@ -131,6 +131,30 @@ func UpsertAccountConfig(api core.PlatformConfigAPI, name string, account Accoun
 	return api.SetPlatformConfig(store.PlatformFeishu, cfg)
 }
 
+// DeleteAccountConfig removes one Feishu account config if it exists.
+func DeleteAccountConfig(api core.PlatformConfigAPI, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("feishu account name is required")
+	}
+	var cfg Config
+	if err := api.GetPlatformConfig(store.PlatformFeishu, &cfg); err != nil {
+		if errors.Is(err, core.ErrPlatformConfigNotFound) {
+			return nil
+		}
+		return err
+	}
+	if cfg.Accounts == nil {
+		return nil
+	}
+	if _, ok := cfg.Accounts[name]; !ok {
+		return nil
+	}
+	delete(cfg.Accounts, name)
+	cfg.ApplyDefaults()
+	return api.SetPlatformConfig(store.PlatformFeishu, cfg)
+}
+
 // ResolveAccountConfig returns a validated Feishu account config by account name.
 func ResolveAccountConfig(api core.PlatformConfigAPI, name string) (AccountConfig, bool, error) {
 	name = strings.TrimSpace(name)

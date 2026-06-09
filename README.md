@@ -99,7 +99,7 @@ invalid account or platform config, `run` exits and prints the monitor error.
 Logs are printed as `timestamp - [LEVEL] - [component] message`; Feishu SDK
 logs use the `feishu/lark` component.
 
-While `run` is active, `account new` and `account delete` notify it over a local Unix socket so account changes are applied without restarting the bot loop.
+While `run` is active, `account new` and `account delete` notify it over a local Unix socket so account changes are applied without restarting the bot loop. If no running process is reachable, the CLI prints a `Note:` and the account/config change still succeeds.
 `model add` also notifies the running process. On reload, LingoBridge reloads
 `config.yaml`, rebuilds the active model list, and restarts account monitors
 when relevant config changes.
@@ -110,10 +110,14 @@ when relevant config changes.
 |---|---|
 | `account new weixin [--name <name>]` | Add a WeChat bot account via QR login and reload a running bot process |
 | `account new feishu [--name <name>] [--app-id <id>] [--app-secret <secret>] [--base-url <url>]` | Add a Feishu self-built app account, write Feishu config, and reload a running bot process |
-| `account list` | List all accounts with their platform |
-| `account delete <name>` | Delete an account from its platform data domain and reload a running bot process |
+| `account list` | List all accounts as `platform/name` with their account ID |
+| `account delete <name\|platform/name>` | Delete an account from its platform data domain, remove Feishu account config when applicable, and reload a running bot process |
 | `model add <name> [--provider <openai\|anthropic>] [--base-url <url>] [--api-key <key>] [--id <model-id>] [--endpoint <mode>] [--context-window <tokens>] [--compact <true\|false\|auto>] [--compact-threshold <ratio>] [--compact-instructions <text>] [--default]` | Add an LLM model profile to config and optionally make it the default |
 | `run [--account <name>] [--verbose <all\|debug\|info\|warn\|error>]` | Start the bot loop with optional log level, default `info` |
+
+`account delete <name>` works when only one account has that name. If multiple
+platforms have the same name, delete with the `platform/name` shown by
+`account list`, such as `feishu/default` or `wechat/default`.
 
 ## In-Chat Commands
 
