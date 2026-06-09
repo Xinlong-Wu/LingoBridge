@@ -62,6 +62,9 @@ func (f *fakeSessions) RenameCurrentSession(userID, newName string) (*store.Sess
 func (f *fakeSessions) ArchiveSession(userID, sessionName string) (*store.ArchiveResult, error) {
 	return &store.ArchiveResult{Archived: store.Session{Name: sessionName}}, nil
 }
+func (f *fakeSessions) ClearSession(userID string) (*store.Session, error) {
+	return &store.Session{ID: "cleared", UserID: userID, Name: "session-1", Current: true}, nil
+}
 func (f *fakeSessions) CurrentModel(userID string) (string, error) {
 	if f.model != "" {
 		return f.model, nil

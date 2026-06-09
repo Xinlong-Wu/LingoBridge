@@ -60,7 +60,7 @@ func (m *Manager) SaveHistory(userID, sessionID string, conv *store.Conversation
 // CreateSession creates a new session for a user and sets it as current.
 func (m *Manager) CreateSession(userID, name string) (*store.Session, error) {
 	if name == "" {
-		name = fmt.Sprintf("session-%d", time.Now().Unix())
+		name = generatedSessionName()
 	}
 	return m.store.CreateSession(userID, name)
 }
@@ -114,6 +114,11 @@ func (m *Manager) ArchiveSession(userID, name string) (*store.ArchiveResult, err
 	return result, nil
 }
 
+// ClearSession archives the current session and creates a new current session.
+func (m *Manager) ClearSession(userID string) (*store.Session, error) {
+	return m.store.ClearCurrentSession(userID, generatedSessionName())
+}
+
 // CurrentModel returns the current model profile for a user, falling back to default.
 func (m *Manager) CurrentModel(userID string) (string, error) {
 	modelName, err := m.store.GetUserModelName(userID)
@@ -149,6 +154,10 @@ func (m *Manager) ListModels() []string {
 // HasModel reports whether a model profile exists.
 func (m *Manager) HasModel(modelName string) bool {
 	return m.models[modelName]
+}
+
+func generatedSessionName() string {
+	return fmt.Sprintf("session-%d", time.Now().Unix())
 }
 
 // FormatSessionList formats sessions for display.

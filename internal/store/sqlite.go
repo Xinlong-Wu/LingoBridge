@@ -445,6 +445,47 @@ func (s *Store) ArchiveSession(userID, sessionName string) (*Session, error) {
 	return sess, nil
 }
 
+// ClearCurrentSession archives the current session and creates a new current session.
+func (s *Store) ClearCurrentSession(userID, newName string) (*Session, error) {
+	if newName == "" {
+		newName = "default"
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	current, err := currentSessionTx(tx, userID)
+	if errors.Is(err, ErrSessionNotFound) {
+		current, err = ensureCurrentSessionTx(tx, userID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE sessions SET archived=1 WHERE id=? AND user_id=?`, current.ID, userID); err != nil {
+		return nil, err
+	}
+
+	next, err := createSessionTx(tx, userID, newName)
+	if err != nil {
+		return nil, err
+	}
+	if err := upsertCurrentSessionTx(tx, userID, next.ID); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	next.Current = true
+	return next, nil
+}
+
 // GetUserModelName returns the stored model preference for a user.
 func (s *Store) GetUserModelName(userID string) (string, error) {
 	var modelName string

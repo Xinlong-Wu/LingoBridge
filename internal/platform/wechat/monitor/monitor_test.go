@@ -157,6 +157,10 @@ func (f *fakeConversationManager) ArchiveSession(userID, sessionName string) (*s
 	}, nil
 }
 
+func (f *fakeConversationManager) ClearSession(userID string) (*store.Session, error) {
+	return &store.Session{ID: "cleared", UserID: userID, Name: "session-1", Current: true}, nil
+}
+
 func (f *fakeConversationManager) CurrentModel(userID string) (string, error) {
 	if f.modelByUser != nil && f.modelByUser[userID] != "" {
 		return f.modelByUser[userID], nil

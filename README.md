@@ -132,6 +132,7 @@ Send these as WeChat or Feishu text messages to the bot:
 | `/switch <name>` | Switch current session |
 | `/rename <name>` | Rename current session |
 | `/archive [name]` | Archive a session |
+| `/clear` | Archive the current session and start a new one |
 | `/model [name]` | Show or switch model profile |
 | `/compact` | Manually compact the current session context |
 

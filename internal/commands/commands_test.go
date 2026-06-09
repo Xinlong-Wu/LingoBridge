@@ -14,10 +14,12 @@ type fakeSessionManager struct {
 	switchErr    error
 	renameErr    error
 	archiveErr   error
+	clearErr     error
 	setModelErr  error
 	sessions     []store.Session
 	currentModel string
 	models       []string
+	clearCalled  bool
 }
 
 func (f *fakeSessionManager) CurrentSession(userID string) (*store.Session, error) {
@@ -58,6 +60,14 @@ func (f *fakeSessionManager) ArchiveSession(userID, sessionName string) (*store.
 		Current:        &store.Session{ID: "next", UserID: userID, Name: "next", Current: true},
 		CurrentChanged: true,
 	}, nil
+}
+
+func (f *fakeSessionManager) ClearSession(userID string) (*store.Session, error) {
+	f.clearCalled = true
+	if f.clearErr != nil {
+		return nil, f.clearErr
+	}
+	return &store.Session{ID: "cleared", UserID: userID, Name: "session-1", Current: true}, nil
 }
 
 func (f *fakeSessionManager) CurrentModel(userID string) (string, error) {
@@ -110,35 +120,55 @@ func TestHandleHelp(t *testing.T) {
 	if !handled {
 		t.Fatal("Handle did not handle /help")
 	}
-	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/model", "/compact"} {
+	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/clear", "/model", "/compact"} {
 		if !strings.Contains(resp, want) {
 			t.Fatalf("response = %q, want %s", resp, want)
 		}
-	}
-	if strings.Contains(resp, "/clear") {
-		t.Fatalf("response = %q, want /clear hidden", resp)
 	}
 }
 
 func TestHelpTextIncludesDefaultCommands(t *testing.T) {
 	resp := HelpText(DefaultPolicy())
-	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/model", "/compact"} {
+	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/clear", "/model", "/compact"} {
 		if !strings.Contains(resp, want) {
 			t.Fatalf("response = %q, want %s", resp, want)
 		}
 	}
-	if strings.Contains(resp, "/clear") {
-		t.Fatalf("response = %q, want /clear hidden", resp)
-	}
 }
 
-func TestHandleClearIsNotRecognized(t *testing.T) {
-	resp, handled, err := Handle("/clear", "user", &fakeSessionManager{})
+func TestHandleClear(t *testing.T) {
+	manager := &fakeSessionManager{}
+	resp, handled, err := Handle("/clear", "user", manager)
 	if err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
-	if handled || resp != "" {
-		t.Fatalf("Handle /clear response=%q handled=%v, want unrecognized command", resp, handled)
+	if !handled {
+		t.Fatal("Handle did not handle /clear")
+	}
+	if !manager.clearCalled {
+		t.Fatal("ClearSession was not called")
+	}
+	for _, want := range []string{"已清空当前会话", "session-1"} {
+		if !strings.Contains(resp, want) {
+			t.Fatalf("response = %q, want %s", resp, want)
+		}
+	}
+}
+
+func TestHandleClearRejectsArgs(t *testing.T) {
+	manager := &fakeSessionManager{}
+	resp, handled, err := Handle("/clear work", "user", manager)
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle /clear")
+	}
+	if manager.clearCalled {
+		t.Fatal("ClearSession was called for /clear with args")
+	}
+	if resp != "用法：/clear" {
+		t.Fatalf("response = %q, want usage", resp)
 	}
 }
 
@@ -163,6 +193,28 @@ func TestHelpTextUsesPolicy(t *testing.T) {
 	}
 	if !strings.Contains(resp, "/current") {
 		t.Fatalf("response = %q, want other shared commands visible", resp)
+	}
+}
+
+func TestClearUsesPolicy(t *testing.T) {
+	manager := &fakeSessionManager{}
+	resp := HelpText(PolicyWithDisabled("/clear"))
+	if strings.Contains(resp, "/clear") {
+		t.Fatalf("response = %q, want /clear hidden", resp)
+	}
+
+	resp, handled, err := HandleWithPolicy("/clear", "user", manager, PolicyWithDisabled("/clear"))
+	if err != nil {
+		t.Fatalf("HandleWithPolicy returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("HandleWithPolicy did not handle disabled /clear")
+	}
+	if manager.clearCalled {
+		t.Fatal("ClearSession was called for disabled /clear")
+	}
+	if !strings.Contains(resp, "暂不支持 /clear") {
+		t.Fatalf("response = %q, want unsupported command message", resp)
 	}
 }
 

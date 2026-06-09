@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"testing"
 
 	"lingobridge/internal/config"
@@ -42,6 +43,58 @@ func TestArchiveCurrentSessionSelectsFallback(t *testing.T) {
 	}
 	if !result.CurrentChanged || result.Current == nil || result.Current.Name != "work" {
 		t.Fatalf("archive result = %#v, want fallback to work", result)
+	}
+}
+
+func TestClearSessionArchivesCurrentAndCreatesNewCurrent(t *testing.T) {
+	manager, _ := newTestManager(t)
+
+	if _, err := manager.CreateSession("user", "work"); err != nil {
+		t.Fatalf("CreateSession returned error: %v", err)
+	}
+
+	next, err := manager.ClearSession("user")
+	if err != nil {
+		t.Fatalf("ClearSession returned error: %v", err)
+	}
+	if !next.Current || !strings.HasPrefix(next.Name, "session-") {
+		t.Fatalf("next session = %#v, want generated current session", next)
+	}
+
+	current, err := manager.CurrentSession("user")
+	if err != nil {
+		t.Fatalf("CurrentSession returned error: %v", err)
+	}
+	if current.ID != next.ID {
+		t.Fatalf("current session = %#v, want clear result %#v", current, next)
+	}
+
+	sessions, err := manager.ListSessions("user")
+	if err != nil {
+		t.Fatalf("ListSessions returned error: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != next.ID || sessions[0].Name == "work" {
+		t.Fatalf("sessions = %#v, want only new unarchived session", sessions)
+	}
+}
+
+func TestClearSessionWithoutExistingSessionCreatesNewCurrent(t *testing.T) {
+	manager, _ := newTestManager(t)
+
+	next, err := manager.ClearSession("user")
+	if err != nil {
+		t.Fatalf("ClearSession returned error: %v", err)
+	}
+	if !next.Current || !strings.HasPrefix(next.Name, "session-") {
+		t.Fatalf("next session = %#v, want generated current session", next)
+	}
+
+	sessions, err := manager.ListSessions("user")
+	if err != nil {
+		t.Fatalf("ListSessions returned error: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != next.ID {
+		t.Fatalf("sessions = %#v, want only new current session", sessions)
 	}
 }
 
