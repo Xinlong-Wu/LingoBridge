@@ -482,6 +482,14 @@ func (s wechatSender) StartTyping(ctx context.Context) func() {
 	return s.bot.startTypingKeepalive(s.toUserID, s.contextToken)
 }
 
+func (s wechatSender) StartCompactNotice(ctx context.Context, notice core.CompactNotice) (core.CompactNoticeHandle, error) {
+	return core.CompactNoticeHandle{}, s.bot.sendText(s.toUserID, core.CompactStartText(), s.contextToken)
+}
+
+func (s wechatSender) FinishCompactNotice(ctx context.Context, handle core.CompactNoticeHandle, notice core.CompactNotice) error {
+	return s.bot.sendText(s.toUserID, core.CompactSuccessText(notice), s.contextToken)
+}
+
 func (b *bot) coreHandler() core.Handler {
 	if b.handler != nil {
 		return b.handler

@@ -62,9 +62,6 @@ func (f *fakeSessions) RenameCurrentSession(userID, newName string) (*store.Sess
 func (f *fakeSessions) ArchiveSession(userID, sessionName string) (*store.ArchiveResult, error) {
 	return &store.ArchiveResult{Archived: store.Session{Name: sessionName}}, nil
 }
-func (f *fakeSessions) ClearSession(userID string) (*store.Session, error) {
-	return &store.Session{ID: "clear", UserID: userID, Name: "clear", Current: true}, nil
-}
 func (f *fakeSessions) CurrentModel(userID string) (string, error) {
 	if f.model != "" {
 		return f.model, nil
@@ -152,9 +149,13 @@ func (f *fakeNativeLLM) ChatStreamWithContext(systemPrompt string, messages []st
 }
 
 type fakeSender struct {
-	sent       []OutboundMessage
-	typing     int
-	stopTyping int
+	sent             []OutboundMessage
+	typing           int
+	stopTyping       int
+	compactStarts    []CompactNotice
+	compactFinishes  []CompactNotice
+	compactStartErr  error
+	compactFinishErr error
 }
 
 func (f *fakeSender) Send(ctx context.Context, msg OutboundMessage) error {
@@ -165,6 +166,19 @@ func (f *fakeSender) Send(ctx context.Context, msg OutboundMessage) error {
 func (f *fakeSender) StartTyping(ctx context.Context) func() {
 	f.typing++
 	return func() { f.stopTyping++ }
+}
+
+func (f *fakeSender) StartCompactNotice(ctx context.Context, notice CompactNotice) (CompactNoticeHandle, error) {
+	f.compactStarts = append(f.compactStarts, notice)
+	if f.compactStartErr != nil {
+		return CompactNoticeHandle{}, f.compactStartErr
+	}
+	return CompactNoticeHandle{MessageID: "compact-notice"}, nil
+}
+
+func (f *fakeSender) FinishCompactNotice(ctx context.Context, handle CompactNoticeHandle, notice CompactNotice) error {
+	f.compactFinishes = append(f.compactFinishes, notice)
+	return f.compactFinishErr
 }
 
 type fakeStreamingSender struct {
@@ -293,6 +307,12 @@ func TestHandleTextCompactsNativeContextAndSavesRecentHistory(t *testing.T) {
 	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "new", LLMText: "new"}, sender); err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
+	if len(sender.compactStarts) != 1 || sender.compactStarts[0].ModelName != "deepseek" || sender.compactStarts[0].Manual {
+		t.Fatalf("compact starts = %#v, want one automatic deepseek notice", sender.compactStarts)
+	}
+	if len(sender.compactFinishes) != 1 || sender.compactFinishes[0].CompactedMessages != 3 || sender.compactFinishes[0].RetainedMessages != nativeContextKeepRecentMessages {
+		t.Fatalf("compact finishes = %#v, want one success notice", sender.compactFinishes)
+	}
 	if len(client.compactedMessages) != 3 {
 		t.Fatalf("compacted messages = %d, want 3 old messages", len(client.compactedMessages))
 	}
@@ -359,6 +379,12 @@ func TestHandleTextContinuesWhenNativeCompactNotTriggered(t *testing.T) {
 	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "new", LLMText: "new"}, sender); err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
+	if len(sender.compactStarts) != 1 {
+		t.Fatalf("compact starts = %#v, want one attempted compact notice", sender.compactStarts)
+	}
+	if len(sender.compactFinishes) != 0 {
+		t.Fatalf("compact finishes = %#v, want none when compaction was not triggered", sender.compactFinishes)
+	}
 	if len(client.compactedMessages) != 3 {
 		t.Fatalf("compacted messages = %d, want attempted compaction of 3 old messages", len(client.compactedMessages))
 	}
@@ -413,6 +439,12 @@ func TestHandleCompactCommandCompactsAndSavesRecentHistory(t *testing.T) {
 	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "/compact", LLMText: "/compact"}, sender); err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
+	if len(sender.compactStarts) != 1 || !sender.compactStarts[0].Manual || sender.compactStarts[0].CompactedMessages != 2 {
+		t.Fatalf("compact starts = %#v, want one manual notice", sender.compactStarts)
+	}
+	if len(sender.compactFinishes) != 1 || sender.compactFinishes[0].RetainedMessages != nativeContextKeepRecentMessages {
+		t.Fatalf("compact finishes = %#v, want one manual success notice", sender.compactFinishes)
+	}
 	if len(client.compactedMessages) != 2 {
 		t.Fatalf("compacted messages = %d, want 2", len(client.compactedMessages))
 	}
@@ -425,8 +457,56 @@ func TestHandleCompactCommandCompactsAndSavesRecentHistory(t *testing.T) {
 	if sessions.saved.ProviderContexts["deepseek"].IsEmpty() {
 		t.Fatalf("saved provider contexts = %#v, want compact context", sessions.saved.ProviderContexts)
 	}
-	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0].Text, "已压缩") {
-		t.Fatalf("sent = %#v, want compact success", sender.sent)
+	if len(sender.sent) != 0 {
+		t.Fatalf("sent = %#v, want compact success handled by notice sender", sender.sent)
+	}
+}
+
+func TestHandleCompactCommandContinuesWhenNoticeFails(t *testing.T) {
+	var history []store.Message
+	for i := 0; i < nativeContextKeepRecentMessages+2; i++ {
+		history = append(history, store.Message{Role: "user", Content: "old message " + string(rune('a'+i))})
+	}
+	sessions := &fakeSessions{conv: &store.Conversation{Messages: history}}
+	client := &fakeNativeLLM{}
+	cfg := config.LLMConfig{
+		DefaultModel: "deepseek",
+		Models: map[string]config.LLMModelConfig{
+			"deepseek": {
+				Provider:      "openai",
+				BaseURL:       "https://llm.test",
+				APIKey:        "key",
+				ID:            "model",
+				Endpoint:      "responses",
+				ContextWindow: 128000,
+				Compact:       config.LLMCompactConfig{Mode: config.CompactModeAuto, Threshold: 0.9},
+			},
+		},
+		SystemPrompt: "system",
+	}
+	b := &Bot{
+		Sessions:       sessions,
+		LLMConfig:      cfg,
+		LLMClients:     map[string]llm.Client{},
+		NewLLM:         func(config.ResolvedModel) llm.Client { return client },
+		TextChunkLimit: testTextChunkLimit,
+	}
+	sender := &fakeSender{
+		compactStartErr:  errors.New("notice start failed"),
+		compactFinishErr: errors.New("notice finish failed"),
+	}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "/compact", LLMText: "/compact"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if sessions.saved == nil {
+		t.Fatal("history was not saved")
+	}
+	if len(sender.compactStarts) != 1 || len(sender.compactFinishes) != 1 {
+		t.Fatalf("compact notices = %#v/%#v, want attempted start and finish", sender.compactStarts, sender.compactFinishes)
+	}
+	if len(sender.sent) != 0 {
+		t.Fatalf("sent = %#v, want no fallback text from failing notice sender", sender.sent)
 	}
 }
 
@@ -463,6 +543,12 @@ func TestHandleCompactCommandNotTriggeredDoesNotSave(t *testing.T) {
 
 	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "/compact", LLMText: "/compact"}, sender); err != nil {
 		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(sender.compactStarts) != 1 {
+		t.Fatalf("compact starts = %#v, want one attempted manual compact notice", sender.compactStarts)
+	}
+	if len(sender.compactFinishes) != 0 {
+		t.Fatalf("compact finishes = %#v, want none when manual compaction was not triggered", sender.compactFinishes)
 	}
 	if len(client.compactedMessages) != 2 {
 		t.Fatalf("compacted messages = %d, want attempted compact of 2 old messages", len(client.compactedMessages))
@@ -506,6 +592,9 @@ func TestHandleCompactCommandDisabledByMode(t *testing.T) {
 	if len(client.compactedMessages) != 0 {
 		t.Fatalf("compacted messages = %#v, want no compaction", client.compactedMessages)
 	}
+	if len(sender.compactStarts) != 0 || len(sender.compactFinishes) != 0 {
+		t.Fatalf("compact notices = %#v/%#v, want none when compact is disabled", sender.compactStarts, sender.compactFinishes)
+	}
 	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0].Text, "已禁用") {
 		t.Fatalf("sent = %#v, want disabled compact error", sender.sent)
 	}
@@ -522,6 +611,9 @@ func TestHandleCompactCommandUnsupportedProviderErrors(t *testing.T) {
 	}
 	if client.called {
 		t.Fatal("LLM chat was called for unsupported /compact")
+	}
+	if len(sender.compactStarts) != 0 || len(sender.compactFinishes) != 0 {
+		t.Fatalf("compact notices = %#v/%#v, want none for unsupported compact", sender.compactStarts, sender.compactFinishes)
 	}
 	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0].Text, "不支持上下文压缩") {
 		t.Fatalf("sent = %#v, want unsupported compact error", sender.sent)

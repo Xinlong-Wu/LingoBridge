@@ -157,10 +157,6 @@ func (f *fakeConversationManager) ArchiveSession(userID, sessionName string) (*s
 	}, nil
 }
 
-func (f *fakeConversationManager) ClearSession(userID string) (*store.Session, error) {
-	return &store.Session{ID: "cleared", UserID: userID, Name: "session-1", Current: true}, nil
-}
-
 func (f *fakeConversationManager) CurrentModel(userID string) (string, error) {
 	if f.modelByUser != nil && f.modelByUser[userID] != "" {
 		return f.modelByUser[userID], nil
@@ -407,6 +403,34 @@ func TestProcessOneTextMessage(t *testing.T) {
 	}
 	if got := sessions.saved.Messages[0].Content; got != "hi" {
 		t.Fatalf("saved user message = %q, want hi", got)
+	}
+}
+
+func TestWechatSenderCompactNoticeSendsStartAndFinishText(t *testing.T) {
+	b, client, _, _ := newTestBot()
+	sender := wechatSender{bot: b, toUserID: "user", contextToken: "context"}
+	notice := core.CompactNotice{
+		ModelName:         "deepseek",
+		Manual:            true,
+		CompactedMessages: 2,
+		RetainedMessages:  12,
+	}
+
+	if _, err := sender.StartCompactNotice(context.Background(), notice); err != nil {
+		t.Fatalf("StartCompactNotice returned error: %v", err)
+	}
+	if err := sender.FinishCompactNotice(context.Background(), core.CompactNoticeHandle{}, notice); err != nil {
+		t.Fatalf("FinishCompactNotice returned error: %v", err)
+	}
+
+	if len(client.sent) != 2 {
+		t.Fatalf("sent messages = %d, want start and finish notices", len(client.sent))
+	}
+	if got := client.sent[0].ItemList[0].TextItem.Text; got != core.CompactStartText() {
+		t.Fatalf("start text = %q, want compact start text", got)
+	}
+	if got := client.sent[1].ItemList[0].TextItem.Text; got != core.CompactSuccessText(notice) {
+		t.Fatalf("finish text = %q, want compact success text", got)
 	}
 }
 

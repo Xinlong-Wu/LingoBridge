@@ -89,6 +89,7 @@ type fakeSender struct {
 	streamUpdates     []updatedText
 	reactionAdds      []reactionAdd
 	reactionDeletes   []reactionDelete
+	createTextErr     error
 	addReactionErr    error
 	deleteReactionErr error
 	updateTextErr     error
@@ -124,6 +125,9 @@ func (f *fakeSender) CreateText(ctx context.Context, chatID, text string) (strin
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.streamCreates = append(f.streamCreates, sentText{chatID: chatID, text: text})
+	if f.createTextErr != nil {
+		return "", f.createTextErr
+	}
 	return "om_stream", nil
 }
 
@@ -436,6 +440,57 @@ func TestFeishuResponderStreamsTextUpdatesOneMessage(t *testing.T) {
 	}
 	if len(snap.messages) != 0 {
 		t.Fatalf("messages = %#v, want no separate SendText calls", snap.messages)
+	}
+}
+
+func TestFeishuResponderCompactNoticeCreatesMessageAndMarksDone(t *testing.T) {
+	sender := &fakeSender{}
+	resp := feishuResponder{sender: sender, chatID: "oc_chat"}
+
+	handle, err := resp.StartCompactNotice(context.Background(), core.CompactNotice{ModelName: "deepseek", Manual: true})
+	if err != nil {
+		t.Fatalf("StartCompactNotice returned error: %v", err)
+	}
+	if handle.MessageID != "om_stream" {
+		t.Fatalf("compact notice handle = %#v, want om_stream", handle)
+	}
+	if err := resp.FinishCompactNotice(context.Background(), handle, core.CompactNotice{ModelName: "deepseek", Manual: true}); err != nil {
+		t.Fatalf("FinishCompactNotice returned error: %v", err)
+	}
+
+	snap := sender.snapshot()
+	if len(snap.streamCreates) != 1 || snap.streamCreates[0].chatID != "oc_chat" || snap.streamCreates[0].text != core.CompactStartText() {
+		t.Fatalf("stream creates = %#v, want compact progress message", snap.streamCreates)
+	}
+	if len(snap.reactionAdds) != 1 || snap.reactionAdds[0].messageID != "om_stream" || snap.reactionAdds[0].emojiType != feishuCompactDoneReactionEmoji {
+		t.Fatalf("reaction adds = %#v, want DONE reaction on compact progress message", snap.reactionAdds)
+	}
+	if len(snap.messages) != 0 {
+		t.Fatalf("messages = %#v, want no extra compact text message", snap.messages)
+	}
+}
+
+func TestFeishuResponderCompactNoticeDoesNotFallbackToText(t *testing.T) {
+	sender := &fakeSender{addReactionErr: errors.New("reaction denied")}
+	resp := feishuResponder{sender: sender, chatID: "oc_chat"}
+
+	if err := resp.FinishCompactNotice(context.Background(), core.CompactNoticeHandle{MessageID: "om_compact"}, core.CompactNotice{ModelName: "deepseek"}); err == nil {
+		t.Fatal("FinishCompactNotice returned nil error, want reaction error")
+	}
+	if len(sender.snapshot().messages) != 0 {
+		t.Fatalf("messages = %#v, want no text fallback", sender.snapshot().messages)
+	}
+}
+
+func TestFeishuResponderCompactNoticeCreateFailureReturnsErr(t *testing.T) {
+	sender := &fakeSender{createTextErr: errors.New("create denied")}
+	resp := feishuResponder{sender: sender, chatID: "oc_chat"}
+
+	if _, err := resp.StartCompactNotice(context.Background(), core.CompactNotice{ModelName: "deepseek"}); err == nil {
+		t.Fatal("StartCompactNotice returned nil error, want create error")
+	}
+	if len(sender.snapshot().messages) != 0 {
+		t.Fatalf("messages = %#v, want no text fallback", sender.snapshot().messages)
 	}
 }
 

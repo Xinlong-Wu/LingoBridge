@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	unsupportedMessageText        = "暂不支持此类飞书消息，请发送文字。"
-	feishuProcessingReactionEmoji = "Typing"
-	feishuReactionClearDelay      = 1500 * time.Millisecond
+	unsupportedMessageText         = "暂不支持此类飞书消息，请发送文字。"
+	feishuProcessingReactionEmoji  = "Typing"
+	feishuCompactDoneReactionEmoji = "DONE"
+	feishuReactionClearDelay       = 1500 * time.Millisecond
 )
 
 type textProcessor interface {
@@ -55,6 +56,22 @@ func (r feishuResponder) StartTextStream(ctx context.Context) (core.TextStream, 
 		chatID: r.chatID,
 		now:    time.Now,
 	}, nil
+}
+
+func (r feishuResponder) StartCompactNotice(ctx context.Context, notice core.CompactNotice) (core.CompactNoticeHandle, error) {
+	messageID, err := r.sender.CreateText(ctx, r.chatID, core.CompactStartText())
+	if err != nil {
+		return core.CompactNoticeHandle{}, err
+	}
+	return core.CompactNoticeHandle{MessageID: messageID}, nil
+}
+
+func (r feishuResponder) FinishCompactNotice(ctx context.Context, handle core.CompactNoticeHandle, notice core.CompactNotice) error {
+	if handle.MessageID == "" {
+		return nil
+	}
+	_, err := r.sender.AddReaction(ctx, handle.MessageID, feishuCompactDoneReactionEmoji)
+	return err
 }
 
 func (b *bot) handleMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {

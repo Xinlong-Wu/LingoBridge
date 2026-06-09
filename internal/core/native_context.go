@@ -19,7 +19,7 @@ func providerContextForModel(conv *store.Conversation, modelName string) store.P
 	return conv.ProviderContexts[modelName]
 }
 
-func (b *Bot) prepareNativeContext(systemPrompt string, history []store.Message, newMsg store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, client llm.Client) ([]store.Message, store.ProviderContext, bool, error) {
+func (b *Bot) prepareNativeContext(systemPrompt string, history []store.Message, newMsg store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, client llm.Client, onStart func(compactedMessages, retainedMessages int)) ([]store.Message, store.ProviderContext, bool, error) {
 	compactor, ok := client.(llm.ContextCompactor)
 	thresholdTokens := compactThresholdTokens(compact)
 	if !ok || !automaticCompactAllowed(compact) || thresholdTokens <= 0 {
@@ -33,6 +33,9 @@ func (b *Bot) prepareNativeContext(systemPrompt string, history []store.Message,
 	}
 
 	cutoff := len(history) - nativeContextKeepRecentMessages
+	if onStart != nil {
+		onStart(cutoff, nativeContextKeepRecentMessages)
+	}
 	compactedContext, err := compactor.CompactContext(systemPrompt, history[:cutoff], providerContext, compact)
 	if err != nil {
 		if errors.Is(err, llm.ErrCompactionNotTriggered) {

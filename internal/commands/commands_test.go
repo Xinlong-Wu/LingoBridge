@@ -60,10 +60,6 @@ func (f *fakeSessionManager) ArchiveSession(userID, sessionName string) (*store.
 	}, nil
 }
 
-func (f *fakeSessionManager) ClearSession(userID string) (*store.Session, error) {
-	return &store.Session{ID: "cleared", UserID: userID, Name: "session-1", Current: true}, nil
-}
-
 func (f *fakeSessionManager) CurrentModel(userID string) (string, error) {
 	if f.currentModel != "" {
 		return f.currentModel, nil
@@ -114,19 +110,35 @@ func TestHandleHelp(t *testing.T) {
 	if !handled {
 		t.Fatal("Handle did not handle /help")
 	}
-	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/clear", "/model", "/compact"} {
+	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/model", "/compact"} {
 		if !strings.Contains(resp, want) {
 			t.Fatalf("response = %q, want %s", resp, want)
 		}
+	}
+	if strings.Contains(resp, "/clear") {
+		t.Fatalf("response = %q, want /clear hidden", resp)
 	}
 }
 
 func TestHelpTextIncludesDefaultCommands(t *testing.T) {
 	resp := HelpText(DefaultPolicy())
-	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/clear", "/model", "/compact"} {
+	for _, want := range []string{"/help", "/current", "/new", "/list", "/switch", "/rename", "/archive", "/model", "/compact"} {
 		if !strings.Contains(resp, want) {
 			t.Fatalf("response = %q, want %s", resp, want)
 		}
+	}
+	if strings.Contains(resp, "/clear") {
+		t.Fatalf("response = %q, want /clear hidden", resp)
+	}
+}
+
+func TestHandleClearIsNotRecognized(t *testing.T) {
+	resp, handled, err := Handle("/clear", "user", &fakeSessionManager{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if handled || resp != "" {
+		t.Fatalf("Handle /clear response=%q handled=%v, want unrecognized command", resp, handled)
 	}
 }
 

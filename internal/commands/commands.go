@@ -17,7 +17,6 @@ type SessionManager interface {
 	SwitchSession(userID, sessionName string) (*store.Session, error)
 	RenameCurrentSession(userID, newName string) (*store.Session, error)
 	ArchiveSession(userID, sessionName string) (*store.ArchiveResult, error)
-	ClearSession(userID string) (*store.Session, error)
 	CurrentModel(userID string) (string, error)
 	SetModel(userID, modelName string) error
 	DefaultModelName() string
@@ -42,7 +41,6 @@ var commandSpecs = []commandSpec{
 	{Name: "/switch", Help: "/switch <名称> - 切换会话"},
 	{Name: "/rename", Help: "/rename <名称> - 重命名当前会话"},
 	{Name: "/archive", Help: "/archive [名称] - 归档会话"},
-	{Name: "/clear", Help: "/clear - 清空当前会话并开始新会话"},
 	{Name: "/model", Help: "/model [名称] - 查看或切换模型"},
 	{Name: "/compact", Help: "/compact - 手动压缩当前会话上下文"},
 }
@@ -133,8 +131,6 @@ func HandleWithPolicy(text string, userID string, sm SessionManager, policy Poli
 		return handleRename(userID, args, sm)
 	case "/archive":
 		return handleArchive(userID, args, sm)
-	case "/clear":
-		return handleClear(userID, sm)
 	case "/model":
 		return handleModel(userID, args, sm)
 	default:
@@ -242,15 +238,6 @@ func handleArchive(userID string, args []string, sm SessionManager) (string, boo
 		return fmt.Sprintf("✅ 已归档会话：%s\n当前会话：%s", result.Archived.Name, result.Current.Name), true, nil
 	}
 	return fmt.Sprintf("✅ 已归档会话：%s", result.Archived.Name), true, nil
-}
-
-func handleClear(userID string, sm SessionManager) (string, bool, error) {
-	sess, err := sm.ClearSession(userID)
-	if err != nil {
-		return "", true, fmt.Errorf("clear session: %w", err)
-	}
-
-	return fmt.Sprintf("✅ 已清空当前会话，新会话：%s", sess.Name), true, nil
 }
 
 func handleModel(userID string, args []string, sm SessionManager) (string, bool, error) {

@@ -58,6 +58,13 @@ func (b *Bot) handleCompactCommand(ctx context.Context, msg InboundMessage, send
 
 	cutoff := len(conv.Messages) - nativeContextKeepRecentMessages
 	providerContext := providerContextForModel(conv, model.Name)
+	notice := CompactNotice{
+		ModelName:         model.Name,
+		Manual:            true,
+		CompactedMessages: cutoff,
+		RetainedMessages:  nativeContextKeepRecentMessages,
+	}
+	noticeHandle := startCompactNotice(ctx, sender, notice)
 	compactedContext, err := compactor.CompactContext(b.LLMConfig.SystemPrompt, conv.Messages[:cutoff], providerContext, compact)
 	if err != nil {
 		if errors.Is(err, llm.ErrCompactionNotTriggered) {
@@ -76,9 +83,10 @@ func (b *Bot) handleCompactCommand(ctx context.Context, msg InboundMessage, send
 	}
 	conv.ProviderContexts[model.Name] = compactedContext
 	conv.Messages = retainRecentMessages(conv.Messages, nativeContextKeepRecentMessages)
+	notice.RetainedMessages = len(conv.Messages)
 	if err := b.Sessions.SaveHistory(msg.UserKey, sess.ID, conv); err != nil {
 		coreLog.Warn(ctx, "save compacted history: %v", err)
 	}
 
-	return sender.Send(ctx, OutboundMessage{Text: fmt.Sprintf("✅ 已压缩当前会话上下文：模型 %s，压缩 %d 条历史，保留 %d 条最近消息。", model.Name, cutoff, len(conv.Messages))})
+	return finishCompactNotice(ctx, sender, noticeHandle, notice)
 }

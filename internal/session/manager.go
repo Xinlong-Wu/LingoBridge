@@ -114,20 +114,6 @@ func (m *Manager) ArchiveSession(userID, name string) (*store.ArchiveResult, err
 	return result, nil
 }
 
-// ClearSession archives the current session and creates a new one.
-func (m *Manager) ClearSession(userID string) (*store.Session, error) {
-	current, err := m.GetOrCreateCurrentSession(userID)
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := m.store.ArchiveSession(userID, current.Name); err != nil {
-		return nil, fmt.Errorf("archive session: %w", err)
-	}
-
-	return m.CreateSession(userID, "")
-}
-
 // CurrentModel returns the current model profile for a user, falling back to default.
 func (m *Manager) CurrentModel(userID string) (string, error) {
 	modelName, err := m.store.GetUserModelName(userID)

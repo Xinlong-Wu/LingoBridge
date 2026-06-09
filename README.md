@@ -128,7 +128,6 @@ Send these as WeChat or Feishu text messages to the bot:
 | `/switch <name>` | Switch current session |
 | `/rename <name>` | Rename current session |
 | `/archive [name]` | Archive a session |
-| `/clear` | Archive current session, start fresh |
 | `/model [name]` | Show or switch model profile |
 | `/compact` | Manually compact the current session context |
 
@@ -178,7 +177,9 @@ Image understanding currently requires an OpenAI-compatible model profile with
 Long text replies are automatically split into multiple WeChat messages before
 sending. Before sending WeChat text, the WeChat monitor applies its private
 markdown-to-WeChat filter to remove unsupported Markdown wrappers while keeping
-the readable content.
+the readable content. When provider-native context compaction starts, WeChat
+sends a progress text message; after compacted context is saved, it sends the
+compact success summary as another text message.
 
 ### Feishu
 
@@ -202,7 +203,10 @@ The built-in Feishu runtime enables this code-level streaming path explicitly.
 Custom integrations can enable it by setting `core.Bot.EnableTextStreaming` to
 `true` and making their sender implement the optional `core.TextStreamSender`
 interface. Senders that do not implement that optional interface automatically
-fall back to normal chunked text sends.
+fall back to normal chunked text sends. When provider-native context compaction
+starts, Feishu sends one progress rich text message; after compacted context is
+saved, LingoBridge marks that progress message with a `DONE` reaction instead
+of sending an extra success message.
 Extra Feishu events are registered from `platforms.feishu.events`. Each event
 item has `name`, `version`, and `run`; `run` may be one shell command string or
 a list of shell command strings. `version: "1.0"` events are registered with
@@ -273,7 +277,9 @@ native compact and the estimated request context exceeds
 `context_window * compact.threshold`, LingoBridge compacts older history,
 stores the returned provider-owned items under
 `provider_contexts.<modelProfile>`, and sends those items before later model
-input. `/compact` manually asks the current provider to compact the session:
+input. Successful compaction emits the platform-specific progress notice
+described in Message Handling. `/compact` manually asks the current provider to
+compact the session:
 OpenAI Responses profiles call the provider compact endpoint directly, while
 Anthropic profiles rely on the provider's native compaction trigger and may not
 emit compacted context below that threshold. If `compact.mode: false`,

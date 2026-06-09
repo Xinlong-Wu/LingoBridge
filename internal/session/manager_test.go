@@ -23,41 +23,6 @@ func newTestManager(t *testing.T) (*Manager, *store.Store) {
 	return NewManager(st), st
 }
 
-func TestClearSessionArchivesCurrentAndCreatesNew(t *testing.T) {
-	manager, _ := newTestManager(t)
-
-	first, err := manager.GetOrCreateCurrentSession("user")
-	if err != nil {
-		t.Fatalf("GetOrCreateCurrentSession returned error: %v", err)
-	}
-
-	next, err := manager.ClearSession("user")
-	if err != nil {
-		t.Fatalf("ClearSession returned error: %v", err)
-	}
-	if next.ID == first.ID {
-		t.Fatal("ClearSession returned the original session")
-	}
-
-	sessions, err := manager.ListSessions("user")
-	if err != nil {
-		t.Fatalf("ListSessions returned error: %v", err)
-	}
-
-	currentCount := 0
-	for _, sess := range sessions {
-		if sess.Current {
-			currentCount++
-			if sess.ID != next.ID {
-				t.Fatalf("current session = %s, want %s", sess.ID, next.ID)
-			}
-		}
-	}
-	if currentCount != 1 {
-		t.Fatalf("current session count = %d, want 1", currentCount)
-	}
-}
-
 func TestArchiveCurrentSessionSelectsFallback(t *testing.T) {
 	manager, _ := newTestManager(t)
 

@@ -179,10 +179,20 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 	historyForRequest := conv.Messages
 	providerContext := providerContextForModel(conv, modelName)
 	preCompacted := false
+	var compactNoticeHandle CompactNoticeHandle
+	var preCompactNotice CompactNotice
 	compactAllowed := automaticCompactAllowed(compact)
 	if compactAllowed {
 		var compactErr error
-		historyForRequest, providerContext, preCompacted, compactErr = b.prepareNativeContext(b.LLMConfig.SystemPrompt, historyForRequest, userMsg, providerContext, compact, llmClient)
+		historyForRequest, providerContext, preCompacted, compactErr = b.prepareNativeContext(b.LLMConfig.SystemPrompt, historyForRequest, userMsg, providerContext, compact, llmClient, func(compactedMessages, retainedMessages int) {
+			preCompactNotice = CompactNotice{
+				ModelName:         modelName,
+				Manual:            false,
+				CompactedMessages: compactedMessages,
+				RetainedMessages:  retainedMessages,
+			}
+			compactNoticeHandle = startCompactNotice(ctx, sender, preCompactNotice)
+		})
 		if compactErr != nil {
 			coreLog.Error(ctx, "compact context failed provider=%s model=%s: %v", provider, modelName, compactErr)
 			_ = sender.Send(ctx, OutboundMessage{Text: b.errorNotice(msg, compactErr)})
@@ -264,6 +274,10 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 
 	if err := b.Sessions.SaveHistory(msg.UserKey, sess.ID, conv); err != nil {
 		coreLog.Warn(ctx, "save history: %v", err)
+	} else if preCompacted {
+		if err := finishCompactNotice(ctx, sender, compactNoticeHandle, preCompactNotice); err != nil {
+			return err
+		}
 	}
 
 	if llmResponse.Text != "" {
