@@ -18,6 +18,7 @@ const richTextLogPreviewRunes = 512
 type textSender interface {
 	SendText(ctx context.Context, chatID, text string) error
 	CreateText(ctx context.Context, chatID, text string) (string, error)
+	CreateReplyText(ctx context.Context, replyToMessageID, text string) (string, error)
 	UpdateText(ctx context.Context, messageID, text string) error
 	AddReaction(ctx context.Context, messageID, emojiType string) (string, error)
 	DeleteReaction(ctx context.Context, messageID, reactionID string) error
@@ -47,6 +48,32 @@ func (s *sdkSender) SendText(ctx context.Context, chatID, text string) error {
 
 func (s *sdkSender) CreateText(ctx context.Context, chatID, text string) (string, error) {
 	return s.createText(ctx, chatID, text, true)
+}
+
+func (s *sdkSender) CreateReplyText(ctx context.Context, replyToMessageID, text string) (string, error) {
+	body, err := marshalRichTextContent(text)
+	if err != nil {
+		return "", fmt.Errorf("marshal feishu rich text content: %w", err)
+	}
+	req := larkim.NewReplyMessageReqBuilder().
+		MessageId(replyToMessageID).
+		Body(larkim.NewReplyMessageReqBodyBuilder().
+			MsgType(larkim.MsgTypePost).
+			Content(body).
+			ReplyInThread(false).
+			Build()).
+		Build()
+	resp, err := s.client.Im.Message.Reply(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("reply feishu message: %w", err)
+	}
+	if !resp.Success() {
+		return "", fmt.Errorf("reply feishu message code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	if resp.Data != nil && resp.Data.MessageId != nil && *resp.Data.MessageId != "" {
+		return *resp.Data.MessageId, nil
+	}
+	return "", fmt.Errorf("reply feishu message missing message_id")
 }
 
 func (s *sdkSender) createText(ctx context.Context, chatID, text string, requireMessageID bool) (string, error) {

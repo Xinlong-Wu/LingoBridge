@@ -12,14 +12,15 @@ const (
 )
 
 type feishuTextStream struct {
-	sender       textSender
-	chatID       string
-	messageID    string
-	lastUpdateAt time.Time
-	lastSentText string
-	editCount    int
-	editLimited  bool
-	now          func() time.Time
+	sender           textSender
+	chatID           string
+	replyToMessageID string
+	messageID        string
+	lastUpdateAt     time.Time
+	lastSentText     string
+	editCount        int
+	editLimited      bool
+	now              func() time.Time
 }
 
 func (s *feishuTextStream) Update(ctx context.Context, text string) error {
@@ -56,12 +57,12 @@ func (s *feishuTextStream) Finish(ctx context.Context, text string) error {
 		return nil
 	}
 	if s.editLimited || s.editCount >= feishuMaxMessageEdits {
-		return s.sender.SendText(ctx, s.chatID, text)
+		return s.sendNewText(ctx, text)
 	}
 	if err := s.update(ctx, text); err != nil {
 		if errors.Is(err, ErrFeishuMessageEditLimit) {
 			s.editLimited = true
-			return s.sender.SendText(ctx, s.chatID, text)
+			return s.sendNewText(ctx, text)
 		}
 		return err
 	}
@@ -69,7 +70,7 @@ func (s *feishuTextStream) Finish(ctx context.Context, text string) error {
 }
 
 func (s *feishuTextStream) create(ctx context.Context, text string) error {
-	messageID, err := s.sender.CreateText(ctx, s.chatID, text)
+	messageID, err := s.createNewText(ctx, text)
 	if err != nil {
 		return err
 	}
@@ -77,6 +78,21 @@ func (s *feishuTextStream) create(ctx context.Context, text string) error {
 	s.lastSentText = text
 	s.lastUpdateAt = s.nowTime()
 	return nil
+}
+
+func (s *feishuTextStream) createNewText(ctx context.Context, text string) (string, error) {
+	if s.replyToMessageID != "" {
+		return s.sender.CreateReplyText(ctx, s.replyToMessageID, text)
+	}
+	return s.sender.CreateText(ctx, s.chatID, text)
+}
+
+func (s *feishuTextStream) sendNewText(ctx context.Context, text string) error {
+	if s.replyToMessageID != "" {
+		_, err := s.sender.CreateReplyText(ctx, s.replyToMessageID, text)
+		return err
+	}
+	return s.sender.SendText(ctx, s.chatID, text)
 }
 
 func (s *feishuTextStream) update(ctx context.Context, text string) error {

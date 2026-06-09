@@ -32,13 +32,18 @@ type bot struct {
 }
 
 type feishuResponder struct {
-	sender    textSender
-	chatID    string
-	messageID string
+	sender           textSender
+	chatID           string
+	messageID        string
+	replyToMessageID string
 }
 
 func (r feishuResponder) Send(ctx context.Context, msg core.OutboundMessage) error {
 	if msg.Text != "" {
+		if r.replyToMessageID != "" {
+			_, err := r.sender.CreateReplyText(ctx, r.replyToMessageID, msg.Text)
+			return err
+		}
 		return r.sender.SendText(ctx, r.chatID, msg.Text)
 	}
 	if len(msg.Image.Data) > 0 || msg.Image.Filename != "" || msg.Image.LocalPath != "" {
@@ -53,18 +58,26 @@ func (r feishuResponder) StartTyping(ctx context.Context) func() {
 
 func (r feishuResponder) StartTextStream(ctx context.Context) (core.TextStream, error) {
 	return &feishuTextStream{
-		sender: r.sender,
-		chatID: r.chatID,
-		now:    time.Now,
+		sender:           r.sender,
+		chatID:           r.chatID,
+		replyToMessageID: r.replyToMessageID,
+		now:              time.Now,
 	}, nil
 }
 
 func (r feishuResponder) StartCompactNotice(ctx context.Context, notice core.CompactNotice) (core.CompactNoticeHandle, error) {
-	messageID, err := r.sender.CreateText(ctx, r.chatID, core.CompactStartText())
+	messageID, err := r.createText(ctx, core.CompactStartText())
 	if err != nil {
 		return core.CompactNoticeHandle{}, err
 	}
 	return core.CompactNoticeHandle{MessageID: messageID}, nil
+}
+
+func (r feishuResponder) createText(ctx context.Context, text string) (string, error) {
+	if r.replyToMessageID != "" {
+		return r.sender.CreateReplyText(ctx, r.replyToMessageID, text)
+	}
+	return r.sender.CreateText(ctx, r.chatID, text)
 }
 
 func (r feishuResponder) FinishCompactNotice(ctx context.Context, handle core.CompactNoticeHandle, notice core.CompactNotice) error {
@@ -123,7 +136,7 @@ func logReceivedMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) {
 
 func (b *bot) processMessage(in incomingMessage) {
 	ctx := b.processingContext()
-	resp := feishuResponder{sender: b.sender, chatID: in.ChatID, messageID: in.MessageID}
+	resp := feishuResponder{sender: b.sender, chatID: in.ChatID, messageID: in.MessageID, replyToMessageID: in.ReplyToMessageID}
 	if in.Unsupported {
 		if err := resp.Send(ctx, core.OutboundMessage{Text: unsupportedMessageText}); err != nil {
 			feishuLog.Warn(ctx, "send unsupported feishu message notice failed chat=%s: %v", in.ChatID, err)

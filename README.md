@@ -202,6 +202,8 @@ with `md`), using the core reply text without the WeChat markdown filter. Long
 Feishu replies are
 split into multiple streamed rich text
 messages as they are generated, and each message keeps its own edit budget.
+In group chats, bot responses quote the triggering Feishu message; in 1:1 chats,
+responses are still sent as normal messages.
 Stream previews slow down as the reply grows and are capped to stay within
 Feishu's per-message edit limit. The final update is prioritized; if Feishu
 still rejects it, LingoBridge sends the final answer as a new rich text message.

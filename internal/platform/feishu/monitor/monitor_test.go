@@ -64,6 +64,11 @@ type sentText struct {
 	text   string
 }
 
+type replyText struct {
+	messageID string
+	text      string
+}
+
 type updatedText struct {
 	messageID string
 	text      string
@@ -86,6 +91,7 @@ type fakeSender struct {
 	called            bool
 	messages          []sentText
 	streamCreates     []sentText
+	replyCreates      []replyText
 	streamUpdates     []updatedText
 	reactionAdds      []reactionAdd
 	reactionDeletes   []reactionDelete
@@ -129,6 +135,16 @@ func (f *fakeSender) CreateText(ctx context.Context, chatID, text string) (strin
 		return "", f.createTextErr
 	}
 	return "om_stream", nil
+}
+
+func (f *fakeSender) CreateReplyText(ctx context.Context, replyToMessageID, text string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.replyCreates = append(f.replyCreates, replyText{messageID: replyToMessageID, text: text})
+	if f.createTextErr != nil {
+		return "", f.createTextErr
+	}
+	return "om_reply", nil
 }
 
 func (f *fakeSender) UpdateText(ctx context.Context, messageID, text string) error {
@@ -204,6 +220,7 @@ func (f *fakeSender) snapshot() fakeSender {
 	defer f.mu.Unlock()
 	messages := append([]sentText(nil), f.messages...)
 	streamCreates := append([]sentText(nil), f.streamCreates...)
+	replyCreates := append([]replyText(nil), f.replyCreates...)
 	streamUpdates := append([]updatedText(nil), f.streamUpdates...)
 	reactionAdds := append([]reactionAdd(nil), f.reactionAdds...)
 	reactionDeletes := append([]reactionDelete(nil), f.reactionDeletes...)
@@ -213,6 +230,7 @@ func (f *fakeSender) snapshot() fakeSender {
 		called:          f.called,
 		messages:        messages,
 		streamCreates:   streamCreates,
+		replyCreates:    replyCreates,
 		streamUpdates:   streamUpdates,
 		reactionAdds:    reactionAdds,
 		reactionDeletes: reactionDeletes,
@@ -250,6 +268,24 @@ func waitForSentMessages(t *testing.T, sender *fakeSender, want int) fakeSender 
 		select {
 		case <-deadline:
 			t.Fatalf("sent messages = %d, want at least %d", len(snap.messages), want)
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitForReplyCreates(t *testing.T, sender *fakeSender, want int) fakeSender {
+	t.Helper()
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snap := sender.snapshot()
+		if len(snap.replyCreates) >= want {
+			return snap
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("reply creates = %d, want at least %d", len(snap.replyCreates), want)
 		case <-ticker.C:
 		}
 	}
@@ -317,7 +353,7 @@ func TestNormalizeP2PTextMessage(t *testing.T) {
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
-	if in.UserID != "feishu:ou_user" || in.ChatID != "oc_chat" || in.MessageID != "om_message" || in.Text != "hi" || in.Unsupported {
+	if in.UserID != "feishu:ou_user" || in.ChatID != "oc_chat" || in.MessageID != "om_message" || in.ReplyToMessageID != "" || in.Text != "hi" || in.Unsupported {
 		t.Fatalf("incoming = %#v", in)
 	}
 }
@@ -327,7 +363,7 @@ func TestNormalizeGroupMessageWithoutMentionMetadataUsesGroupKey(t *testing.T) {
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
-	if in.UserID != "feishu:group:oc_chat" || in.Text != "hi" {
+	if in.UserID != "feishu:group:oc_chat" || in.ReplyToMessageID != "om_message" || in.Text != "hi" {
 		t.Fatalf("incoming = %#v", in)
 	}
 }
@@ -496,6 +532,26 @@ func TestHandleUnsupportedMessageSendsNotice(t *testing.T) {
 	}
 }
 
+func TestHandleGroupUnsupportedMessageRepliesToOriginal(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender}
+
+	if err := b.handleMessage(context.Background(), feishuEvent("group", "image", `{}`, nil)); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+	senderSnap := waitForReplyCreates(t, sender, 1)
+	if processor.snapshot().called {
+		t.Fatal("processor was called for unsupported message")
+	}
+	if len(senderSnap.replyCreates) != 1 || senderSnap.replyCreates[0].messageID != "om_message" || senderSnap.replyCreates[0].text != unsupportedMessageText {
+		t.Fatalf("reply creates = %#v, want unsupported reply to om_message", senderSnap.replyCreates)
+	}
+	if len(senderSnap.messages) != 0 {
+		t.Fatalf("messages = %#v, want no plain sends", senderSnap.messages)
+	}
+}
+
 func TestHandleTextMessageUsesBridgeAndReplies(t *testing.T) {
 	processor := &fakeProcessor{}
 	sender := &fakeSender{}
@@ -518,6 +574,27 @@ func TestHandleTextMessageUsesBridgeAndReplies(t *testing.T) {
 	}
 	if len(reactionSnap.reactionDeletes) != 1 || reactionSnap.reactionDeletes[0].messageID != "om_message" || reactionSnap.reactionDeletes[0].reactionID != "reaction-1" {
 		t.Fatalf("reaction deletes = %#v, want reaction-1 delete on om_message", reactionSnap.reactionDeletes)
+	}
+}
+
+func TestHandleGroupTextMessageRepliesToOriginal(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender}
+
+	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"hi"}`, nil)); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+	processorSnap := waitForProcessorCalls(t, processor, 1)
+	senderSnap := waitForReplyCreates(t, sender, 1)
+	if !processorSnap.called || processorSnap.userID != "feishu:group:oc_chat" || processorSnap.text != "hi" {
+		t.Fatalf("processor = %#v", processorSnap)
+	}
+	if len(senderSnap.replyCreates) != 1 || senderSnap.replyCreates[0].messageID != "om_message" || senderSnap.replyCreates[0].text != "ok" {
+		t.Fatalf("reply creates = %#v, want ok reply to om_message", senderSnap.replyCreates)
+	}
+	if len(senderSnap.messages) != 0 {
+		t.Fatalf("messages = %#v, want no plain sends", senderSnap.messages)
 	}
 }
 
@@ -548,6 +625,33 @@ func TestFeishuResponderStreamsTextUpdatesOneMessage(t *testing.T) {
 	}
 	if len(snap.messages) != 0 {
 		t.Fatalf("messages = %#v, want no separate SendText calls", snap.messages)
+	}
+}
+
+func TestFeishuResponderStreamsGroupReplyThenUpdatesIt(t *testing.T) {
+	sender := &fakeSender{}
+	resp := feishuResponder{sender: sender, chatID: "oc_chat", replyToMessageID: "om_original"}
+
+	stream, err := resp.StartTextStream(context.Background())
+	if err != nil {
+		t.Fatalf("StartTextStream returned error: %v", err)
+	}
+	if err := stream.Update(context.Background(), "hello"); err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	if err := stream.Finish(context.Background(), "hello world"); err != nil {
+		t.Fatalf("Finish returned error: %v", err)
+	}
+
+	snap := sender.snapshot()
+	if len(snap.replyCreates) != 1 || snap.replyCreates[0].messageID != "om_original" || snap.replyCreates[0].text != "hello" {
+		t.Fatalf("reply creates = %#v, want initial reply", snap.replyCreates)
+	}
+	if len(snap.streamUpdates) != 1 || snap.streamUpdates[0].messageID != "om_reply" || snap.streamUpdates[0].text != "hello world" {
+		t.Fatalf("stream updates = %#v, want final update on reply", snap.streamUpdates)
+	}
+	if len(snap.streamCreates) != 0 || len(snap.messages) != 0 {
+		t.Fatalf("stream creates/messages = %#v/%#v, want none", snap.streamCreates, snap.messages)
 	}
 }
 
@@ -584,6 +688,37 @@ func TestFeishuResponderCompactNoticeCreatesMessageUpdatesSummaryAndMarksDone(t 
 	}
 	if len(snap.messages) != 0 {
 		t.Fatalf("messages = %#v, want no extra compact text message", snap.messages)
+	}
+}
+
+func TestFeishuResponderCompactNoticeRepliesToOriginalInGroup(t *testing.T) {
+	sender := &fakeSender{}
+	resp := feishuResponder{sender: sender, chatID: "oc_chat", messageID: "om_compact_command", replyToMessageID: "om_compact_command"}
+	notice := core.CompactNotice{ModelName: "deepseek", Manual: true, CompactedMessages: 2, RetainedMessages: 12}
+
+	handle, err := resp.StartCompactNotice(context.Background(), notice)
+	if err != nil {
+		t.Fatalf("StartCompactNotice returned error: %v", err)
+	}
+	if handle.MessageID != "om_reply" {
+		t.Fatalf("compact notice handle = %#v, want om_reply", handle)
+	}
+	if err := resp.FinishCompactNotice(context.Background(), handle, notice); err != nil {
+		t.Fatalf("FinishCompactNotice returned error: %v", err)
+	}
+
+	snap := sender.snapshot()
+	if len(snap.replyCreates) != 1 || snap.replyCreates[0].messageID != "om_compact_command" || snap.replyCreates[0].text != core.CompactStartText() {
+		t.Fatalf("reply creates = %#v, want compact progress reply", snap.replyCreates)
+	}
+	if len(snap.streamCreates) != 0 || len(snap.messages) != 0 {
+		t.Fatalf("stream creates/messages = %#v/%#v, want none", snap.streamCreates, snap.messages)
+	}
+	if len(snap.streamUpdates) != 1 || snap.streamUpdates[0].messageID != "om_reply" || snap.streamUpdates[0].text != core.CompactSuccessText(notice) {
+		t.Fatalf("stream updates = %#v, want compact success update on reply", snap.streamUpdates)
+	}
+	if len(snap.reactionAdds) != 1 || snap.reactionAdds[0].messageID != "om_compact_command" || snap.reactionAdds[0].emojiType != feishuCompactDoneReactionEmoji {
+		t.Fatalf("reaction adds = %#v, want DONE reaction on original /compact message", snap.reactionAdds)
 	}
 }
 
@@ -795,6 +930,30 @@ func TestHandleHelpMessagePassesCommandToBridge(t *testing.T) {
 	}
 	if len(sender.snapshot().reactionAdds) != 0 {
 		t.Fatal("reaction was added for slash command")
+	}
+}
+
+func TestHandleGroupHelpMessageRepliesToOriginal(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender}
+
+	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"/help"}`, nil)); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+	processorSnap := waitForProcessorCalls(t, processor, 1)
+	senderSnap := waitForReplyCreates(t, sender, 1)
+	if !processorSnap.called || processorSnap.userID != "feishu:group:oc_chat" || processorSnap.commandText != "/help" || processorSnap.text != "/help" {
+		t.Fatalf("processor = %#v", processorSnap)
+	}
+	if len(senderSnap.replyCreates) != 1 || senderSnap.replyCreates[0].messageID != "om_message" || senderSnap.replyCreates[0].text != "ok" {
+		t.Fatalf("reply creates = %#v, want slash reply to om_message", senderSnap.replyCreates)
+	}
+	if len(senderSnap.reactionAdds) != 0 {
+		t.Fatal("reaction was added for slash command")
+	}
+	if len(senderSnap.messages) != 0 {
+		t.Fatalf("messages = %#v, want no plain sends", senderSnap.messages)
 	}
 }
 

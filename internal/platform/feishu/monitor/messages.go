@@ -34,11 +34,12 @@ type postElement struct {
 }
 
 type incomingMessage struct {
-	UserID      string
-	ChatID      string
-	MessageID   string
-	Text        string
-	Unsupported bool
+	UserID           string
+	ChatID           string
+	MessageID        string
+	ReplyToMessageID string
+	Text             string
+	Unsupported      bool
 }
 
 func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1) (incomingMessage, bool) {
@@ -62,8 +63,10 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1) (inco
 	chatType := deref(msg.ChatType)
 
 	userKey := "feishu:" + openID
+	replyToMessageID := ""
 	if chatType != "p2p" {
 		userKey = "feishu:group:" + chatID
+		replyToMessageID = messageID
 	}
 
 	var text string
@@ -74,13 +77,13 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1) (inco
 	case "post":
 		text, err = extractPostMarkdown(deref(msg.Content), msg.Mentions)
 	default:
-		return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, Unsupported: true}, true
+		return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Unsupported: true}, true
 	}
 	if err != nil {
 		feishuLog.Warn(ctx, "parse %s message: %v", deref(msg.MessageType), err)
-		return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, Unsupported: true}, true
+		return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Unsupported: true}, true
 	}
-	return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, Text: text}, true
+	return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Text: text}, true
 }
 
 func extractText(raw string, mentions []*larkim.MentionEvent) (string, error) {

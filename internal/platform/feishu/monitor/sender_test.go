@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -157,6 +158,112 @@ func TestSDKSenderCreatesTextAndReturnsMessageID(t *testing.T) {
 	}
 	if messageRequest.ReceiveID != "oc_chat" || messageRequest.MsgType != "post" {
 		t.Fatalf("request = %#v, want post to oc_chat", messageRequest)
+	}
+}
+
+func TestSDKSenderCreatesReplyTextAndReturnsMessageID(t *testing.T) {
+	var replyRequest struct {
+		MsgType       string `json:"msg_type"`
+		Content       string `json:"content"`
+		ReplyInThread bool   `json:"reply_in_thread"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/v3/token":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "ok",
+				"tenant_access_token": "tenant-token",
+				"expire":              7200,
+			})
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "ok",
+				"tenant_access_token": "tenant-token",
+				"expire":              7200,
+			})
+		case "/open-apis/im/v1/messages/om_original/reply":
+			if r.Method != http.MethodPost {
+				t.Fatalf("method = %s, want POST", r.Method)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&replyRequest); err != nil {
+				t.Fatalf("decode reply request: %v", err)
+			}
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{"message_id": "om_reply"},
+			})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := lark.NewClient("cli_xxx", "secret",
+		lark.WithOpenBaseUrl(server.URL),
+		lark.WithOAuthBaseUrl(server.URL),
+		lark.WithHttpClient(server.Client()),
+	)
+	sender := &sdkSender{client: client}
+	messageID, err := sender.CreateReplyText(t.Context(), "om_original", "hello\nworld")
+	if err != nil {
+		t.Fatalf("CreateReplyText returned error: %v", err)
+	}
+	if messageID != "om_reply" {
+		t.Fatalf("messageID = %q, want om_reply", messageID)
+	}
+	if replyRequest.MsgType != "post" {
+		t.Fatalf("msg_type = %q, want post", replyRequest.MsgType)
+	}
+	if replyRequest.ReplyInThread {
+		t.Fatal("reply_in_thread = true, want false")
+	}
+	var content richTextContent
+	if err := json.Unmarshal([]byte(replyRequest.Content), &content); err != nil {
+		t.Fatalf("unmarshal reply content: %v", err)
+	}
+	assertMarkdownContent(t, content, "hello\nworld")
+}
+
+func TestSDKSenderCreateReplyTextRequiresMessageID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/v3/token":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "ok",
+				"tenant_access_token": "tenant-token",
+				"expire":              7200,
+			})
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "ok",
+				"tenant_access_token": "tenant-token",
+				"expire":              7200,
+			})
+		case "/open-apis/im/v1/messages/om_original/reply":
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"data": map[string]any{},
+			})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := lark.NewClient("cli_xxx", "secret",
+		lark.WithOpenBaseUrl(server.URL),
+		lark.WithOAuthBaseUrl(server.URL),
+		lark.WithHttpClient(server.Client()),
+	)
+	sender := &sdkSender{client: client}
+	if _, err := sender.CreateReplyText(t.Context(), "om_original", "hello"); err == nil || !strings.Contains(err.Error(), "missing message_id") {
+		t.Fatalf("CreateReplyText error = %v, want missing message_id", err)
 	}
 }
 
