@@ -187,15 +187,19 @@ compact success summary as another text message.
 
 ### Feishu
 
-Feishu support uses a self-built app long connection. In 1:1 chats, all text
-messages are processed. In group chats, Feishu delivers messages that mention
-the bot, and the bot mention token is removed before sending text to the LLM
-when Feishu includes mention metadata.
+Feishu support uses a self-built app long connection. In 1:1 chats, text and
+rich text messages are processed. In group chats, Feishu delivers messages that
+mention the bot, and the bot mention token is removed before sending text to
+the LLM when Feishu includes mention metadata. Incoming Feishu rich text
+(`post`) messages are converted to Markdown before they are sent to the LLM;
+embedded rich text images, media, files, and emoji are represented with text
+placeholders rather than downloaded.
 LLM text replies are streamed by updating one Feishu rich text message in
 place. In-chat command replies, event command output, unsupported-message
 notices, and generated-image notices are still sent as normal one-shot
-messages. Feishu outbound text is sent as rich text markdown content, using the
-core reply text without the WeChat markdown filter. Long Feishu replies are
+messages. Feishu outbound text is sent as rich text markdown content (`post`
+with `md`), using the core reply text without the WeChat markdown filter. Long
+Feishu replies are
 split into multiple streamed rich text
 messages as they are generated, and each message keeps its own edit budget.
 Stream previews slow down as the reply grows and are capped to stay within

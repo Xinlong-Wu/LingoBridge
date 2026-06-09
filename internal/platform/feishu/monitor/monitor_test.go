@@ -363,6 +363,92 @@ func TestNormalizeGroupMessagesShareChatUserKey(t *testing.T) {
 	}
 }
 
+func TestNormalizePostMessageConvertsTitleAndParagraphsToMarkdown(t *testing.T) {
+	content := `{
+		"title":"Bug report",
+		"content":[
+			[{"tag":"text","text":"Summary","style":["bold"]}],
+			[{"tag":"text","text":"Body line"}],
+			[],
+			[{"tag":"text","text":"Tail"}]
+		]
+	}`
+
+	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "post", content, nil))
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	want := "# Bug report\n\n**Summary**\nBody line\n\nTail"
+	if in.UserID != "feishu:ou_user" || in.Text != want || in.Unsupported {
+		t.Fatalf("incoming = %#v, want text %q", in, want)
+	}
+}
+
+func TestNormalizePostMessageConvertsRichElementsToMarkdown(t *testing.T) {
+	content := `{
+		"content":[
+			[
+				{"tag":"text","text":"bold","style":["bold"]},
+				{"tag":"text","text":" "},
+				{"tag":"text","text":"italic","style":["italic"]},
+				{"tag":"text","text":" "},
+				{"tag":"text","text":"strike","style":["lineThrough"]},
+				{"tag":"text","text":" "},
+				{"tag":"text","text":"under","style":["underline"]},
+				{"tag":"text","text":" "},
+				{"tag":"a","text":"site","href":"https://example.com"}
+			],
+			[{"tag":"hr"}],
+			[{"tag":"code_block","language":"go","content":"fmt.Println(\"hi\")"}],
+			[{"tag":"img"}],
+			[{"tag":"media"}],
+			[{"tag":"file"}],
+			[{"tag":"emotion","emoji_type":"OK"}],
+			[{"tag":"widget"}]
+		]
+	}`
+
+	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "post", content, nil))
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	want := "**bold** *italic* ~~strike~~ <u>under</u> [site](https://example.com)\n---\n```go\nfmt.Println(\"hi\")\n```\n[图片]\n[视频]\n[文件]\n[表情:OK]\n[富文本元素:widget]"
+	if in.Text != want || in.Unsupported {
+		t.Fatalf("incoming = %#v, want text %q", in, want)
+	}
+}
+
+func TestNormalizePostMessageHandlesMentions(t *testing.T) {
+	mentions := []*larkim.MentionEvent{
+		larkim.NewMentionEventBuilder().Key("@_bot_1").MentionedType("app").Build(),
+	}
+	content := `{
+		"content":[[
+			{"tag":"text","text":"@_bot_1 hello "},
+			{"tag":"at","user_name":"Alice"},
+			{"tag":"at","user_name":"LingoBridge","mentioned_type":"app"}
+		]]
+	}`
+
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "post", content, mentions))
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if in.UserID != "feishu:group:oc_chat" || in.Text != "hello @Alice" || in.Unsupported {
+		t.Fatalf("incoming = %#v", in)
+	}
+}
+
+func TestNormalizeMalformedPostMarksUnsupported(t *testing.T) {
+	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "post", `{`, nil))
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if !in.Unsupported || in.Text != "" {
+		t.Fatalf("incoming = %#v, want unsupported post", in)
+	}
+}
+
 func TestHandleMessageLogsReceivedMetadata(t *testing.T) {
 	buf := captureMonitorLogs(t)
 	logging.SetLevel(logging.Info)
