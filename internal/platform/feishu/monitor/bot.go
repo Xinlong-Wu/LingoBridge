@@ -25,6 +25,7 @@ type textProcessor interface {
 type bot struct {
 	handler       textProcessor
 	sender        textSender
+	botOpenID     string
 	eventCommands map[string][]string
 	deduper       *eventDeduper
 	runCtx        context.Context
@@ -96,7 +97,7 @@ func (r feishuResponder) FinishCompactNotice(ctx context.Context, handle core.Co
 
 func (b *bot) handleMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	logReceivedMessage(ctx, event)
-	in, ok := normalizeEvent(ctx, event)
+	in, ok := normalizeEvent(ctx, event, b.botOpenID)
 	if !ok {
 		return nil
 	}

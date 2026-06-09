@@ -189,8 +189,10 @@ compact success summary as another text message.
 
 Feishu support uses a self-built app long connection. In 1:1 chats, text and
 rich text messages are processed. In group chats, Feishu delivers messages that
-mention the bot, and the bot mention token is removed before sending text to
-the LLM when Feishu includes mention metadata. Incoming Feishu rich text
+mention the bot. On startup, LingoBridge resolves the current Feishu bot
+`open_id`; if that lookup fails, the Feishu account does not start. Incoming
+group messages remove only mention tokens that target that bot `open_id`, so
+mentions of other users or other bots are preserved. Incoming Feishu rich text
 (`post`) messages are converted to Markdown before they are sent to the LLM;
 embedded rich text images, media, files, and emoji are represented with text
 placeholders rather than downloaded.

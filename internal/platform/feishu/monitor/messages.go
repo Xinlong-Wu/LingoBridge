@@ -23,6 +23,7 @@ type postElement struct {
 	Href          string          `json:"href"`
 	Style         []string        `json:"style"`
 	UserID        string          `json:"user_id"`
+	OpenID        string          `json:"open_id"`
 	UserName      string          `json:"user_name"`
 	Name          string          `json:"name"`
 	Key           string          `json:"key"`
@@ -42,7 +43,7 @@ type incomingMessage struct {
 	Unsupported      bool
 }
 
-func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1) (incomingMessage, bool) {
+func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1, botOpenID string) (incomingMessage, bool) {
 	if event == nil || event.Event == nil || event.Event.Sender == nil || event.Event.Message == nil {
 		return incomingMessage{}, false
 	}
@@ -73,9 +74,9 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1) (inco
 	var err error
 	switch deref(msg.MessageType) {
 	case "text":
-		text, err = extractText(deref(msg.Content), msg.Mentions)
+		text, err = extractText(deref(msg.Content), msg.Mentions, botOpenID)
 	case "post":
-		text, err = extractPostMarkdown(deref(msg.Content), msg.Mentions)
+		text, err = extractPostMarkdown(deref(msg.Content), msg.Mentions, botOpenID)
 	default:
 		return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Unsupported: true}, true
 	}
@@ -86,21 +87,21 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1) (inco
 	return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Text: text}, true
 }
 
-func extractText(raw string, mentions []*larkim.MentionEvent) (string, error) {
+func extractText(raw string, mentions []*larkim.MentionEvent, botOpenID string) (string, error) {
 	var content textContent
 	if err := json.Unmarshal([]byte(raw), &content); err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(stripAppMentionKeys(content.Text, appMentionKeys(mentions))), nil
+	return strings.TrimSpace(stripBotMentionKeys(content.Text, botMentionKeys(mentions, botOpenID))), nil
 }
 
-func extractPostMarkdown(raw string, mentions []*larkim.MentionEvent) (string, error) {
+func extractPostMarkdown(raw string, mentions []*larkim.MentionEvent, botOpenID string) (string, error) {
 	var content postContent
 	if err := json.Unmarshal([]byte(raw), &content); err != nil {
 		return "", err
 	}
 
-	appKeys := appMentionKeys(mentions)
+	botKeys := botMentionKeys(mentions, botOpenID)
 	lines := []string{}
 	if title := strings.TrimSpace(content.Title); title != "" {
 		lines = append(lines, "# "+title, "")
@@ -108,17 +109,21 @@ func extractPostMarkdown(raw string, mentions []*larkim.MentionEvent) (string, e
 	for _, row := range content.Content {
 		var line strings.Builder
 		for _, element := range row {
-			line.WriteString(renderPostElement(element, appKeys))
+			line.WriteString(renderPostElement(element, botKeys, botOpenID))
 		}
 		lines = append(lines, line.String())
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n")), nil
 }
 
-func appMentionKeys(mentions []*larkim.MentionEvent) map[string]bool {
+func botMentionKeys(mentions []*larkim.MentionEvent, botOpenID string) map[string]bool {
 	keys := map[string]bool{}
+	botOpenID = strings.TrimSpace(botOpenID)
+	if botOpenID == "" {
+		return keys
+	}
 	for _, mention := range mentions {
-		if deref(mention.MentionedType) == "app" {
+		if mentionBotOpenID(mention) == botOpenID {
 			if key := deref(mention.Key); key != "" {
 				keys[key] = true
 			}
@@ -127,19 +132,26 @@ func appMentionKeys(mentions []*larkim.MentionEvent) map[string]bool {
 	return keys
 }
 
-func stripAppMentionKeys(text string, appKeys map[string]bool) string {
-	for key := range appKeys {
+func mentionBotOpenID(mention *larkim.MentionEvent) string {
+	if mention == nil {
+		return ""
+	}
+	return userOpenID(mention.Id)
+}
+
+func stripBotMentionKeys(text string, botKeys map[string]bool) string {
+	for key := range botKeys {
 		text = strings.ReplaceAll(text, key, "")
 	}
 	return text
 }
 
-func renderPostElement(element postElement, appKeys map[string]bool) string {
+func renderPostElement(element postElement, botKeys map[string]bool, botOpenID string) string {
 	switch tag := strings.TrimSpace(element.Tag); tag {
 	case "", "text":
-		return applyPostStyles(stripAppMentionKeys(element.Text, appKeys), element.Style)
+		return applyPostStyles(stripBotMentionKeys(element.Text, botKeys), element.Style)
 	case "a":
-		text := strings.TrimSpace(stripAppMentionKeys(element.Text, appKeys))
+		text := strings.TrimSpace(stripBotMentionKeys(element.Text, botKeys))
 		href := strings.TrimSpace(element.Href)
 		if text == "" {
 			text = href
@@ -149,10 +161,10 @@ func renderPostElement(element postElement, appKeys map[string]bool) string {
 		}
 		return applyPostStyles("["+text+"]("+href+")", element.Style)
 	case "at":
-		if isAppPostAt(element, appKeys) {
+		if isBotPostAt(element, botKeys, botOpenID) {
 			return ""
 		}
-		name := firstNonEmpty(element.Name, element.UserName, element.Text, element.Key, element.UserID)
+		name := firstNonEmpty(element.Name, element.UserName, element.Text, element.Key, element.UserID, element.OpenID)
 		if name == "" {
 			return ""
 		}
@@ -176,17 +188,17 @@ func renderPostElement(element postElement, appKeys map[string]bool) string {
 	case "code_block":
 		return renderPostCodeBlock(element)
 	case "md":
-		return stripAppMentionKeys(element.Text, appKeys)
+		return stripBotMentionKeys(element.Text, botKeys)
 	default:
 		return "[富文本元素:" + tag + "]"
 	}
 }
 
-func isAppPostAt(element postElement, appKeys map[string]bool) bool {
-	if element.MentionedType == "app" {
+func isBotPostAt(element postElement, botKeys map[string]bool, botOpenID string) bool {
+	if strings.TrimSpace(botOpenID) != "" && strings.TrimSpace(element.OpenID) == strings.TrimSpace(botOpenID) {
 		return true
 	}
-	return appKeys[element.Key] || appKeys[element.Text]
+	return botKeys[element.Key] || botKeys[element.Text]
 }
 
 func renderPostCodeBlock(element postElement) string {

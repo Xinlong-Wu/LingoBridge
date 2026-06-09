@@ -2,7 +2,9 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -66,9 +68,14 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 	sdkLogLevel := feishuSDKLogLevel(p.level)
 	sdkLog := newSDKLevelLogger(sdkLogLevel, feishuSDKLog)
 	restClient := newRESTClient(creds, baseURL, sdkLogLevel, sdkLog)
+	botOpenID, err := fetchBotOpenID(ctx, restClient)
+	if err != nil {
+		return fmt.Errorf("resolve feishu bot identity for account %s: %w", acc.Name, err)
+	}
 	b := &bot{
 		handler:       handler,
 		sender:        &sdkSender{client: restClient},
+		botOpenID:     botOpenID,
 		eventCommands: map[string][]string{},
 		deduper:       newEventDeduper(defaultFeishuDedupeTTL),
 		runCtx:        ctx,
@@ -125,8 +132,45 @@ func newRESTClient(creds feishu.Credentials, baseURL string, level larkcore.LogL
 	}
 	if baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/"); baseURL != "" {
 		opts = append(opts, lark.WithOpenBaseUrl(baseURL))
+		opts = append(opts, lark.WithOAuthBaseUrl(baseURL))
 	}
 	return lark.NewClient(creds.AppID, creds.AppSecret, opts...)
+}
+
+type botInfoClient interface {
+	Get(ctx context.Context, httpPath string, body interface{}, accessTokenType larkcore.AccessTokenType, options ...larkcore.RequestOptionFunc) (*larkcore.ApiResp, error)
+}
+
+func fetchBotOpenID(ctx context.Context, client botInfoClient) (string, error) {
+	resp, err := client.Get(ctx, "/open-apis/bot/v3/info", nil, larkcore.AccessTokenTypeTenant)
+	if err != nil {
+		return "", fmt.Errorf("get bot info: %w", err)
+	}
+	if resp == nil {
+		return "", fmt.Errorf("get bot info: empty response")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("get bot info: status=%d", resp.StatusCode)
+	}
+
+	var body struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Bot  struct {
+			OpenID string `json:"open_id"`
+		} `json:"bot"`
+	}
+	if err := json.Unmarshal(resp.RawBody, &body); err != nil {
+		return "", fmt.Errorf("parse bot info: %w", err)
+	}
+	if body.Code != 0 {
+		return "", fmt.Errorf("get bot info: code=%d msg=%s", body.Code, body.Msg)
+	}
+	openID := strings.TrimSpace(body.Bot.OpenID)
+	if openID == "" {
+		return "", fmt.Errorf("get bot info: missing bot.open_id")
+	}
+	return openID, nil
 }
 
 type sdkLevelLogger struct {

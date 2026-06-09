@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -15,11 +17,14 @@ import (
 	"lingobridge/internal/platform/feishu"
 	"lingobridge/internal/store"
 
+	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
+
+const testBotOpenID = "ou_bot"
 
 type fakeProcessor struct {
 	mu          sync.Mutex
@@ -349,7 +354,7 @@ func captureMonitorLogs(t *testing.T) *bytes.Buffer {
 }
 
 func TestNormalizeP2PTextMessage(t *testing.T) {
-	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "text", `{"text":"hi"}`, nil))
+	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "text", `{"text":"hi"}`, nil), testBotOpenID)
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
@@ -359,7 +364,7 @@ func TestNormalizeP2PTextMessage(t *testing.T) {
 }
 
 func TestNormalizeGroupMessageWithoutMentionMetadataUsesGroupKey(t *testing.T) {
-	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"hi"}`, nil))
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"hi"}`, nil), testBotOpenID)
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
@@ -370,10 +375,10 @@ func TestNormalizeGroupMessageWithoutMentionMetadataUsesGroupKey(t *testing.T) {
 
 func TestNormalizeGroupMentionStripsMentionKey(t *testing.T) {
 	mentions := []*larkim.MentionEvent{
-		larkim.NewMentionEventBuilder().Key("@_bot_1").MentionedType("app").Build(),
-		larkim.NewMentionEventBuilder().Key("@_user_1").MentionedType("user").Build(),
+		feishuMention("@_bot_1", "bot", testBotOpenID),
+		feishuMention("@_user_1", "user", "ou_alice"),
 	}
-	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"@_bot_1 hello @_user_1"}`, mentions))
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"@_bot_1 hello @_user_1"}`, mentions), testBotOpenID)
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
@@ -382,20 +387,36 @@ func TestNormalizeGroupMentionStripsMentionKey(t *testing.T) {
 	}
 }
 
+func TestNormalizeGroupMentionKeepsOtherBotMentionKey(t *testing.T) {
+	mentions := []*larkim.MentionEvent{
+		feishuMention("@_bot_1", "bot", "ou_other_bot"),
+	}
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"@_bot_1 /help"}`, mentions), testBotOpenID)
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if in.Text != "@_bot_1 /help" {
+		t.Fatalf("incoming = %#v", in)
+	}
+}
+
 func TestNormalizeGroupMessagesShareChatUserKey(t *testing.T) {
 	mentions := []*larkim.MentionEvent{
-		larkim.NewMentionEventBuilder().Key("@_bot_1").MentionedType("app").Build(),
+		feishuMention("@_bot_1", "app", testBotOpenID),
 	}
-	first, ok := normalizeEvent(context.Background(), feishuEventWithSender("group", "text", `{"text":"@_bot_1 first"}`, mentions, "ou_user_one"))
+	first, ok := normalizeEvent(context.Background(), feishuEventWithSender("group", "text", `{"text":"@_bot_1 first"}`, mentions, "ou_user_one"), testBotOpenID)
 	if !ok {
 		t.Fatal("first normalizeEvent returned ok=false")
 	}
-	second, ok := normalizeEvent(context.Background(), feishuEventWithSender("group", "text", `{"text":"@_bot_1 second"}`, mentions, "ou_user_two"))
+	second, ok := normalizeEvent(context.Background(), feishuEventWithSender("group", "text", `{"text":"@_bot_1 second"}`, mentions, "ou_user_two"), testBotOpenID)
 	if !ok {
 		t.Fatal("second normalizeEvent returned ok=false")
 	}
 	if first.UserID != "feishu:group:oc_chat" || second.UserID != "feishu:group:oc_chat" {
 		t.Fatalf("group user keys = %q/%q, want shared chat key", first.UserID, second.UserID)
+	}
+	if first.Text != "first" || second.Text != "second" {
+		t.Fatalf("group texts = %q/%q, want bot app mention stripped", first.Text, second.Text)
 	}
 }
 
@@ -410,7 +431,7 @@ func TestNormalizePostMessageConvertsTitleAndParagraphsToMarkdown(t *testing.T) 
 		]
 	}`
 
-	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "post", content, nil))
+	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "post", content, nil), testBotOpenID)
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
@@ -444,7 +465,7 @@ func TestNormalizePostMessageConvertsRichElementsToMarkdown(t *testing.T) {
 		]
 	}`
 
-	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "post", content, nil))
+	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "post", content, nil), testBotOpenID)
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
@@ -456,17 +477,17 @@ func TestNormalizePostMessageConvertsRichElementsToMarkdown(t *testing.T) {
 
 func TestNormalizePostMessageHandlesMentions(t *testing.T) {
 	mentions := []*larkim.MentionEvent{
-		larkim.NewMentionEventBuilder().Key("@_bot_1").MentionedType("app").Build(),
+		feishuMention("@_bot_1", "app", testBotOpenID),
 	}
 	content := `{
 		"content":[[
 			{"tag":"text","text":"@_bot_1 hello "},
 			{"tag":"at","user_name":"Alice"},
-			{"tag":"at","user_name":"LingoBridge","mentioned_type":"app"}
+			{"tag":"at","user_name":"LingoBridge","mentioned_type":"bot","open_id":"ou_bot"}
 		]]
 	}`
 
-	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "post", content, mentions))
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "post", content, mentions), testBotOpenID)
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
@@ -475,8 +496,24 @@ func TestNormalizePostMessageHandlesMentions(t *testing.T) {
 	}
 }
 
+func TestNormalizePostMessageKeepsOtherBotMention(t *testing.T) {
+	content := `{
+		"content":[[
+			{"tag":"at","user_name":"OtherBot","mentioned_type":"bot","open_id":"ou_other_bot"}
+		]]
+	}`
+
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "post", content, nil), testBotOpenID)
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if in.Text != "@OtherBot" || in.Unsupported {
+		t.Fatalf("incoming = %#v", in)
+	}
+}
+
 func TestNormalizeMalformedPostMarksUnsupported(t *testing.T) {
-	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "post", `{`, nil))
+	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "post", `{`, nil), testBotOpenID)
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
@@ -1308,6 +1345,146 @@ func TestRunFeishuEventCommandsSkipsStdoutWithoutChatID(t *testing.T) {
 	}
 }
 
+func TestFetchBotOpenID(t *testing.T) {
+	var sawBotInfo bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/v3/token", "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "ok",
+				"tenant_access_token": "tenant-token",
+				"expire":              7200,
+			})
+		case "/open-apis/bot/v3/info":
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want GET", r.Method)
+			}
+			sawBotInfo = true
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"bot":  map[string]any{"open_id": testBotOpenID},
+			})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := lark.NewClient("cli_xxx", "secret",
+		lark.WithOpenBaseUrl(server.URL),
+		lark.WithOAuthBaseUrl(server.URL),
+		lark.WithHttpClient(server.Client()),
+	)
+	openID, err := fetchBotOpenID(context.Background(), client)
+	if err != nil {
+		t.Fatalf("fetchBotOpenID returned error: %v", err)
+	}
+	if !sawBotInfo || openID != testBotOpenID {
+		t.Fatalf("openID = %q sawBotInfo=%v", openID, sawBotInfo)
+	}
+}
+
+func TestFetchBotOpenIDRejectsInvalidResponses(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		body    map[string]any
+		wantErr string
+	}{
+		{
+			name:    "http status",
+			status:  http.StatusInternalServerError,
+			body:    map[string]any{"code": 0, "msg": "ok"},
+			wantErr: "status=500",
+		},
+		{
+			name:    "nonzero code",
+			status:  http.StatusOK,
+			body:    map[string]any{"code": 999, "msg": "nope"},
+			wantErr: "code=999",
+		},
+		{
+			name:    "missing open id",
+			status:  http.StatusOK,
+			body:    map[string]any{"code": 0, "msg": "ok", "bot": map[string]any{}},
+			wantErr: "missing bot.open_id",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/oauth/v3/token", "/open-apis/auth/v3/tenant_access_token/internal":
+					writeJSON(t, w, map[string]any{
+						"code":                0,
+						"msg":                 "ok",
+						"tenant_access_token": "tenant-token",
+						"expire":              7200,
+					})
+				case "/open-apis/bot/v3/info":
+					w.WriteHeader(tc.status)
+					writeJSON(t, w, tc.body)
+				default:
+					t.Fatalf("unexpected path: %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			client := lark.NewClient("cli_xxx", "secret",
+				lark.WithOpenBaseUrl(server.URL),
+				lark.WithOAuthBaseUrl(server.URL),
+				lark.WithHttpClient(server.Client()),
+			)
+			_, err := fetchBotOpenID(context.Background(), client)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("fetchBotOpenID error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestPlatformRunFailsWhenBotOpenIDMissing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/v3/token", "/open-apis/auth/v3/tenant_access_token/internal":
+			writeJSON(t, w, map[string]any{
+				"code":                0,
+				"msg":                 "ok",
+				"tenant_access_token": "tenant-token",
+				"expire":              7200,
+			})
+		case "/open-apis/bot/v3/info":
+			writeJSON(t, w, map[string]any{
+				"code": 0,
+				"msg":  "ok",
+				"bot":  map[string]any{},
+			})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	acc := store.Account{
+		ID:              "feishu:cli_xxx",
+		Name:            "fsbot",
+		Platform:        store.PlatformFeishu,
+		CredentialsJSON: `{}`,
+	}
+
+	err := NewPlatform(acc, feishu.Config{
+		Accounts: map[string]feishu.AccountConfig{
+			"fsbot": {AppID: "cli_xxx", AppSecret: "secret", BaseURL: server.URL},
+		},
+	}, logging.Info).Run(context.Background(), &fakeProcessor{})
+	if err == nil || !strings.Contains(err.Error(), "resolve feishu bot identity") || !strings.Contains(err.Error(), "missing bot.open_id") {
+		t.Fatalf("Run error = %v, want bot identity error", err)
+	}
+}
+
 func TestPlatformRunRequiresAccountCredentials(t *testing.T) {
 	acc := store.Account{
 		ID:              "feishu:cli_xxx",
@@ -1422,6 +1599,16 @@ func (b *blockingClient) Close() {
 
 func feishuEvent(chatType, messageType, content string, mentions []*larkim.MentionEvent) *larkim.P2MessageReceiveV1 {
 	return feishuEventWithIDs(chatType, messageType, content, mentions, "om_message", "event_message")
+}
+
+func feishuMention(key, mentionedType, openID string) *larkim.MentionEvent {
+	builder := larkim.NewMentionEventBuilder().
+		Key(key).
+		MentionedType(mentionedType)
+	if openID != "" {
+		builder.Id(larkim.NewUserIdBuilder().OpenId(openID).Build())
+	}
+	return builder.Build()
 }
 
 func feishuEventWithIDs(chatType, messageType, content string, mentions []*larkim.MentionEvent, messageID, eventID string) *larkim.P2MessageReceiveV1 {
