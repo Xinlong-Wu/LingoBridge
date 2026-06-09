@@ -209,8 +209,9 @@ Custom integrations can enable it by setting `core.Bot.EnableTextStreaming` to
 interface. Senders that do not implement that optional interface automatically
 fall back to normal chunked text sends. When provider-native context compaction
 starts, Feishu sends one progress rich text message; after compacted context is
-saved, LingoBridge marks that progress message with a `DONE` reaction instead
-of sending an extra success message.
+saved, LingoBridge updates that progress message to the compact success summary
+and marks the original triggering message with a `DONE` reaction instead of
+sending an extra success message.
 Extra Feishu events are registered from `platforms.feishu.events`. Each event
 item has `name`, `version`, and `run`; `run` may be one shell command string or
 a list of shell command strings. `version: "1.0"` events are registered with

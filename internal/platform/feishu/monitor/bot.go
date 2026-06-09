@@ -32,8 +32,9 @@ type bot struct {
 }
 
 type feishuResponder struct {
-	sender textSender
-	chatID string
+	sender    textSender
+	chatID    string
+	messageID string
 }
 
 func (r feishuResponder) Send(ctx context.Context, msg core.OutboundMessage) error {
@@ -70,7 +71,13 @@ func (r feishuResponder) FinishCompactNotice(ctx context.Context, handle core.Co
 	if handle.MessageID == "" {
 		return nil
 	}
-	_, err := r.sender.AddReaction(ctx, handle.MessageID, feishuCompactDoneReactionEmoji)
+	if err := r.sender.UpdateText(ctx, handle.MessageID, core.CompactSuccessText(notice)); err != nil {
+		return err
+	}
+	if r.messageID == "" {
+		return nil
+	}
+	_, err := r.sender.AddReaction(ctx, r.messageID, feishuCompactDoneReactionEmoji)
 	return err
 }
 
@@ -116,7 +123,7 @@ func logReceivedMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) {
 
 func (b *bot) processMessage(in incomingMessage) {
 	ctx := b.processingContext()
-	resp := feishuResponder{sender: b.sender, chatID: in.ChatID}
+	resp := feishuResponder{sender: b.sender, chatID: in.ChatID, messageID: in.MessageID}
 	if in.Unsupported {
 		if err := resp.Send(ctx, core.OutboundMessage{Text: unsupportedMessageText}); err != nil {
 			feishuLog.Warn(ctx, "send unsupported feishu message notice failed chat=%s: %v", in.ChatID, err)
