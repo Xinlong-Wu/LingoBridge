@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"lingobridge/internal/commands"
@@ -15,6 +16,16 @@ import (
 )
 
 const testTextChunkLimit = 4000
+
+func testLLMConfig() config.LLMConfig {
+	return config.LLMConfig{
+		DefaultModel: "deepseek",
+		Models: map[string]config.LLMModelConfig{
+			"deepseek": {Provider: "openai", BaseURL: "https://llm.test", APIKey: "key", ID: "model"},
+		},
+		SystemPrompt: "system",
+	}
+}
 
 type fakeSessions struct {
 	sess       *store.Session
@@ -126,6 +137,67 @@ type fakeNativeLLM struct {
 	contextMessages   []store.Message
 	context           store.ProviderContext
 	compactErr        error
+}
+
+type fakeToolLLM struct {
+	fakeLLM
+	turns       int
+	calls       []llm.ToolCall
+	results     []llm.ToolResult
+	toolSpecs   []llm.ToolSpec
+	finalText   string
+	providerCtx store.ProviderContext
+}
+
+func (f *fakeToolLLM) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, tools []llm.ToolSpec, previous llm.ToolState, results []llm.ToolResult, onChunk func(chunk string) error) (llm.ToolResponse, error) {
+	f.called = true
+	f.messages = messages
+	f.providerCtx = providerContext
+	f.toolSpecs = tools
+	f.results = append(f.results, results...)
+	if f.turns == 0 {
+		f.turns++
+		return llm.ToolResponse{
+			ToolCalls: f.calls,
+			ToolState: llm.ToolState{
+				Provider: "fake",
+				Endpoint: "tools",
+				Items:    []json.RawMessage{json.RawMessage(`{"type":"function_call"}`)},
+			},
+		}, nil
+	}
+	text := f.finalText
+	if text == "" {
+		text = "tool final"
+	}
+	return llm.ToolResponse{Response: llm.Response{Text: text}}, nil
+}
+
+type fakeTool struct {
+	spec   ToolSpec
+	result string
+	err    string
+	block  bool
+	calls  []ToolCall
+}
+
+func (f *fakeTool) Spec() ToolSpec {
+	if f.spec.Name == "" {
+		f.spec.Name = "fake_tool"
+	}
+	return f.spec
+}
+
+func (f *fakeTool) Execute(ctx context.Context, call ToolCall) ToolResult {
+	f.calls = append(f.calls, call)
+	if f.block {
+		<-ctx.Done()
+		return ToolResult{CallID: call.ID, Name: call.Name, Content: ctx.Err().Error(), IsError: true}
+	}
+	if f.err != "" {
+		return ToolResult{CallID: call.ID, Name: call.Name, Content: f.err, IsError: true}
+	}
+	return ToolResult{CallID: call.ID, Name: call.Name, Content: f.result}
 }
 
 func (f *fakeNativeLLM) CompactContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig) (store.ProviderContext, error) {
@@ -270,6 +342,136 @@ func TestHandleTextSavesConversationAndSendsReply(t *testing.T) {
 	}
 	if sender.typing != 1 || sender.stopTyping != 1 {
 		t.Fatalf("typing start/stop = %d/%d, want 1/1", sender.typing, sender.stopTyping)
+	}
+}
+
+func TestHandleTextRunsToolsAndSavesTrace(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		calls: []llm.ToolCall{{
+			ID:        "call_1",
+			Name:      "fake_tool",
+			Arguments: json.RawMessage(`{"query":"roadmap"}`),
+		}},
+		finalText: "answer with tool",
+	}
+	tool := &fakeTool{result: `{"ok":true}`}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+	sender := &fakeSender{}
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:     "u1",
+		CommandText: "search roadmap",
+		LLMText:     "search roadmap",
+		Tools:       []Tool{tool},
+	}, sender)
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(tool.calls) != 1 || tool.calls[0].Name != "fake_tool" {
+		t.Fatalf("tool calls = %#v, want one fake_tool call", tool.calls)
+	}
+	if len(llmClient.results) != 1 || llmClient.results[0].Content != `{"ok":true}` {
+		t.Fatalf("tool results = %#v, want result returned to model", llmClient.results)
+	}
+	if len(sender.sent) != 1 || sender.sent[0].Text != "answer with tool" {
+		t.Fatalf("sent = %#v, want final tool answer", sender.sent)
+	}
+	if sessions.saved == nil || len(sessions.saved.Messages) != 2 {
+		t.Fatalf("saved = %#v, want user and assistant messages", sessions.saved)
+	}
+	traces := sessions.saved.Messages[1].ToolTraces
+	if len(traces) != 1 {
+		t.Fatalf("tool traces = %#v, want one trace", traces)
+	}
+	if traces[0].Name != "fake_tool" || traces[0].Status != "ok" || !strings.Contains(traces[0].Arguments, "roadmap") {
+		t.Fatalf("trace = %#v, want ok fake_tool trace", traces[0])
+	}
+}
+
+func TestHandleTextToolErrorsAreReturnedToModel(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		calls: []llm.ToolCall{{
+			ID:        "call_1",
+			Name:      "fake_tool",
+			Arguments: json.RawMessage(`{}`),
+		}},
+		finalText: "handled error",
+	}
+	tool := &fakeTool{err: "permission denied"}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+	sender := &fakeSender{}
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey: "u1",
+		LLMText: "try it",
+		Tools:   []Tool{tool},
+	}, sender)
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(llmClient.results) != 1 || !llmClient.results[0].IsError || llmClient.results[0].Content != "permission denied" {
+		t.Fatalf("tool results = %#v, want error result returned to model", llmClient.results)
+	}
+	traces := sessions.saved.Messages[1].ToolTraces
+	if len(traces) != 1 || traces[0].Status != "error" || traces[0].Error != "permission denied" {
+		t.Fatalf("tool traces = %#v, want error trace", traces)
+	}
+}
+
+func TestHandleTextToolTimeoutIsReturnedToModel(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		calls: []llm.ToolCall{{
+			ID:        "call_1",
+			Name:      "fake_tool",
+			Arguments: json.RawMessage(`{}`),
+		}},
+		finalText: "handled timeout",
+	}
+	tool := &fakeTool{block: true}
+	bot := New(sessions, testLLMConfig())
+	bot.ToolTimeout = time.Millisecond
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey: "u1",
+		LLMText: "try it",
+		Tools:   []Tool{tool},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(llmClient.results) != 1 || !llmClient.results[0].IsError || !strings.Contains(llmClient.results[0].Content, "timed out") {
+		t.Fatalf("tool results = %#v, want timeout result returned to model", llmClient.results)
+	}
+}
+
+func TestHandleTextToolCallLimit(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		calls: []llm.ToolCall{
+			{ID: "call_1", Name: "fake_tool", Arguments: json.RawMessage(`{}`)},
+			{ID: "call_2", Name: "fake_tool", Arguments: json.RawMessage(`{}`)},
+		},
+	}
+	bot := New(sessions, testLLMConfig())
+	bot.MaxToolCalls = 1
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey: "u1",
+		LLMText: "try it",
+		Tools:   []Tool{&fakeTool{}},
+	}, &fakeSender{})
+	if err == nil || !strings.Contains(err.Error(), "tool call limit exceeded") {
+		t.Fatalf("Handle error = %v, want tool call limit exceeded", err)
+	}
+	if sessions.saved != nil {
+		t.Fatalf("saved = %#v, want no history saved when tool limit is exceeded", sessions.saved)
 	}
 }
 

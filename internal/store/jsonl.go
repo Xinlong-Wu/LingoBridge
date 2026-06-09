@@ -24,6 +24,18 @@ type Message struct {
 	Role        string       `json:"role"`
 	Content     string       `json:"content"`
 	Attachments []Attachment `json:"attachments,omitempty"`
+	ToolTraces  []ToolTrace  `json:"tool_traces,omitempty"`
+}
+
+// ToolTrace is a compact audit record for tool use during one assistant turn.
+type ToolTrace struct {
+	CallID         string `json:"call_id,omitempty"`
+	Name           string `json:"name"`
+	Status         string `json:"status"`
+	Arguments      string `json:"arguments,omitempty"`
+	Result         string `json:"result,omitempty"`
+	Error          string `json:"error,omitempty"`
+	DurationMillis int64  `json:"duration_ms,omitempty"`
 }
 
 // ProviderContext stores opaque provider-native context items for one model profile.

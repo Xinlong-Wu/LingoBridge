@@ -209,3 +209,47 @@ events:
 		t.Fatalf("second run = %#v, want sequence commands", got)
 	}
 }
+
+func TestLoadConfigParsesSharedToolsConfig(t *testing.T) {
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(`tools:
+  max_results: 3
+  max_chars: 2048
+  allowed_folder_tokens:
+    - " fld_token "
+    - fld_token
+    - ""
+  allowed_space_ids:
+    - spc_token
+  docs:
+    enabled: true
+    allow_write: true
+`), &node); err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Platforms = map[string]yaml.Node{}
+	cfg.Platforms[store.PlatformFeishu] = *node.Content[0]
+	platformCtx, err := core.NewPlatformContext(store.PlatformFeishu, &cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+
+	feishuConfig, err := LoadConfig(platformCtx)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	tools := feishuConfig.Tools
+	if tools.MaxResults != 3 || tools.MaxChars != 2048 {
+		t.Fatalf("tools limits = max_results:%d max_chars:%d, want 3/2048", tools.MaxResults, tools.MaxChars)
+	}
+	if got := tools.AllowedFolderTokens; len(got) != 1 || got[0] != "fld_token" {
+		t.Fatalf("allowed_folder_tokens = %#v, want normalized single token", got)
+	}
+	if got := tools.AllowedSpaceIDs; len(got) != 1 || got[0] != "spc_token" {
+		t.Fatalf("allowed_space_ids = %#v, want spc_token", got)
+	}
+	if !tools.Docs.Enabled || !tools.Docs.AllowWrite {
+		t.Fatalf("docs config = %#v, want enabled write tools", tools.Docs)
+	}
+}

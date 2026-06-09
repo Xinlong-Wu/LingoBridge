@@ -40,6 +40,26 @@ type anthropicContent struct {
 	Content *string `json:"content,omitempty"`
 }
 
+type anthropicTool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+type anthropicToolUse struct {
+	Type  string          `json:"type"`
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+}
+
+type anthropicToolResult struct {
+	Type      string `json:"type"`
+	ToolUseID string `json:"tool_use_id"`
+	Content   string `json:"content"`
+	IsError   bool   `json:"is_error,omitempty"`
+}
+
 type anthropicMessage struct {
 	Role    string `json:"role"`
 	Content any    `json:"content,omitempty"`
@@ -52,6 +72,7 @@ type anthropicRequest struct {
 	Messages          []anthropicMessage          `json:"messages"`
 	System            string                      `json:"system,omitempty"`
 	Stream            bool                        `json:"stream"`
+	Tools             []anthropicTool             `json:"tools,omitempty"`
 	ContextManagement *anthropicContextManagement `json:"context_management,omitempty"`
 }
 
@@ -160,6 +181,48 @@ func (c *anthropicClient) ChatStreamWithContext(systemPrompt string, messages []
 	return c.chatStream(systemPrompt, messages, providerContext, compact, true, onChunk)
 }
 
+func (c *anthropicClient) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, tools []ToolSpec, previous ToolState, results []ToolResult, onChunk func(chunk string) error) (ToolResponse, error) {
+	anthropicMsgs, system, err := convertToAnthropicMessagesWithContext(messages, systemPrompt, providerContext)
+	if err != nil {
+		return ToolResponse{}, err
+	}
+	if previous.Provider == anthropicRefProvider && previous.Endpoint == anthropicEndpointMessages && len(previous.Items) > 0 {
+		content := make([]any, 0, len(previous.Items))
+		for _, item := range previous.Items {
+			if len(item) > 0 {
+				content = append(content, item)
+			}
+		}
+		anthropicMsgs = append(anthropicMsgs, anthropicMessage{Role: "assistant", Content: content})
+	}
+	if len(results) > 0 {
+		content := make([]any, 0, len(results))
+		for _, result := range results {
+			content = append(content, anthropicToolResult{
+				Type:      "tool_result",
+				ToolUseID: result.CallID,
+				Content:   toolResultOutput(result),
+				IsError:   result.IsError,
+			})
+		}
+		anthropicMsgs = append(anthropicMsgs, anthropicMessage{Role: "user", Content: content})
+	}
+
+	reqBody := anthropicRequest{
+		Model:     c.cfg.Model,
+		MaxTokens: 4096,
+		Messages:  anthropicMsgs,
+		System:    system,
+		Stream:    false,
+		Tools:     anthropicTools(tools),
+	}
+	body, err := postJSON(c.httpClient, c.requestURL(), anthropicHeaders(c.cfg.APIKey, !providerContext.IsEmpty()), reqBody, "anthropic")
+	if err != nil {
+		return ToolResponse{}, err
+	}
+	return parseAnthropicToolResponse(body)
+}
+
 func (c *anthropicClient) CompactContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig) (store.ProviderContext, error) {
 	anthropicMsgs, system, err := convertToAnthropicMessagesWithContext(messages, systemPrompt, providerContext)
 	if err != nil {
@@ -263,6 +326,22 @@ func anthropicCompactTriggerTokens(compact CompactConfig) int {
 	return tokens
 }
 
+func anthropicTools(tools []ToolSpec) []anthropicTool {
+	out := make([]anthropicTool, 0, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, anthropicTool{
+			Name:        name,
+			Description: tool.Description,
+			InputSchema: normalizeToolSchema(tool.Parameters),
+		})
+	}
+	return out
+}
+
 func parseAnthropicResponse(body []byte) (Response, error) {
 	var chatResp anthropicResponse
 	if err := json.Unmarshal(body, &chatResp); err != nil {
@@ -281,6 +360,51 @@ func parseAnthropicResponse(body []byte) (Response, error) {
 	}
 	if resp.Text == "" && resp.ProviderContext.IsEmpty() {
 		return Response{}, fmt.Errorf("no content in response")
+	}
+	return resp, nil
+}
+
+func parseAnthropicToolResponse(body []byte) (ToolResponse, error) {
+	var chatResp anthropicResponse
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		return ToolResponse{}, fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	var resp ToolResponse
+	for _, raw := range chatResp.Content {
+		text, isCompaction := parseAnthropicContentBlock(raw)
+		if text != "" {
+			resp.Text += text
+		}
+		if isCompaction {
+			appendAnthropicCompaction(&resp.Response, raw)
+			continue
+		}
+		var meta struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &meta); err != nil || meta.Type != "tool_use" {
+			continue
+		}
+		var toolUse anthropicToolUse
+		if err := json.Unmarshal(raw, &toolUse); err != nil {
+			return ToolResponse{}, fmt.Errorf("unmarshal anthropic tool_use: %w", err)
+		}
+		args := toolUse.Input
+		if len(args) == 0 {
+			args = json.RawMessage(`{}`)
+		}
+		resp.ToolCalls = append(resp.ToolCalls, ToolCall{
+			ID:        toolUse.ID,
+			Name:      toolUse.Name,
+			Arguments: args,
+		})
+		resp.ToolState.Provider = anthropicRefProvider
+		resp.ToolState.Endpoint = anthropicEndpointMessages
+		resp.ToolState.Items = append(resp.ToolState.Items, raw)
+	}
+	if resp.Text == "" && len(resp.ToolCalls) == 0 && resp.ProviderContext.IsEmpty() {
+		return ToolResponse{}, fmt.Errorf("no content or tool_use in response")
 	}
 	return resp, nil
 }

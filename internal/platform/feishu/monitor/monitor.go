@@ -16,6 +16,7 @@ import (
 	"lingobridge/internal/core"
 	"lingobridge/internal/logging"
 	"lingobridge/internal/platform/feishu"
+	feishutools "lingobridge/internal/platform/feishu/tools"
 	"lingobridge/internal/session"
 	"lingobridge/internal/store"
 )
@@ -75,6 +76,7 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 	b := &bot{
 		handler:       handler,
 		sender:        &sdkSender{client: restClient},
+		tools:         feishutools.NewDocsTools(restClient, p.config.Tools),
 		botOpenID:     botOpenID,
 		eventCommands: map[string][]string{},
 		deduper:       newEventDeduper(defaultFeishuDedupeTTL),

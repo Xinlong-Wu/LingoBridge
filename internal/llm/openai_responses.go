@@ -81,6 +81,7 @@ type responsesRequest struct {
 	Instructions      string                       `json:"instructions,omitempty"`
 	Stream            bool                         `json:"stream"`
 	Store             bool                         `json:"store"`
+	Tools             []responsesTool              `json:"tools,omitempty"`
 	ContextManagement []responsesContextManagement `json:"context_management,omitempty"`
 }
 
@@ -110,17 +111,33 @@ type responsesInputContent struct {
 	FileID string `json:"file_id,omitempty"`
 }
 
+type responsesFunctionCallOutput struct {
+	Type   string `json:"type"`
+	CallID string `json:"call_id"`
+	Output string `json:"output"`
+}
+
+type responsesTool struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
 type responsesOutput struct {
 	Output    []responsesOutputItem `json:"output"`
 	RawOutput []json.RawMessage     `json:"-"`
 }
 
 type responsesOutputItem struct {
-	ID      string                    `json:"id"`
-	Type    string                    `json:"type"`
-	Status  string                    `json:"status"`
-	Content []responsesOutputItemPart `json:"content"`
-	Result  string                    `json:"result"`
+	ID        string                    `json:"id"`
+	Type      string                    `json:"type"`
+	Status    string                    `json:"status"`
+	Content   []responsesOutputItemPart `json:"content"`
+	Result    string                    `json:"result"`
+	CallID    string                    `json:"call_id"`
+	Name      string                    `json:"name"`
+	Arguments string                    `json:"arguments"`
 }
 
 type responsesOutputItemPart struct {
@@ -176,6 +193,61 @@ func (c *openaiResponsesClient) ChatStream(systemPrompt string, messages []store
 
 func (c *openaiResponsesClient) ChatStreamWithContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, onChunk func(chunk string) error) (Response, error) {
 	return c.chatResponses(systemPrompt, messages, providerContext, compact, true, onChunk)
+}
+
+func (c *openaiResponsesClient) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, tools []ToolSpec, previous ToolState, results []ToolResult, onChunk func(chunk string) error) (ToolResponse, error) {
+	input, err := c.convertToResponsesInputWithContext(messages, providerContext)
+	if err != nil {
+		return ToolResponse{}, err
+	}
+	if previous.Provider == c.refProvider() && previous.Endpoint == openAIEndpointResponses {
+		for _, item := range previous.Items {
+			if len(item) > 0 {
+				input = append(input, item)
+			}
+		}
+	}
+	for _, result := range results {
+		callID := strings.TrimSpace(result.CallID)
+		if callID == "" {
+			callID = strings.TrimSpace(result.Name)
+		}
+		input = append(input, responsesFunctionCallOutput{
+			Type:   "function_call_output",
+			CallID: callID,
+			Output: toolResultOutput(result),
+		})
+	}
+
+	reqBody := responsesRequest{
+		Model:             c.cfg.Model,
+		Input:             input,
+		Instructions:      systemPrompt,
+		Stream:            onChunk != nil,
+		Store:             false,
+		Tools:             responsesTools(tools),
+		ContextManagement: openAIContextManagement(compact),
+	}
+	if reqBody.Stream {
+		return postResponsesToolStream(c.httpClient, c.responsesURL(), bearerHeaders(c.cfg.APIKey), reqBody, onChunk)
+	}
+
+	body, err := postJSON(c.httpClient, c.responsesURL(), bearerHeaders(c.cfg.APIKey), reqBody, "responses")
+	if err != nil {
+		return ToolResponse{}, err
+	}
+	var out responsesOutput
+	if err := json.Unmarshal(body, &out); err != nil {
+		return ToolResponse{}, fmt.Errorf("unmarshal responses: %w", err)
+	}
+	resp, err := parseResponsesToolOutput(out)
+	if err != nil {
+		return ToolResponse{}, err
+	}
+	if resp.Text == "" && len(resp.Images) == 0 && len(resp.ToolCalls) == 0 && resp.ProviderContext.IsEmpty() {
+		return ToolResponse{}, fmt.Errorf("no output_text, image_generation_call, or function_call in responses")
+	}
+	return resp, nil
 }
 
 func (c *openaiResponsesClient) CompactContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig) (store.ProviderContext, error) {
@@ -303,6 +375,23 @@ func compactThresholdTokens(compact CompactConfig) int {
 	return int(math.Ceil(float64(compact.ContextWindow) * compact.Threshold))
 }
 
+func responsesTools(tools []ToolSpec) []responsesTool {
+	out := make([]responsesTool, 0, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, responsesTool{
+			Type:        "function",
+			Name:        name,
+			Description: tool.Description,
+			Parameters:  normalizeToolSchema(tool.Parameters),
+		})
+	}
+	return out
+}
+
 func (c *openaiResponsesClient) responsesInputItems(m store.Message) (*responsesInputMessage, error) {
 	content, err := c.responsesMessageContent(m)
 	if err != nil {
@@ -366,6 +455,21 @@ func postResponsesStream(client *http.Client, reqURL string, headers http.Header
 	return parseResponsesSSE(resp.Body, onChunk)
 }
 
+func postResponsesToolStream(client *http.Client, reqURL string, headers http.Header, reqBody any, onChunk func(chunk string) error) (ToolResponse, error) {
+	resp, err := sendJSON(client, reqURL, headers, reqBody)
+	if err != nil {
+		return ToolResponse{}, fmt.Errorf("responses stream request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return ToolResponse{}, fmt.Errorf("responses stream HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
+	}
+
+	return parseResponsesToolSSE(resp.Body, onChunk)
+}
+
 func parseResponsesStreamEvent(data string) string {
 	var event responsesStreamEvent
 	if err := json.Unmarshal([]byte(data), &event); err != nil {
@@ -387,6 +491,27 @@ func parseResponsesOutput(out responsesOutput) (Response, error) {
 		}
 		if err := appendResponsesOutputItem(&resp, item, seenImages, true); err != nil {
 			return Response{}, err
+		}
+	}
+	return resp, nil
+}
+
+func parseResponsesToolOutput(out responsesOutput) (ToolResponse, error) {
+	var resp ToolResponse
+	seenImages := map[string]bool{}
+	seenCalls := map[string]bool{}
+	for i, item := range out.Output {
+		raw := rawResponsesOutputItem(out, i)
+		if item.Type == openAIRefTypeCompaction {
+			appendResponsesCompaction(&resp.Response, raw)
+			continue
+		}
+		if item.Type == "function_call" {
+			appendResponsesToolCall(&resp, item, raw, seenCalls)
+			continue
+		}
+		if err := appendResponsesOutputItem(&resp.Response, item, seenImages, true); err != nil {
+			return ToolResponse{}, err
 		}
 	}
 	return resp, nil
@@ -461,6 +586,85 @@ func parseResponsesSSE(body io.Reader, onChunk func(chunk string) error) (Respon
 	return resp, nil
 }
 
+func parseResponsesToolSSE(body io.Reader, onChunk func(chunk string) error) (ToolResponse, error) {
+	var resp ToolResponse
+	seenImages := map[string]bool{}
+	knownImageItems := map[string]bool{}
+	seenCalls := map[string]bool{}
+	var textBuilder strings.Builder
+
+	err := readSSEData(body, func(data string) (bool, error) {
+		var event responsesStreamEvent
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			return false, nil
+		}
+
+		switch event.Type {
+		case "response.output_text.delta":
+			if event.Delta == "" {
+				return false, nil
+			}
+			textBuilder.WriteString(event.Delta)
+			resp.Text = textBuilder.String()
+			if onChunk != nil {
+				if err := onChunk(event.Delta); err != nil {
+					return false, err
+				}
+			}
+		case "response.output_item.added":
+			rememberResponsesImageItem(event.Item, knownImageItems)
+		case "response.output_item.done":
+			rememberResponsesImageItem(event.Item, knownImageItems)
+			if event.Item.Type == "function_call" {
+				appendResponsesToolCall(&resp, event.Item, nil, seenCalls)
+				return false, nil
+			}
+			if err := appendResponsesOutputItem(&resp.Response, event.Item, seenImages, false); err != nil {
+				return false, err
+			}
+		case "response.image_generation_call.completed":
+			if event.ItemID != "" {
+				knownImageItems[event.ItemID] = true
+			}
+			if err := appendResponsesOutputItem(&resp.Response, responsesOutputItem{
+				ID:     event.ItemID,
+				Type:   openAIRefTypeImageGenerationCall,
+				Status: "completed",
+				Result: event.Result,
+			}, seenImages, false); err != nil {
+				return false, err
+			}
+		case "response.completed":
+			includeText := textBuilder.Len() == 0
+			for i, item := range event.Response.Output {
+				raw := rawResponsesOutputItem(event.Response, i)
+				if item.Type == openAIRefTypeCompaction {
+					appendResponsesCompaction(&resp.Response, raw)
+					continue
+				}
+				if item.Type == "function_call" {
+					appendResponsesToolCall(&resp, item, raw, seenCalls)
+					continue
+				}
+				if item.ID != "" && knownImageItems[item.ID] && item.Result != "" {
+					if err := appendResponsesImage(&resp.Response, item, seenImages); err != nil {
+						return false, err
+					}
+					continue
+				}
+				if err := appendResponsesOutputItem(&resp.Response, item, seenImages, includeText); err != nil {
+					return false, err
+				}
+			}
+		}
+		return false, nil
+	})
+	if err != nil {
+		return ToolResponse{}, err
+	}
+	return resp, nil
+}
+
 func rawResponsesOutputItem(out responsesOutput, index int) json.RawMessage {
 	if index >= 0 && index < len(out.RawOutput) && len(out.RawOutput[index]) > 0 {
 		return out.RawOutput[index]
@@ -470,6 +674,38 @@ func rawResponsesOutputItem(out responsesOutput, index int) json.RawMessage {
 		return raw
 	}
 	return nil
+}
+
+func appendResponsesToolCall(resp *ToolResponse, item responsesOutputItem, raw json.RawMessage, seen map[string]bool) {
+	callID := strings.TrimSpace(item.CallID)
+	if callID == "" {
+		callID = strings.TrimSpace(item.ID)
+	}
+	key := callID
+	if key == "" {
+		key = item.Name + "\x00" + item.Arguments
+	}
+	if key == "" || seen[key] {
+		return
+	}
+	seen[key] = true
+	args := json.RawMessage(strings.TrimSpace(item.Arguments))
+	if len(args) == 0 {
+		args = json.RawMessage(`{}`)
+	}
+	resp.ToolCalls = append(resp.ToolCalls, ToolCall{
+		ID:        callID,
+		Name:      item.Name,
+		Arguments: args,
+	})
+	if len(raw) == 0 {
+		raw, _ = json.Marshal(item)
+	}
+	if len(raw) > 0 {
+		resp.ToolState.Provider = openAIRefProvider
+		resp.ToolState.Endpoint = openAIEndpointResponses
+		resp.ToolState.Items = append(resp.ToolState.Items, raw)
+	}
 }
 
 func appendResponsesCompaction(resp *Response, raw json.RawMessage) {

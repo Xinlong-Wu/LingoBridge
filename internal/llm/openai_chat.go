@@ -3,6 +3,7 @@ package llm
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"lingobridge/internal/store"
 )
@@ -23,19 +24,42 @@ type openaiChatRequest struct {
 	Model    string              `json:"model"`
 	Messages []openaiChatMessage `json:"messages"`
 	Stream   bool                `json:"stream"`
+	Tools    []openaiChatTool    `json:"tools,omitempty"`
 }
 
 type openaiChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string               `json:"role"`
+	Content    string               `json:"content"`
+	ToolCalls  []openaiChatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string               `json:"tool_call_id,omitempty"`
 }
 
 type openaiChatResponse struct {
 	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
+		Message openaiChatMessage `json:"message"`
 	} `json:"choices"`
+}
+
+type openaiChatTool struct {
+	Type     string             `json:"type"`
+	Function openaiChatFunction `json:"function"`
+}
+
+type openaiChatFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+type openaiChatToolCall struct {
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
+	Function openaiChatToolFunction `json:"function"`
+}
+
+type openaiChatToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type openaiStreamChunk struct {
@@ -92,6 +116,48 @@ func (c *openaiChatClient) ChatStream(systemPrompt string, messages []store.Mess
 	return Response{Text: text}, nil
 }
 
+func (c *openaiChatClient) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, tools []ToolSpec, previous ToolState, results []ToolResult, onChunk func(chunk string) error) (ToolResponse, error) {
+	chatMessages, err := convertToOpenAIChatMessages(messages)
+	if err != nil {
+		return ToolResponse{}, err
+	}
+	if previous.Provider == c.refProvider() && previous.Endpoint == openAIEndpointChat {
+		for _, raw := range previous.Items {
+			var msg openaiChatMessage
+			if len(raw) > 0 && json.Unmarshal(raw, &msg) == nil && msg.Role != "" {
+				chatMessages = append(chatMessages, msg)
+			}
+		}
+	}
+	for _, result := range results {
+		chatMessages = append(chatMessages, openaiChatMessage{
+			Role:       "tool",
+			Content:    toolResultOutput(result),
+			ToolCallID: result.CallID,
+		})
+	}
+	reqBody := openaiChatRequest{
+		Model:    c.cfg.Model,
+		Messages: chatMessages,
+		Stream:   false,
+		Tools:    openAIChatTools(tools),
+	}
+
+	body, err := postJSON(c.httpClient, c.chatCompletionsURL(), bearerHeaders(c.cfg.APIKey), reqBody, "openai")
+	if err != nil {
+		return ToolResponse{}, err
+	}
+
+	var chatResp openaiChatResponse
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		return ToolResponse{}, fmt.Errorf("unmarshal response: %w", err)
+	}
+	if len(chatResp.Choices) == 0 {
+		return ToolResponse{}, fmt.Errorf("no choices in response")
+	}
+	return parseOpenAIChatToolMessage(chatResp.Choices[0].Message), nil
+}
+
 func convertToOpenAIChatMessages(messages []store.Message) ([]openaiChatMessage, error) {
 	out := make([]openaiChatMessage, 0, len(messages))
 	for _, m := range messages {
@@ -101,6 +167,53 @@ func convertToOpenAIChatMessages(messages []store.Message) ([]openaiChatMessage,
 		out = append(out, openaiChatMessage{Role: m.Role, Content: m.Content})
 	}
 	return out, nil
+}
+
+func openAIChatTools(tools []ToolSpec) []openaiChatTool {
+	out := make([]openaiChatTool, 0, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, openaiChatTool{
+			Type: "function",
+			Function: openaiChatFunction{
+				Name:        name,
+				Description: tool.Description,
+				Parameters:  normalizeToolSchema(tool.Parameters),
+			},
+		})
+	}
+	return out
+}
+
+func parseOpenAIChatToolMessage(msg openaiChatMessage) ToolResponse {
+	resp := ToolResponse{Response: Response{Text: msg.Content}}
+	if len(msg.ToolCalls) == 0 {
+		return resp
+	}
+	if msg.Role == "" {
+		msg.Role = "assistant"
+	}
+	raw, _ := json.Marshal(msg)
+	resp.ToolState = ToolState{
+		Provider: openAIRefProvider,
+		Endpoint: openAIEndpointChat,
+		Items:    []json.RawMessage{raw},
+	}
+	for _, toolCall := range msg.ToolCalls {
+		args := json.RawMessage(strings.TrimSpace(toolCall.Function.Arguments))
+		if len(args) == 0 {
+			args = json.RawMessage(`{}`)
+		}
+		resp.ToolCalls = append(resp.ToolCalls, ToolCall{
+			ID:        toolCall.ID,
+			Name:      toolCall.Function.Name,
+			Arguments: args,
+		})
+	}
+	return resp
 }
 
 func parseOpenAIStreamEvent(data string) string {

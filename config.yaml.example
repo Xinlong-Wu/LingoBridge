@@ -70,3 +70,18 @@ platforms:
         run:
           - "printf '你好，我是 LingoBridge。直接发送问题即可开始对话。'"
           - "printf '%s' \"$LINGOBRIDGE_COMMAND_HELP\""
+
+    # Optional platform tools exposed to tool-capable LLM model profiles.
+    tools:
+      max_results: 5
+      max_chars: 12000
+      allowed_folder_tokens: []
+      allowed_space_ids: []
+      docs:
+        # Disabled by default. When enabled, the Feishu app's tenant access
+        # token is used, so document visibility follows app permissions rather
+        # than the asking user's personal permissions.
+        enabled: false
+        # Write tools are registered only when this is true and at least one
+        # allowed_folder_tokens entry is configured.
+        allow_write: false

@@ -252,6 +252,17 @@ platforms:
           - "printf '%s' \"$LINGOBRIDGE_COMMAND_HELP\""
 ```
 
+Feishu can expose platform-level document tools to tool-capable LLM profiles.
+Configure shared tool limits under `platforms.feishu.tools` and enable the
+document tool package under `platforms.feishu.tools.docs`. They are disabled by
+default and read-only when enabled. The first version registers
+`feishu_docs_search` and `feishu_docs_read`; `feishu_docs_create` and
+`feishu_docs_append` are registered only when `allow_write: true` and
+`allowed_folder_tokens` is non-empty. These tools use the Feishu self-built app
+tenant token, so access follows the app's document permissions rather than the
+asking user's personal permissions. Strict per-user document access requires a
+separate Feishu OAuth flow.
+
 Feishu conversation history is isolated per user in 1:1 chats and shared by
 `chat_id` in group chats, so everyone who mentions the bot in the same group
 continues the same group session.
@@ -285,6 +296,12 @@ are not sent back to Feishu yet.
 | `platforms.feishu.events[].name` | — | Extra Feishu event to register; v1.0 supports customized event names such as `p2p_chat_create`, and v2.0 currently supports `im.chat.access_event.bot_p2p_chat_entered_v1` |
 | `platforms.feishu.events[].version` | — | Required Feishu event protocol version: `"1.0"` uses `OnCustomizedEvent`; `"2.0"` uses a built-in `OnP2...` mapping |
 | `platforms.feishu.events[].run` | — | Shell command string or list of shell command strings to run for the event |
+| `platforms.feishu.tools.max_results` | `5` | Shared maximum result count for Feishu tools that return lists, including `feishu_docs_search` |
+| `platforms.feishu.tools.max_chars` | `12000` | Shared maximum character count for Feishu tools that return content, including `feishu_docs_read` |
+| `platforms.feishu.tools.allowed_folder_tokens` | `[]` | Shared folder token allowlist for Feishu tools; currently used for Docs write tools and optional search narrowing |
+| `platforms.feishu.tools.allowed_space_ids` | `[]` | Shared Wiki space ID allowlist for Feishu tools; currently used for Docs search narrowing |
+| `platforms.feishu.tools.docs.enabled` | `false` | Enable Feishu Docs tools for tool-capable LLM profiles |
+| `platforms.feishu.tools.docs.allow_write` | `false` | Register Feishu Docs create/append tools when enabled and folder allowlist is configured |
 Each model profile is independent. `provider`, `base_url`, `api_key`, and `id` are required; `endpoint` is optional and defaults to `chat`.
 For Anthropic model profiles, an omitted `endpoint` defaults to `messages`.
 Native context compaction defaults to `compact.mode: auto`. OpenAI-compatible
@@ -323,12 +340,12 @@ saved per-user model preference that no longer exists back to
     wechat/
       data/
         lingobridge.db                   # WeChat accounts, sessions, user preferences, sync cursors
-        sessions/{userId}/{sessionId}.jsonl # Conversation snapshots; may include compact provider_contexts
+        sessions/{userId}/{sessionId}.jsonl # Conversation snapshots; may include compact provider_contexts and tool_traces
         media/{safeUserId}/{safeSessionId}/
     feishu/
       data/
         lingobridge.db                   # Feishu account metadata, sessions, user preferences
-        sessions/{userId}/{sessionId}.jsonl # Conversation snapshots; may include compact provider_contexts
+        sessions/{userId}/{sessionId}.jsonl # Conversation snapshots; may include compact provider_contexts and tool_traces
 ```
 
 Each platform has its own SQLite database and data directory. The middle layer
@@ -354,6 +371,7 @@ internal/platform/wechat/   # WeChat frontend adapter: native events/API <-> cor
 internal/platform/wechat/monitor/ # WeChat monitor, reply sender, media handling, and markdown-to-WeChat filtering
 internal/platform/feishu/   # Feishu frontend adapter and its private config schema
 internal/platform/feishu/monitor/ # Feishu long-connection monitor, message/text-stream adapter, and event hooks
+internal/platform/feishu/tools/ # Feishu platform-level LLM tools, including Docs search/read/write helpers
 internal/core/              # Middle layer: scoped platform config/data APIs, commands, sessions, LLM orchestration
 internal/store/             # Platform-scoped SQLite accounts/sessions/preferences/cursors, JSONL history, media persistence
 internal/llm/               # Backend provider adapters: OpenAI-compatible and Anthropic APIs

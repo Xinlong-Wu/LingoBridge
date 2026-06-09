@@ -31,6 +31,8 @@ type fakeProcessor struct {
 	userID      string
 	text        string
 	commandText string
+	metadata    map[string]string
+	tools       int
 	called      bool
 	calls       int
 	started     chan struct{}
@@ -41,6 +43,8 @@ type fakeProcessorSnapshot struct {
 	userID      string
 	text        string
 	commandText string
+	metadata    map[string]string
+	tools       int
 	called      bool
 	calls       int
 }
@@ -51,6 +55,8 @@ func (f *fakeProcessor) Handle(ctx context.Context, msg core.InboundMessage, sen
 	f.userID = msg.UserKey
 	f.text = msg.LLMText
 	f.commandText = msg.CommandText
+	f.metadata = msg.Metadata
+	f.tools = len(msg.Tools)
 	f.calls++
 	started := f.started
 	release := f.release
@@ -70,6 +76,16 @@ func (f *fakeProcessor) Handle(ctx context.Context, msg core.InboundMessage, sen
 		}
 	}
 	return sender.Send(ctx, core.OutboundMessage{Text: "ok"})
+}
+
+type fakeCoreTool struct{}
+
+func (fakeCoreTool) Spec() core.ToolSpec {
+	return core.ToolSpec{Name: "fake_tool"}
+}
+
+func (fakeCoreTool) Execute(ctx context.Context, call core.ToolCall) core.ToolResult {
+	return core.ToolResult{CallID: call.ID, Name: call.Name, Content: "ok"}
 }
 
 type sentText struct {
@@ -235,6 +251,8 @@ func (f *fakeProcessor) snapshot() fakeProcessorSnapshot {
 		userID:      f.userID,
 		text:        f.text,
 		commandText: f.commandText,
+		metadata:    f.metadata,
+		tools:       f.tools,
 		called:      f.called,
 		calls:       f.calls,
 	}
@@ -733,7 +751,7 @@ func TestHandleTextMessageUsesBridgeAndReplies(t *testing.T) {
 func TestHandleGroupTextMessageRepliesToOriginal(t *testing.T) {
 	processor := &fakeProcessor{}
 	sender := &fakeSender{}
-	b := &bot{handler: processor, sender: sender}
+	b := &bot{handler: processor, sender: sender, tools: []core.Tool{fakeCoreTool{}}}
 
 	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"hi"}`, nil)); err != nil {
 		t.Fatalf("handleMessage returned error: %v", err)
@@ -742,6 +760,12 @@ func TestHandleGroupTextMessageRepliesToOriginal(t *testing.T) {
 	senderSnap := waitForReplyCreates(t, sender, 1)
 	if !processorSnap.called || processorSnap.userID != "feishu:group:oc_chat" || processorSnap.text != "hi" {
 		t.Fatalf("processor = %#v", processorSnap)
+	}
+	if processorSnap.tools != 1 {
+		t.Fatalf("processor tools = %d, want 1", processorSnap.tools)
+	}
+	if processorSnap.metadata["feishu.chat_id"] != "oc_chat" || processorSnap.metadata["feishu.message_id"] != "om_message" || processorSnap.metadata["feishu.sender_open_id"] != "ou_user" {
+		t.Fatalf("processor metadata = %#v", processorSnap.metadata)
 	}
 	if len(senderSnap.replyCreates) != 1 || senderSnap.replyCreates[0].messageID != "om_message" || senderSnap.replyCreates[0].text != "ok" {
 		t.Fatalf("reply creates = %#v, want ok reply to om_message", senderSnap.replyCreates)

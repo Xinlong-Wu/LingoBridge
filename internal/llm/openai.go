@@ -8,6 +8,7 @@ import (
 )
 
 const (
+	openAIEndpointChat               = "chat"
 	openAIEndpointResponses          = "responses"
 	openAIRefProvider                = "openai"
 	openAIRefTypeFile                = "file"

@@ -25,6 +25,7 @@ type textProcessor interface {
 type bot struct {
 	handler       textProcessor
 	sender        textSender
+	tools         []core.Tool
 	botOpenID     string
 	eventCommands map[string][]string
 	deduper       *eventDeduper
@@ -158,6 +159,12 @@ func (b *bot) processMessage(in incomingMessage) {
 		UserKey:     in.UserID,
 		CommandText: in.Text,
 		LLMText:     in.Text,
+		Metadata: map[string]string{
+			"feishu.chat_id":        in.ChatID,
+			"feishu.message_id":     in.MessageID,
+			"feishu.sender_open_id": in.SenderOpenID,
+		},
+		Tools: b.tools,
 	}, resp); err != nil {
 		feishuLog.Warn(ctx, "process feishu message failed user=%s chat=%s: %v", in.UserID, in.ChatID, err)
 	}
