@@ -125,7 +125,7 @@ Send these as WeChat or Feishu text messages to the bot:
 
 | Command | Description |
 |---|---|
-| `/help` | Show available in-chat commands |
+| `/help` | Show Markdown-formatted in-chat commands and current platform tool summaries |
 | `/current` | Show current session and model |
 | `/new [name]` | Create a new conversation session |
 | `/list` | List your sessions |

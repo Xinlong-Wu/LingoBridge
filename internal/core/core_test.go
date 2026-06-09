@@ -300,6 +300,34 @@ func TestHandleCommandDoesNotCallLLM(t *testing.T) {
 	}
 }
 
+func TestHandleHelpIncludesToolSummaries(t *testing.T) {
+	sessions := &fakeSessions{}
+	client := &fakeLLM{}
+	b := testBot(sessions, client)
+	sender := &fakeSender{}
+	tool := &fakeTool{
+		spec: ToolSpec{
+			Name:        "feishu_docs_search",
+			Description: "Search Feishu Docs and Wiki visible to the configured Feishu app.",
+		},
+	}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "/help", LLMText: "/help", Tools: []Tool{tool}}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if client.called {
+		t.Fatal("LLM was called for help command")
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("sent = %#v, want one help message", sender.sent)
+	}
+	for _, want := range []string{"## 可用工具", "feishu_docs_search", "Search Feishu Docs"} {
+		if !strings.Contains(sender.sent[0].Text, want) {
+			t.Fatalf("help = %q, want %s", sender.sent[0].Text, want)
+		}
+	}
+}
+
 func TestHandleCommandPolicyDisablesCommand(t *testing.T) {
 	sessions := &fakeSessions{}
 	client := &fakeLLM{}

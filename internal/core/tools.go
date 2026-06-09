@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"lingobridge/internal/commands"
 	"lingobridge/internal/llm"
 	"lingobridge/internal/store"
 )
@@ -58,6 +59,33 @@ func toolMap(tools []Tool) map[string]Tool {
 		}
 	}
 	return out
+}
+
+func commandToolSummaries(tools []Tool) []commands.ToolSummary {
+	summaries := make([]commands.ToolSummary, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		spec := tool.Spec()
+		name := strings.TrimSpace(spec.Name)
+		if name == "" {
+			continue
+		}
+		summaries = append(summaries, commands.ToolSummary{
+			Name:        name,
+			Description: spec.Description,
+		})
+	}
+	return summaries
+}
+
+func commandName(text string) string {
+	parts := strings.Fields(strings.TrimSpace(text))
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
 }
 
 func runTool(ctx context.Context, tool Tool, call ToolCall, timeout time.Duration, resultLimit int) (llm.ToolResult, store.ToolTrace) {

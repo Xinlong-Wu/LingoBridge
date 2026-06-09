@@ -102,12 +102,17 @@ func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) err
 	if isCompactCommand(msg.CommandText) {
 		return b.handleCompactCommand(ctx, msg, sender)
 	}
-	if resp, handled, err := commands.HandleWithPolicy(msg.CommandText, msg.UserKey, b.Sessions, msg.CommandPolicy); handled {
+	commandTools := commandToolSummaries(msg.Tools)
+	if resp, handled, err := commands.HandleWithOptions(msg.CommandText, msg.UserKey, b.Sessions, commands.HandleOptions{
+		Policy: msg.CommandPolicy,
+		Tools:  commandTools,
+	}); handled {
 		if err != nil {
 			coreLog.Warn(ctx, "command error: %v", err)
 			_ = sender.Send(ctx, OutboundMessage{Text: fmt.Sprintf("❌ 错误：%v", err)})
 			return nil
 		}
+		coreLog.Debug(ctx, "command handled command=%s tools=%d", commandName(msg.CommandText), len(commandTools))
 		return sender.Send(ctx, OutboundMessage{Text: resp})
 	}
 	if strings.TrimSpace(msg.LLMText) == "" && msg.PrepareUserMessage == nil {

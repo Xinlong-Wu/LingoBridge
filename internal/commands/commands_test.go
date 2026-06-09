@@ -134,6 +134,26 @@ func TestHelpTextIncludesDefaultCommands(t *testing.T) {
 			t.Fatalf("response = %q, want %s", resp, want)
 		}
 	}
+	if !strings.Contains(resp, "- `/help` - 查看命令帮助") {
+		t.Fatalf("response = %q, want markdown command bullet", resp)
+	}
+}
+
+func TestHelpTextWithToolsIncludesSummaries(t *testing.T) {
+	resp := HelpTextWithTools(DefaultPolicy(), []ToolSummary{
+		{Name: "feishu_docs_search", Description: "Search Feishu Docs and Wiki visible to the configured Feishu app.\nReturns links."},
+		{Name: "feishu_docs_read", Description: "Read plain text from a Feishu docx document by token or URL."},
+		{Name: "feishu_docs_search", Description: "duplicate"},
+		{Name: "", Description: "missing name"},
+	})
+	for _, want := range []string{"## 可用工具", "- `feishu_docs_search` - Search Feishu Docs and Wiki visible to the configured Feishu app. Returns links.", "- `feishu_docs_read`"} {
+		if !strings.Contains(resp, want) {
+			t.Fatalf("response = %q, want %s", resp, want)
+		}
+	}
+	if strings.Count(resp, "feishu_docs_search") != 1 {
+		t.Fatalf("response = %q, want deduped feishu_docs_search", resp)
+	}
 }
 
 func TestHandleClear(t *testing.T) {

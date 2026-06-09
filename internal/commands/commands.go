@@ -34,6 +34,18 @@ type commandSpec struct {
 	Help string
 }
 
+// ToolSummary is the user-facing capability summary for one platform tool.
+type ToolSummary struct {
+	Name        string
+	Description string
+}
+
+// HandleOptions controls command handling behavior for one inbound message.
+type HandleOptions struct {
+	Policy Policy
+	Tools  []ToolSummary
+}
+
 var commandSpecs = []commandSpec{
 	{Name: "/help", Help: "/help - 查看命令帮助"},
 	{Name: "/current", Help: "/current - 查看当前会话和模型"},
@@ -83,13 +95,33 @@ func normalizeCommand(cmd string) string {
 
 // HelpText returns the available in-chat commands for a platform policy.
 func HelpText(policy Policy) string {
-	lines := []string{"可用命令："}
+	return HelpTextWithTools(policy, nil)
+}
+
+// HelpTextWithTools returns available commands plus optional platform tool summaries.
+func HelpTextWithTools(policy Policy, tools []ToolSummary) string {
+	lines := []string{"## 可用命令"}
 	for _, spec := range commandSpecs {
 		if policy.Allows(spec.Name) {
-			lines = append(lines, spec.Help)
+			lines = append(lines, "- "+markdownCommandHelp(spec.Help))
 		}
 	}
+	toolLines := toolHelpLines(tools)
+	if len(toolLines) > 0 {
+		lines = append(lines, "", "## 可用工具")
+		lines = append(lines, toolLines...)
+	}
 	return strings.Join(lines, "\n")
+}
+
+func markdownCommandHelp(help string) string {
+	name, description, ok := strings.Cut(strings.TrimSpace(help), " - ")
+	name = strings.TrimSpace(name)
+	description = strings.TrimSpace(description)
+	if !ok || name == "" || description == "" {
+		return help
+	}
+	return fmt.Sprintf("`%s` - %s", name, description)
 }
 
 // Handle processes a slash command and returns the response text.
@@ -100,6 +132,11 @@ func Handle(text string, userID string, sm SessionManager) (string, bool, error)
 
 // HandleWithPolicy processes a slash command with platform-specific command availability.
 func HandleWithPolicy(text string, userID string, sm SessionManager, policy Policy) (string, bool, error) {
+	return HandleWithOptions(text, userID, sm, HandleOptions{Policy: policy})
+}
+
+// HandleWithOptions processes a slash command with platform command and help options.
+func HandleWithOptions(text string, userID string, sm SessionManager, opts HandleOptions) (string, bool, error) {
 	text = strings.TrimSpace(text)
 
 	if !strings.HasPrefix(text, "/") {
@@ -113,6 +150,7 @@ func HandleWithPolicy(text string, userID string, sm SessionManager, policy Poli
 
 	cmd := parts[0]
 	args := parts[1:]
+	policy := opts.Policy
 
 	if !policy.Allows(cmd) {
 		return fmt.Sprintf("此平台暂不支持 %s。", cmd), true, nil
@@ -120,7 +158,7 @@ func HandleWithPolicy(text string, userID string, sm SessionManager, policy Poli
 
 	switch cmd {
 	case "/help":
-		return handleHelp(policy)
+		return handleHelp(policy, opts.Tools)
 	case "/current":
 		return handleCurrent(userID, sm)
 	case "/new":
@@ -142,8 +180,48 @@ func HandleWithPolicy(text string, userID string, sm SessionManager, policy Poli
 	}
 }
 
-func handleHelp(policy Policy) (string, bool, error) {
-	return HelpText(policy), true, nil
+func handleHelp(policy Policy, tools []ToolSummary) (string, bool, error) {
+	return HelpTextWithTools(policy, tools), true, nil
+}
+
+func toolHelpLines(tools []ToolSummary) []string {
+	lines := []string{}
+	seen := map[string]bool{}
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		description := truncateRunes(collapseWhitespace(tool.Description), 120)
+		if description == "" {
+			lines = append(lines, fmt.Sprintf("- `%s` - 可由当前平台提供给支持工具调用的模型使用", name))
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("- `%s` - %s", name, description))
+	}
+	return lines
+}
+
+func collapseWhitespace(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
+
+func truncateRunes(text string, limit int) string {
+	if limit <= 0 {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	if limit <= 1 {
+		return string(runes[:limit])
+	}
+	if limit <= 3 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-3]) + "..."
 }
 
 func handleCurrent(userID string, sm SessionManager) (string, bool, error) {
