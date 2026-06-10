@@ -22,6 +22,7 @@ import (
 	"lingobridge/internal/control"
 	"lingobridge/internal/core"
 	"lingobridge/internal/logging"
+	"lingobridge/internal/mcp"
 	"lingobridge/internal/platform"
 	"lingobridge/internal/platform/builtins"
 	"lingobridge/internal/runner"
@@ -517,6 +518,7 @@ func promptCLIInt(reader *bufio.Reader, out io.Writer, prompt string, required b
 type runtimeState struct {
 	stores   map[string]*store.Store
 	registry *platform.Registry
+	mcpHost  *mcp.Host
 	mu       sync.RWMutex
 	cfg      config.Config
 	runtimes map[string]platformRuntime
@@ -534,16 +536,21 @@ func newRuntimeState(stores map[string]*store.Store, cfg config.Config) (*runtim
 	if err != nil {
 		return nil, err
 	}
-	rs := &runtimeState{stores: stores, registry: registry}
-	if err := rs.updateConfig(cfg); err != nil {
+	rs := &runtimeState{stores: stores, registry: registry, mcpHost: mcp.NewHost()}
+	if err := rs.updateConfig(context.Background(), cfg); err != nil {
 		return nil, err
 	}
 	return rs, nil
 }
 
-func (r *runtimeState) updateConfig(cfg config.Config) error {
+func (r *runtimeState) updateConfig(ctx context.Context, cfg config.Config) error {
 	if err := cfg.LLM.Validate(); err != nil {
 		return fmt.Errorf("validate llm config: %w", err)
+	}
+	if r.mcpHost != nil {
+		if err := r.mcpHost.Reload(ctx, cfg.MCP); err != nil {
+			return fmt.Errorf("reload mcp config: %w", err)
+		}
 	}
 	runtimes := make(map[string]platformRuntime, len(r.stores))
 	for platformID, st := range r.stores {
@@ -562,6 +569,7 @@ func (r *runtimeState) updateConfig(cfg config.Config) error {
 		}
 		handler.TextChunkLimit = def.TextChunkLimit
 		handler.EnableTextStreaming = def.EnableTextStreaming
+		handler.ToolProvider = r.mcpHost
 		runtimes[platformID] = platformRuntime{
 			store:   st,
 			sm:      sm,
@@ -579,6 +587,13 @@ func (r *runtimeState) updateConfig(cfg config.Config) error {
 	r.mu.Unlock()
 	logConfig(cfg)
 	return nil
+}
+
+func (r *runtimeState) Close(ctx context.Context) error {
+	if r == nil || r.mcpHost == nil {
+		return nil
+	}
+	return r.mcpHost.Close(ctx)
 }
 
 func (r *runtimeState) snapshot(platformID string) (config.Config, platformRuntime, bool) {
@@ -603,6 +618,7 @@ func logConfig(cfg config.Config) {
 	configLog.Info(ctx, "llm models: %s", strings.Join(cfg.LLM.ModelNames(), ", "))
 	configLog.Info(ctx, "llm max_history: %d", cfg.LLM.MaxHistory)
 	configLog.Info(ctx, "llm system_prompt: %s", cfg.LLM.SystemPrompt)
+	configLog.Info(ctx, "mcp servers: %s", strings.Join(cfg.MCP.ServerNames(), ", "))
 }
 
 func cmdAccountNew(args []string) error {
@@ -720,6 +736,13 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := state.Close(shutdownCtx); err != nil {
+			runtimeLog.Warn(shutdownCtx, "mcp host shutdown: %v", err)
+		}
+	}()
 
 	runCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
@@ -763,12 +786,12 @@ func cmdRun(args []string) error {
 		}
 	})
 
-	controlServer, err := control.StartServer(runCtx, func(context.Context) error {
+	controlServer, err := control.StartServer(runCtx, func(ctx context.Context) error {
 		cfg, err := config.Load()
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)
 		}
-		if err := state.updateConfig(cfg); err != nil {
+		if err := state.updateConfig(ctx, cfg); err != nil {
 			return err
 		}
 		return supervisor.Reconcile(runCtx)

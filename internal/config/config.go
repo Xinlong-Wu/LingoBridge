@@ -63,6 +63,7 @@ type ResolvedModel struct {
 // Config is the top-level configuration.
 type Config struct {
 	LLM       LLMConfig            `yaml:"llm"`
+	MCP       MCPConfig            `yaml:"mcp,omitempty"`
 	Platforms map[string]yaml.Node `yaml:"platforms,omitempty"`
 }
 
@@ -202,6 +203,10 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 	cfg.LLM.ApplyDefaults()
+	cfg.MCP.ApplyDefaults()
+	if err := cfg.MCP.Validate(); err != nil {
+		return cfg, err
+	}
 
 	return cfg, nil
 }
@@ -209,6 +214,10 @@ func Load() (Config, error) {
 // Save writes the config to disk, creating directories as needed.
 func Save(cfg Config) error {
 	cfg.LLM.ApplyDefaults()
+	cfg.MCP.ApplyDefaults()
+	if err := cfg.MCP.Validate(); err != nil {
+		return err
+	}
 	if cfg.Platforms == nil {
 		cfg.Platforms = map[string]yaml.Node{}
 	}
@@ -240,6 +249,10 @@ func Save(cfg Config) error {
 // Digest returns a stable hash of the effective config.
 func Digest(cfg Config) (string, error) {
 	cfg.LLM.ApplyDefaults()
+	cfg.MCP.ApplyDefaults()
+	if err := cfg.MCP.Validate(); err != nil {
+		return "", err
+	}
 	if cfg.Platforms == nil {
 		cfg.Platforms = map[string]yaml.Node{}
 	}

@@ -48,6 +48,31 @@ llm:
   # Default: 0
   max_history: 0
 
+mcp:
+  # Optional global MCP servers exposed as tools to tool-capable LLM profiles.
+  # Tool names are registered as mcp_<server>_<tool>, for example
+  # mcp_filesystem_read_file.
+  servers:
+    filesystem:
+      transport: "stdio"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      env: {}
+      cwd: ""
+      # Optional scope. Omit scope to expose the server to all bot accounts.
+      # scope:
+      #   platforms: ["feishu"]
+      #   accounts:
+      #     - "feishu/fsbot"     # platform/account name
+      #     - "feishu:cli_xxx"   # stable account ID
+
+    remote_docs:
+      enabled: false
+      transport: "streamable_http"
+      url: "https://example.com/mcp"
+      headers:
+        Authorization: "Bearer your-token"
+
 platforms:
   # Each platform owns the schema under platforms.<platform>.
   feishu:
@@ -70,3 +95,18 @@ platforms:
         run:
           - "printf '你好，我是 LingoBridge。直接发送问题即可开始对话。'"
           - "printf '%s' \"$LINGOBRIDGE_COMMAND_HELP\""
+
+    # Optional platform tools exposed to tool-capable LLM model profiles.
+    tools:
+      max_results: 5
+      max_chars: 12000
+      allowed_folder_tokens: []
+      allowed_space_ids: []
+      docs:
+        # Disabled by default. When enabled, the Feishu app's tenant access
+        # token is used, so document visibility follows app permissions rather
+        # than the asking user's personal permissions.
+        enabled: false
+        # Write tools are registered only when this is true and at least one
+        # allowed_folder_tokens entry is configured.
+        allow_write: false

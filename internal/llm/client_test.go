@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 )
 
 func TestParseSSE(t *testing.T) {
@@ -545,6 +546,193 @@ func TestOpenAIResponsesRequestIncludesInstructions(t *testing.T) {
 	}
 	if reqBody.Instructions != "system prompt" {
 		t.Fatalf("instructions = %q, want system prompt", reqBody.Instructions)
+	}
+}
+
+func TestOpenAIResponsesToolCallingRoundTrip(t *testing.T) {
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		bodies = append(bodies, req)
+		w.Header().Set("Content-Type", "application/json")
+		if len(bodies) == 1 {
+			w.Write([]byte(`{"output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"feishu_docs_search","arguments":"{\"query\":\"roadmap\"}"}]}`))
+			return
+		}
+		w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{openaiBase: openaiBase{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "gpt-test"}, httpClient: server.Client()}}
+	tools := []tooltypes.Spec{{Name: "feishu_docs_search", Description: "search", Parameters: json.RawMessage(`{"type":"object"}`)}}
+	first, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, ToolState{}, nil, nil)
+	if err != nil {
+		t.Fatalf("ChatStreamWithTools first returned error: %v", err)
+	}
+	if len(first.ToolCalls) != 1 || first.ToolCalls[0].ID != "call_1" || first.ToolCalls[0].Name != "feishu_docs_search" {
+		t.Fatalf("tool calls = %#v, want one feishu_docs_search call", first.ToolCalls)
+	}
+	if len(bodies) != 1 || len(bodies[0]["tools"].([]any)) != 1 {
+		t.Fatalf("request bodies = %#v, want tools in first request", bodies)
+	}
+
+	second, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []tooltypes.Result{{CallID: "call_1", Name: "feishu_docs_search", Content: `{"ok":true}`}}, nil)
+	if err != nil {
+		t.Fatalf("ChatStreamWithTools second returned error: %v", err)
+	}
+	if second.Text != "done" {
+		t.Fatalf("second text = %q, want done", second.Text)
+	}
+	input := bodies[1]["input"].([]any)
+	foundOutput := false
+	for _, item := range input {
+		m, _ := item.(map[string]any)
+		if m["type"] == "function_call_output" && m["call_id"] == "call_1" {
+			foundOutput = true
+		}
+	}
+	if !foundOutput {
+		t.Fatalf("second input = %#v, want function_call_output", input)
+	}
+}
+
+func TestOpenAIResponsesStreamingToolStateOmitsMessageContent(t *testing.T) {
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		bodies = append(bodies, req)
+		if len(bodies) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"feishu_docs_search\",\"arguments\":\"{\\\"query\\\":\\\"roadmap\\\"}\"}}\n\n"))
+			w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{openaiBase: openaiBase{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "gpt-test"}, httpClient: server.Client()}}
+	tools := []tooltypes.Spec{{Name: "feishu_docs_search", Description: "search", Parameters: json.RawMessage(`{"type":"object"}`)}}
+	first, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, ToolState{}, nil, func(string) error { return nil })
+	if err != nil {
+		t.Fatalf("ChatStreamWithTools first returned error: %v", err)
+	}
+	if len(first.ToolCalls) != 1 || first.ToolCalls[0].ID != "call_1" {
+		t.Fatalf("tool calls = %#v, want call_1", first.ToolCalls)
+	}
+
+	if _, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []tooltypes.Result{{CallID: "call_1", Name: "feishu_docs_search", Content: `{"ok":true}`}}, nil); err != nil {
+		t.Fatalf("ChatStreamWithTools second returned error: %v", err)
+	}
+	input := bodies[1]["input"].([]any)
+	var functionCall map[string]any
+	for _, item := range input {
+		m, _ := item.(map[string]any)
+		if m["type"] == "function_call" && m["call_id"] == "call_1" {
+			functionCall = m
+			break
+		}
+	}
+	if functionCall == nil {
+		t.Fatalf("second input = %#v, want previous function_call item", input)
+	}
+	if _, ok := functionCall["content"]; ok {
+		t.Fatalf("function_call input = %#v, did not want content field", functionCall)
+	}
+}
+
+func TestOpenAIChatToolCallingRoundTrip(t *testing.T) {
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		bodies = append(bodies, req)
+		w.Header().Set("Content-Type", "application/json")
+		if len(bodies) == 1 {
+			w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"feishu_docs_search","arguments":"{\"query\":\"roadmap\"}"}}]}}]}`))
+			return
+		}
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`))
+	}))
+	defer server.Close()
+
+	client := &openaiChatClient{openaiBase: openaiBase{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "gpt-test"}, httpClient: server.Client()}}
+	tools := []tooltypes.Spec{{Name: "feishu_docs_search", Parameters: json.RawMessage(`{"type":"object"}`)}}
+	first, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, ToolState{}, nil, nil)
+	if err != nil {
+		t.Fatalf("ChatStreamWithTools first returned error: %v", err)
+	}
+	if len(first.ToolCalls) != 1 || first.ToolCalls[0].ID != "call_1" {
+		t.Fatalf("tool calls = %#v, want call_1", first.ToolCalls)
+	}
+	if len(bodies[0]["tools"].([]any)) != 1 {
+		t.Fatalf("first body = %#v, want tools", bodies[0])
+	}
+	second, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []tooltypes.Result{{CallID: "call_1", Content: "ok"}}, nil)
+	if err != nil {
+		t.Fatalf("ChatStreamWithTools second returned error: %v", err)
+	}
+	if second.Text != "done" {
+		t.Fatalf("second text = %q, want done", second.Text)
+	}
+	messages := bodies[1]["messages"].([]any)
+	last := messages[len(messages)-1].(map[string]any)
+	if last["role"] != "tool" || last["tool_call_id"] != "call_1" {
+		t.Fatalf("last message = %#v, want tool result", last)
+	}
+}
+
+func TestAnthropicToolCallingRoundTrip(t *testing.T) {
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		bodies = append(bodies, req)
+		w.Header().Set("Content-Type", "application/json")
+		if len(bodies) == 1 {
+			w.Write([]byte(`{"content":[{"type":"tool_use","id":"toolu_1","name":"feishu_docs_read","input":{"token":"dox_123"}}]}`))
+			return
+		}
+		w.Write([]byte(`{"content":[{"type":"text","text":"done"}]}`))
+	}))
+	defer server.Close()
+
+	client := &anthropicClient{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "claude-test"}, httpClient: server.Client()}
+	tools := []tooltypes.Spec{{Name: "feishu_docs_read", Parameters: json.RawMessage(`{"type":"object"}`)}}
+	first, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, ToolState{}, nil, nil)
+	if err != nil {
+		t.Fatalf("ChatStreamWithTools first returned error: %v", err)
+	}
+	if len(first.ToolCalls) != 1 || first.ToolCalls[0].ID != "toolu_1" || first.ToolCalls[0].Name != "feishu_docs_read" {
+		t.Fatalf("tool calls = %#v, want toolu_1", first.ToolCalls)
+	}
+	if len(bodies[0]["tools"].([]any)) != 1 {
+		t.Fatalf("first body = %#v, want tools", bodies[0])
+	}
+	second, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []tooltypes.Result{{CallID: "toolu_1", Content: "ok"}}, nil)
+	if err != nil {
+		t.Fatalf("ChatStreamWithTools second returned error: %v", err)
+	}
+	if second.Text != "done" {
+		t.Fatalf("second text = %q, want done", second.Text)
+	}
+	messages := bodies[1]["messages"].([]any)
+	last := messages[len(messages)-1].(map[string]any)
+	content := last["content"].([]any)
+	result := content[0].(map[string]any)
+	if result["type"] != "tool_result" || result["tool_use_id"] != "toolu_1" {
+		t.Fatalf("tool result = %#v, want anthropic tool_result", result)
 	}
 }
 

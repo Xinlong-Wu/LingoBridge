@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"lingobridge/internal/commands"
 	"lingobridge/internal/config"
 	"lingobridge/internal/llm"
 	"lingobridge/internal/logging"
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 )
 
 var coreLog = logging.For("core")
@@ -40,6 +42,7 @@ type TextStream interface {
 type InboundMessage struct {
 	Platform           string
 	AccountID          string
+	AccountName        string
 	UserKey            string
 	CommandText        string
 	CommandPolicy      commands.Policy
@@ -49,6 +52,7 @@ type InboundMessage struct {
 	MutateResponse     ResponseMutator
 	ErrorNotice        func(error) string
 	Metadata           map[string]string
+	Tools              []tooltypes.Tool
 }
 
 type OutboundMessage struct {
@@ -78,6 +82,7 @@ type Bot struct {
 	ErrorNotice         func(error) string
 	TextChunkLimit      int
 	EnableTextStreaming bool
+	ToolProvider        tooltypes.Provider
 }
 
 func New(sessions ConversationManager, cfg config.LLMConfig) *Bot {
@@ -97,21 +102,44 @@ func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) err
 	if isCompactCommand(msg.CommandText) {
 		return b.handleCompactCommand(ctx, msg, sender)
 	}
-	if resp, handled, err := commands.HandleWithPolicy(msg.CommandText, msg.UserKey, b.Sessions, msg.CommandPolicy); handled {
+	selection := b.resolveToolsForMessage(ctx, msg)
+	msg.Tools = selection.Tools
+	commandTools := commandToolSummaries(msg.Tools)
+	if resp, handled, err := commands.HandleWithOptions(msg.CommandText, msg.UserKey, b.Sessions, commands.HandleOptions{
+		Policy: msg.CommandPolicy,
+		Tools:  commandTools,
+	}); handled {
 		if err != nil {
 			coreLog.Warn(ctx, "command error: %v", err)
 			_ = sender.Send(ctx, OutboundMessage{Text: fmt.Sprintf("❌ 错误：%v", err)})
 			return nil
 		}
+		coreLog.Debug(ctx, "command handled command=%s tools=%d", commandName(msg.CommandText), len(commandTools))
 		return sender.Send(ctx, OutboundMessage{Text: resp})
 	}
 	if strings.TrimSpace(msg.LLMText) == "" && msg.PrepareUserMessage == nil {
 		return nil
 	}
-	return b.reply(ctx, msg, sender)
+	return b.reply(ctx, msg, sender, selection.Options)
 }
 
-func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) error {
+func (b *Bot) resolveToolsForMessage(ctx context.Context, msg InboundMessage) tooltypes.Selection {
+	var providerSelection tooltypes.Selection
+	if b.ToolProvider != nil {
+		providerSelection = b.ToolProvider.Resolve(tooltypes.Scope{
+			Platform:    msg.Platform,
+			AccountID:   msg.AccountID,
+			AccountName: msg.AccountName,
+		})
+	}
+	tools := mergeTools(ctx, msg.Tools, providerSelection.Tools)
+	if len(tools) != len(msg.Tools)+len(providerSelection.Tools) {
+		coreLog.Debug(ctx, "merged tools platform=%d provider=%d effective=%d", len(msg.Tools), len(providerSelection.Tools), len(tools))
+	}
+	return tooltypes.Selection{Tools: tools, Options: providerSelection.Options}
+}
+
+func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, toolOptions tooltypes.Options) error {
 	sess, err := b.Sessions.GetOrCreateCurrentSession(msg.UserKey)
 	if err != nil {
 		coreLog.Error(ctx, "get session: %v", err)
@@ -190,14 +218,16 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 
 	stopTyping := sender.StartTyping(ctx)
 	var llmResponse llm.Response
-	if compactAllowed {
-		if contextClient, ok := llmClient.(llm.ContextStreamingClient); ok {
-			llmResponse, err = contextClient.ChatStreamWithContext(b.LLMConfig.SystemPrompt, msgs, providerContext, compact, onChunk)
+	var toolTraces []store.ToolTrace
+	if len(msg.Tools) > 0 {
+		if toolClient, ok := llmClient.(llm.ToolCallingClient); ok {
+			llmResponse, toolTraces, err = b.chatWithTools(ctx, toolClient, b.LLMConfig.SystemPrompt, msgs, providerContext, compact, compactAllowed, msg.Tools, toolOptions, onChunk)
 		} else {
-			llmResponse, err = llmClient.ChatStream(b.LLMConfig.SystemPrompt, msgs, onChunk)
+			coreLog.Warn(ctx, "model provider=%s model=%s does not support tool calling; continuing without tools", provider, modelName)
+			llmResponse, err = b.chatWithoutTools(llmClient, compactAllowed, providerContext, compact, msgs, onChunk)
 		}
 	} else {
-		llmResponse, err = llmClient.ChatStream(b.LLMConfig.SystemPrompt, msgs, onChunk)
+		llmResponse, err = b.chatWithoutTools(llmClient, compactAllowed, providerContext, compact, msgs, onChunk)
 	}
 	stopTyping()
 	if err != nil {
@@ -223,6 +253,7 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 		_ = sender.Send(ctx, OutboundMessage{Text: b.errorNotice(msg, err)})
 		return err
 	}
+	assistantHistory.ToolTraces = toolTraces
 	historyForSave := conv.Messages
 	if compactAllowed {
 		if preCompacted {
@@ -279,6 +310,96 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 
 	coreLog.Debug(ctx, "reply to=%s provider=%s model=%s len=%d images=%d", msg.UserKey, provider, modelName, len(llmResponse.Text), len(llmResponse.Images))
 	return nil
+}
+
+func (b *Bot) chatWithoutTools(client llm.Client, compactAllowed bool, providerContext store.ProviderContext, compact llm.CompactConfig, msgs []store.Message, onChunk func(string) error) (llm.Response, error) {
+	if compactAllowed {
+		if contextClient, ok := client.(llm.ContextStreamingClient); ok {
+			return contextClient.ChatStreamWithContext(b.LLMConfig.SystemPrompt, msgs, providerContext, compact, onChunk)
+		}
+	}
+	return client.ChatStream(b.LLMConfig.SystemPrompt, msgs, onChunk)
+}
+
+func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, systemPrompt string, msgs []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, compactAllowed bool, tools []tooltypes.Tool, options tooltypes.Options, onChunk func(string) error) (llm.Response, []store.ToolTrace, error) {
+	specs := toolSpecs(tools)
+	if len(specs) == 0 {
+		coreLog.Warn(ctx, "tool calling requested with %d tool entries but no valid tool specs; falling back to plain chat", len(tools))
+		baseClient, ok := client.(llm.Client)
+		if !ok {
+			return llm.Response{}, nil, fmt.Errorf("tool-capable client does not implement base chat")
+		}
+		resp, err := b.chatWithoutTools(baseClient, compactAllowed, providerContext, compact, msgs, onChunk)
+		return resp, nil, err
+	}
+
+	maxCalls := effectiveMaxToolCalls(options.MaxCalls)
+	lookup := toolMap(tools)
+	coreLog.Debug(ctx, "tool loop start tools=%d max_calls=%d timeout=%s result_limit=%d", len(specs), maxCalls, effectiveToolTimeout(options.Timeout), effectiveToolResultLimit(options.ResultLimit))
+	var traces []store.ToolTrace
+	var previous llm.ToolState
+	var results []tooltypes.Result
+	totalCalls := 0
+	effectiveCompact := llm.CompactConfig{}
+	if compactAllowed {
+		effectiveCompact = compact
+	}
+
+	for {
+		resp, err := client.ChatStreamWithTools(systemPrompt, msgs, providerContext, effectiveCompact, specs, previous, results, onChunk)
+		if err != nil {
+			return llm.Response{}, traces, err
+		}
+		if len(resp.ToolCalls) == 0 {
+			coreLog.Debug(ctx, "tool loop finish calls=%d traces=%d text_len=%d images=%d", totalCalls, len(traces), len(resp.Text), len(resp.Images))
+			return resp.Response, traces, nil
+		}
+		if totalCalls+len(resp.ToolCalls) > maxCalls {
+			err := fmt.Errorf("tool call limit exceeded: %d > %d", totalCalls+len(resp.ToolCalls), maxCalls)
+			coreLog.Warn(ctx, "%v", err)
+			return llm.Response{}, traces, err
+		}
+
+		previous = resp.ToolState
+		results = results[:0]
+		coreLog.Debug(ctx, "model requested tool calls count=%d total_before=%d", len(resp.ToolCalls), totalCalls)
+		for _, call := range resp.ToolCalls {
+			call.Name = strings.TrimSpace(call.Name)
+			if _, ok := lookup[call.Name]; !ok {
+				coreLog.Warn(ctx, "model requested unavailable tool name=%s call_id=%s", call.Name, call.ID)
+			}
+			totalCalls++
+			result, trace := runTool(ctx, lookup[call.Name], call, options.Timeout, options.ResultLimit)
+			results = append(results, result)
+			traces = append(traces, trace)
+			if trace.Status == "error" {
+				coreLog.Warn(ctx, "tool call failed name=%s call_id=%s duration_ms=%d error=%s", trace.Name, trace.CallID, trace.DurationMillis, truncateText(trace.Error, defaultToolTraceTextLimit))
+			} else {
+				coreLog.Debug(ctx, "tool call finished name=%s call_id=%s status=%s duration_ms=%d", trace.Name, trace.CallID, trace.Status, trace.DurationMillis)
+			}
+		}
+	}
+}
+
+func effectiveMaxToolCalls(maxCalls int) int {
+	if maxCalls <= 0 {
+		return defaultMaxToolCalls
+	}
+	return maxCalls
+}
+
+func effectiveToolTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return defaultToolTimeout
+	}
+	return timeout
+}
+
+func effectiveToolResultLimit(limit int) int {
+	if limit <= 0 {
+		return defaultToolResultLimit
+	}
+	return limit
 }
 
 func (b *Bot) prepareUserMessage(ctx context.Context, msg InboundMessage, sessionID string, llmClient llm.Client) (store.Message, error) {

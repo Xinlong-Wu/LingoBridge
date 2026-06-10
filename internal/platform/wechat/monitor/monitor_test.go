@@ -101,6 +101,17 @@ func (f *fakeCursorStore) SaveSyncBuf(accountID, buf string) error {
 	return nil
 }
 
+type captureHandler struct {
+	called bool
+	msg    core.InboundMessage
+}
+
+func (h *captureHandler) Handle(ctx context.Context, msg core.InboundMessage, sender core.Sender) error {
+	h.called = true
+	h.msg = msg
+	return nil
+}
+
 type fakeConversationManager struct {
 	sess        *store.Session
 	conv        *store.Conversation
@@ -292,6 +303,7 @@ func newTestBot() (*bot, *fakeWechatClient, *fakeConversationManager, *fakeLLM) 
 		return &fakeLLM{response: llm.Response{Text: model.Name}}
 	}
 	return &bot{
+		account: store.Account{ID: "wechat:account", Name: "wechat-bot"},
 		client:  client,
 		cursors: &fakeCursorStore{},
 		handler: handler,
@@ -407,6 +419,24 @@ func TestProcessOneTextMessage(t *testing.T) {
 	}
 	if got := sessions.saved.Messages[0].Content; got != "hi" {
 		t.Fatalf("saved user message = %q, want hi", got)
+	}
+}
+
+func TestProcessOneTextMessageIncludesAccountIdentity(t *testing.T) {
+	handler := &captureHandler{}
+	b := &bot{
+		account: store.Account{ID: "wechat:account", Name: "wechat-bot"},
+		handler: handler,
+	}
+
+	if err := b.processOne(textMessage("hi")); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+	if !handler.called {
+		t.Fatal("handler was not called")
+	}
+	if handler.msg.Platform != store.PlatformWeChat || handler.msg.AccountID != "wechat:account" || handler.msg.AccountName != "wechat-bot" {
+		t.Fatalf("message scope = %#v, want wechat account identity", handler.msg)
 	}
 }
 
@@ -1043,6 +1073,24 @@ func TestProcessOneSlashCommand(t *testing.T) {
 	}
 	if got := lastSentText(t, client); !strings.Contains(got, "default") {
 		t.Fatalf("sent text = %q, want session list", got)
+	}
+}
+
+func TestProcessOneSlashCommandIncludesAccountIdentity(t *testing.T) {
+	handler := &captureHandler{}
+	b := &bot{
+		account: store.Account{ID: "wechat:account", Name: "wechat-bot"},
+		handler: handler,
+	}
+
+	if err := b.processOne(textMessage("/list")); err != nil {
+		t.Fatalf("processOne returned error: %v", err)
+	}
+	if !handler.called {
+		t.Fatal("handler was not called")
+	}
+	if handler.msg.Platform != store.PlatformWeChat || handler.msg.AccountID != "wechat:account" || handler.msg.AccountName != "wechat-bot" {
+		t.Fatalf("message scope = %#v, want wechat account identity", handler.msg)
 	}
 }
 

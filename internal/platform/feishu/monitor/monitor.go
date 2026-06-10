@@ -16,8 +16,10 @@ import (
 	"lingobridge/internal/core"
 	"lingobridge/internal/logging"
 	"lingobridge/internal/platform/feishu"
+	feishutools "lingobridge/internal/platform/feishu/tools"
 	"lingobridge/internal/session"
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 )
 
 var (
@@ -72,9 +74,17 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 	if err != nil {
 		return fmt.Errorf("resolve feishu bot identity for account %s: %w", acc.Name, err)
 	}
+	tools := feishutools.NewDocsTools(restClient, p.config.Tools)
+	if names := toolNames(tools); len(names) > 0 {
+		feishuLog.Info(ctx, "registered tools for account %s (%s): %s", acc.Name, acc.ID, strings.Join(names, ", "))
+	} else {
+		feishuLog.Debug(ctx, "no tools registered for account %s (%s)", acc.Name, acc.ID)
+	}
 	b := &bot{
 		handler:       handler,
 		sender:        &sdkSender{client: restClient},
+		tools:         tools,
+		account:       acc,
 		botOpenID:     botOpenID,
 		eventCommands: map[string][]string{},
 		deduper:       newEventDeduper(defaultFeishuDedupeTTL),
@@ -106,6 +116,20 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 	feishuLog.Info(ctx, "registered events for account %s (%s): %s", acc.Name, acc.ID, strings.Join(registeredEvents, ", "))
 	feishuLog.Info(ctx, "starting for account %s (%s)", acc.Name, acc.ID)
 	return runClient(ctx, wsClient)
+}
+
+func toolNames(tools []tooltypes.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		name := strings.TrimSpace(tool.Spec().Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func runClient(ctx context.Context, client interface {

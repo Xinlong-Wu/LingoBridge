@@ -7,6 +7,7 @@ import (
 
 	"lingobridge/internal/core"
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -25,6 +26,8 @@ type textProcessor interface {
 type bot struct {
 	handler       textProcessor
 	sender        textSender
+	tools         []tooltypes.Tool
+	account       store.Account
 	botOpenID     string
 	eventCommands map[string][]string
 	deduper       *eventDeduper
@@ -155,9 +158,17 @@ func (b *bot) processMessage(in incomingMessage) {
 	defer stopReaction()
 	if err := b.handler.Handle(ctx, core.InboundMessage{
 		Platform:    store.PlatformFeishu,
+		AccountID:   b.account.ID,
+		AccountName: b.account.Name,
 		UserKey:     in.UserID,
 		CommandText: in.Text,
 		LLMText:     in.Text,
+		Metadata: map[string]string{
+			"feishu.chat_id":        in.ChatID,
+			"feishu.message_id":     in.MessageID,
+			"feishu.sender_open_id": in.SenderOpenID,
+		},
+		Tools: b.tools,
 	}, resp); err != nil {
 		feishuLog.Warn(ctx, "process feishu message failed user=%s chat=%s: %v", in.UserID, in.ChatID, err)
 	}

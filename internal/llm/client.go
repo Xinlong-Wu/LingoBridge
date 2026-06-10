@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 )
 
 // Client is the common LLM client interface.
@@ -43,6 +44,29 @@ type ContextCompactor interface {
 // ContextStreamingClient sends a request with provider-native context state.
 type ContextStreamingClient interface {
 	ChatStreamWithContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, onChunk func(chunk string) error) (Response, error)
+}
+
+// ToolState stores opaque provider-owned items needed between tool-call turns.
+type ToolState struct {
+	Provider string
+	Endpoint string
+	Items    []json.RawMessage
+}
+
+func (s ToolState) IsEmpty() bool {
+	return len(s.Items) == 0
+}
+
+// ToolResponse contains either a final assistant response or requested tool calls.
+type ToolResponse struct {
+	Response
+	ToolCalls []tooltypes.Call
+	ToolState ToolState
+}
+
+// ToolCallingClient can run one provider turn with tool definitions and tool results.
+type ToolCallingClient interface {
+	ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, specs []tooltypes.Spec, previous ToolState, results []tooltypes.Result, onChunk func(chunk string) error) (ToolResponse, error)
 }
 
 // Response is the common LLM response shape across providers.

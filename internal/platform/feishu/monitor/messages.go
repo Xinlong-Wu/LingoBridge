@@ -40,6 +40,7 @@ type postElement struct {
 
 type incomingMessage struct {
 	UserID           string
+	SenderOpenID     string
 	ChatID           string
 	MessageID        string
 	ReplyToMessageID string
@@ -105,13 +106,13 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1, botOp
 	case "post":
 		text, err = extractPostMarkdown(deref(msg.Content), mentions, botOpenID)
 	default:
-		return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), Unsupported: true}, true
+		return incomingMessage{UserID: userKey, SenderOpenID: openID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), Unsupported: true}, true
 	}
 	if err != nil {
 		feishuLog.Warn(ctx, "parse %s message: %v", deref(msg.MessageType), err)
-		return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), Unsupported: true}, true
+		return incomingMessage{UserID: userKey, SenderOpenID: openID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), Unsupported: true}, true
 	}
-	return incomingMessage{UserID: userKey, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Text: text, Mentions: mentions.list()}, true
+	return incomingMessage{UserID: userKey, SenderOpenID: openID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Text: text, Mentions: mentions.list()}, true
 }
 
 func extractText(raw string, mentions *mentionCatalog) (string, error) {
