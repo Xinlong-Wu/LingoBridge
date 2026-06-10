@@ -9,8 +9,8 @@ import (
 	"unicode/utf8"
 
 	"lingobridge/internal/commands"
-	"lingobridge/internal/llm"
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 )
 
 const (
@@ -20,25 +20,42 @@ const (
 	defaultToolTraceTextLimit = 1024
 )
 
-type ToolSpec = llm.ToolSpec
-type ToolCall = llm.ToolCall
-type ToolResult = llm.ToolResult
-type ToolTrace = store.ToolTrace
-
-// Tool is a platform-provided function that can be exposed to a tool-capable LLM.
-type Tool interface {
-	Spec() ToolSpec
-	Execute(ctx context.Context, call ToolCall) ToolResult
+func mergeTools(ctx context.Context, platformTools, providerTools []tooltypes.Tool) []tooltypes.Tool {
+	if len(platformTools) == 0 && len(providerTools) == 0 {
+		return nil
+	}
+	tools := make([]tooltypes.Tool, 0, len(platformTools)+len(providerTools))
+	seen := map[string]string{}
+	add := func(source string, candidates []tooltypes.Tool) {
+		for _, tool := range candidates {
+			name := toolName(tool)
+			if name == "" {
+				continue
+			}
+			if firstSource, ok := seen[name]; ok {
+				coreLog.Warn(ctx, "skipping duplicate tool name=%s source=%s first_source=%s", name, source, firstSource)
+				continue
+			}
+			seen[name] = source
+			tools = append(tools, tool)
+		}
+	}
+	add("platform", platformTools)
+	add("provider", providerTools)
+	return tools
 }
 
-func toolSpecs(tools []Tool) []llm.ToolSpec {
-	specs := make([]llm.ToolSpec, 0, len(tools))
+func toolName(tool tooltypes.Tool) string {
+	if tool == nil {
+		return ""
+	}
+	return strings.TrimSpace(tool.Spec().Name)
+}
+
+func toolSpecs(tools []tooltypes.Tool) []tooltypes.Spec {
+	specs := make([]tooltypes.Spec, 0, len(tools))
 	for _, tool := range tools {
-		if tool == nil {
-			continue
-		}
-		spec := tool.Spec()
-		spec.Name = strings.TrimSpace(spec.Name)
+		spec := toolSpec(tool)
 		if spec.Name == "" {
 			continue
 		}
@@ -47,13 +64,10 @@ func toolSpecs(tools []Tool) []llm.ToolSpec {
 	return specs
 }
 
-func toolMap(tools []Tool) map[string]Tool {
-	out := map[string]Tool{}
+func toolMap(tools []tooltypes.Tool) map[string]tooltypes.Tool {
+	out := map[string]tooltypes.Tool{}
 	for _, tool := range tools {
-		if tool == nil {
-			continue
-		}
-		name := strings.TrimSpace(tool.Spec().Name)
+		name := toolName(tool)
 		if name != "" {
 			out[name] = tool
 		}
@@ -61,23 +75,28 @@ func toolMap(tools []Tool) map[string]Tool {
 	return out
 }
 
-func commandToolSummaries(tools []Tool) []commands.ToolSummary {
+func commandToolSummaries(tools []tooltypes.Tool) []commands.ToolSummary {
 	summaries := make([]commands.ToolSummary, 0, len(tools))
 	for _, tool := range tools {
-		if tool == nil {
-			continue
-		}
-		spec := tool.Spec()
-		name := strings.TrimSpace(spec.Name)
-		if name == "" {
+		spec := toolSpec(tool)
+		if spec.Name == "" {
 			continue
 		}
 		summaries = append(summaries, commands.ToolSummary{
-			Name:        name,
+			Name:        spec.Name,
 			Description: spec.Description,
 		})
 	}
 	return summaries
+}
+
+func toolSpec(tool tooltypes.Tool) tooltypes.Spec {
+	if tool == nil {
+		return tooltypes.Spec{}
+	}
+	spec := tool.Spec()
+	spec.Name = strings.TrimSpace(spec.Name)
+	return spec
 }
 
 func commandName(text string) string {
@@ -88,7 +107,7 @@ func commandName(text string) string {
 	return parts[0]
 }
 
-func runTool(ctx context.Context, tool Tool, call ToolCall, timeout time.Duration, resultLimit int) (llm.ToolResult, store.ToolTrace) {
+func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, timeout time.Duration, resultLimit int) (tooltypes.Result, store.ToolTrace) {
 	if timeout <= 0 {
 		timeout = defaultToolTimeout
 	}
@@ -105,7 +124,7 @@ func runTool(ctx context.Context, tool Tool, call ToolCall, timeout time.Duratio
 	}
 
 	if tool == nil {
-		result := llm.ToolResult{
+		result := tooltypes.Result{
 			CallID:  call.ID,
 			Name:    call.Name,
 			Content: fmt.Sprintf("tool %q is not available", call.Name),
@@ -120,11 +139,11 @@ func runTool(ctx context.Context, tool Tool, call ToolCall, timeout time.Duratio
 	toolCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	done := make(chan llm.ToolResult, 1)
+	done := make(chan tooltypes.Result, 1)
 	go func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				done <- llm.ToolResult{
+				done <- tooltypes.Result{
 					CallID:  call.ID,
 					Name:    call.Name,
 					Content: fmt.Sprintf("tool panicked: %v", recovered),
@@ -142,11 +161,11 @@ func runTool(ctx context.Context, tool Tool, call ToolCall, timeout time.Duratio
 		done <- result
 	}()
 
-	var result llm.ToolResult
+	var result tooltypes.Result
 	select {
 	case result = <-done:
 	case <-toolCtx.Done():
-		result = llm.ToolResult{
+		result = tooltypes.Result{
 			CallID:  call.ID,
 			Name:    call.Name,
 			Content: fmt.Sprintf("tool timed out after %s", timeout),

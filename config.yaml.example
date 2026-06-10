@@ -48,6 +48,25 @@ llm:
   # Default: 0
   max_history: 0
 
+mcp:
+  # Optional global MCP servers exposed as tools to tool-capable LLM profiles.
+  # Tool names are registered as mcp_<server>_<tool>, for example
+  # mcp_filesystem_read_file.
+  servers:
+    filesystem:
+      transport: "stdio"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      env: {}
+      cwd: ""
+
+    remote_docs:
+      enabled: false
+      transport: "streamable_http"
+      url: "https://example.com/mcp"
+      headers:
+        Authorization: "Bearer your-token"
+
 platforms:
   # Each platform owns the schema under platforms.<platform>.
   feishu:

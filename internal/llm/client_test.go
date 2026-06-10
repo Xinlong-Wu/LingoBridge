@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 )
 
 func TestParseSSE(t *testing.T) {
@@ -566,7 +567,7 @@ func TestOpenAIResponsesToolCallingRoundTrip(t *testing.T) {
 	defer server.Close()
 
 	client := &openaiResponsesClient{openaiBase: openaiBase{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "gpt-test"}, httpClient: server.Client()}}
-	tools := []ToolSpec{{Name: "feishu_docs_search", Description: "search", Parameters: json.RawMessage(`{"type":"object"}`)}}
+	tools := []tooltypes.Spec{{Name: "feishu_docs_search", Description: "search", Parameters: json.RawMessage(`{"type":"object"}`)}}
 	first, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, ToolState{}, nil, nil)
 	if err != nil {
 		t.Fatalf("ChatStreamWithTools first returned error: %v", err)
@@ -578,7 +579,7 @@ func TestOpenAIResponsesToolCallingRoundTrip(t *testing.T) {
 		t.Fatalf("request bodies = %#v, want tools in first request", bodies)
 	}
 
-	second, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []ToolResult{{CallID: "call_1", Name: "feishu_docs_search", Content: `{"ok":true}`}}, nil)
+	second, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []tooltypes.Result{{CallID: "call_1", Name: "feishu_docs_search", Content: `{"ok":true}`}}, nil)
 	if err != nil {
 		t.Fatalf("ChatStreamWithTools second returned error: %v", err)
 	}
@@ -618,7 +619,7 @@ func TestOpenAIResponsesStreamingToolStateOmitsMessageContent(t *testing.T) {
 	defer server.Close()
 
 	client := &openaiResponsesClient{openaiBase: openaiBase{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "gpt-test"}, httpClient: server.Client()}}
-	tools := []ToolSpec{{Name: "feishu_docs_search", Description: "search", Parameters: json.RawMessage(`{"type":"object"}`)}}
+	tools := []tooltypes.Spec{{Name: "feishu_docs_search", Description: "search", Parameters: json.RawMessage(`{"type":"object"}`)}}
 	first, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, ToolState{}, nil, func(string) error { return nil })
 	if err != nil {
 		t.Fatalf("ChatStreamWithTools first returned error: %v", err)
@@ -627,7 +628,7 @@ func TestOpenAIResponsesStreamingToolStateOmitsMessageContent(t *testing.T) {
 		t.Fatalf("tool calls = %#v, want call_1", first.ToolCalls)
 	}
 
-	if _, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []ToolResult{{CallID: "call_1", Name: "feishu_docs_search", Content: `{"ok":true}`}}, nil); err != nil {
+	if _, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []tooltypes.Result{{CallID: "call_1", Name: "feishu_docs_search", Content: `{"ok":true}`}}, nil); err != nil {
 		t.Fatalf("ChatStreamWithTools second returned error: %v", err)
 	}
 	input := bodies[1]["input"].([]any)
@@ -665,7 +666,7 @@ func TestOpenAIChatToolCallingRoundTrip(t *testing.T) {
 	defer server.Close()
 
 	client := &openaiChatClient{openaiBase: openaiBase{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "gpt-test"}, httpClient: server.Client()}}
-	tools := []ToolSpec{{Name: "feishu_docs_search", Parameters: json.RawMessage(`{"type":"object"}`)}}
+	tools := []tooltypes.Spec{{Name: "feishu_docs_search", Parameters: json.RawMessage(`{"type":"object"}`)}}
 	first, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, ToolState{}, nil, nil)
 	if err != nil {
 		t.Fatalf("ChatStreamWithTools first returned error: %v", err)
@@ -676,7 +677,7 @@ func TestOpenAIChatToolCallingRoundTrip(t *testing.T) {
 	if len(bodies[0]["tools"].([]any)) != 1 {
 		t.Fatalf("first body = %#v, want tools", bodies[0])
 	}
-	second, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []ToolResult{{CallID: "call_1", Content: "ok"}}, nil)
+	second, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []tooltypes.Result{{CallID: "call_1", Content: "ok"}}, nil)
 	if err != nil {
 		t.Fatalf("ChatStreamWithTools second returned error: %v", err)
 	}
@@ -708,7 +709,7 @@ func TestAnthropicToolCallingRoundTrip(t *testing.T) {
 	defer server.Close()
 
 	client := &anthropicClient{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "claude-test"}, httpClient: server.Client()}
-	tools := []ToolSpec{{Name: "feishu_docs_read", Parameters: json.RawMessage(`{"type":"object"}`)}}
+	tools := []tooltypes.Spec{{Name: "feishu_docs_read", Parameters: json.RawMessage(`{"type":"object"}`)}}
 	first, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, ToolState{}, nil, nil)
 	if err != nil {
 		t.Fatalf("ChatStreamWithTools first returned error: %v", err)
@@ -719,7 +720,7 @@ func TestAnthropicToolCallingRoundTrip(t *testing.T) {
 	if len(bodies[0]["tools"].([]any)) != 1 {
 		t.Fatalf("first body = %#v, want tools", bodies[0])
 	}
-	second, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []ToolResult{{CallID: "toolu_1", Content: "ok"}}, nil)
+	second, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, tools, first.ToolState, []tooltypes.Result{{CallID: "toolu_1", Content: "ok"}}, nil)
 	if err != nil {
 		t.Fatalf("ChatStreamWithTools second returned error: %v", err)
 	}

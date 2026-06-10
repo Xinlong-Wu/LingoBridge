@@ -13,8 +13,8 @@ import (
 	larkdocx "github.com/larksuite/oapi-sdk-go/v3/service/docx/v1"
 	larksearch "github.com/larksuite/oapi-sdk-go/v3/service/search/v2"
 
-	"lingobridge/internal/core"
 	"lingobridge/internal/platform/feishu"
+	tooltypes "lingobridge/internal/tools"
 )
 
 const (
@@ -27,18 +27,18 @@ const (
 
 type docsTool struct {
 	name   string
-	spec   core.ToolSpec
+	spec   tooltypes.Spec
 	client *lark.Client
 	cfg    feishu.ToolsConfig
 }
 
 // NewDocsTools returns Feishu document tools for tool-capable LLM providers.
-func NewDocsTools(client *lark.Client, cfg feishu.ToolsConfig) []core.Tool {
+func NewDocsTools(client *lark.Client, cfg feishu.ToolsConfig) []tooltypes.Tool {
 	cfg = feishu.NormalizeToolsConfig(cfg)
 	if client == nil || !cfg.Docs.Enabled {
 		return nil
 	}
-	tools := []core.Tool{
+	tools := []tooltypes.Tool{
 		docsTool{name: searchToolName, spec: docsSearchSpec(), client: client, cfg: cfg},
 		docsTool{name: readToolName, spec: docsReadSpec(), client: client, cfg: cfg},
 	}
@@ -51,11 +51,11 @@ func NewDocsTools(client *lark.Client, cfg feishu.ToolsConfig) []core.Tool {
 	return tools
 }
 
-func (t docsTool) Spec() core.ToolSpec {
+func (t docsTool) Spec() tooltypes.Spec {
 	return t.spec
 }
 
-func (t docsTool) Execute(ctx context.Context, call core.ToolCall) core.ToolResult {
+func (t docsTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes.Result {
 	var content string
 	var err error
 	switch t.name {
@@ -70,7 +70,7 @@ func (t docsTool) Execute(ctx context.Context, call core.ToolCall) core.ToolResu
 	default:
 		err = fmt.Errorf("unsupported feishu docs tool %q", t.name)
 	}
-	return core.ToolResult{
+	return tooltypes.Result{
 		CallID:  call.ID,
 		Name:    t.name,
 		Content: contentOrError(content, err),
@@ -419,32 +419,32 @@ func normalizeDocKind(kind string) string {
 	}
 }
 
-func docsSearchSpec() core.ToolSpec {
-	return core.ToolSpec{
+func docsSearchSpec() tooltypes.Spec {
+	return tooltypes.Spec{
 		Name:        searchToolName,
 		Description: "Search Feishu Docs and Wiki visible to the configured Feishu app. Returns titles, summaries, URLs, and tokens.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Search keywords."},"max_items":{"type":"integer","minimum":1,"maximum":20},"space_id":{"type":"string","description":"Optional Wiki space ID; must be allowed by configuration."}},"required":["query"],"additionalProperties":false}`),
 	}
 }
 
-func docsReadSpec() core.ToolSpec {
-	return core.ToolSpec{
+func docsReadSpec() tooltypes.Spec {
+	return tooltypes.Spec{
 		Name:        readToolName,
 		Description: "Read plain text from a Feishu docx document by token or URL. The result may be truncated by configuration.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"token":{"type":"string","description":"Feishu docx document token."},"url":{"type":"string","description":"Feishu document URL."},"type":{"type":"string","enum":["docx","wiki","file"],"description":"Document type hint."}},"additionalProperties":false}`),
 	}
 }
 
-func docsCreateSpec() core.ToolSpec {
-	return core.ToolSpec{
+func docsCreateSpec() tooltypes.Spec {
+	return tooltypes.Spec{
 		Name:        createToolName,
 		Description: "Create a Feishu docx document in an allowed folder and optionally add initial text content.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"title":{"type":"string"},"content":{"type":"string"},"folder_token":{"type":"string","description":"Must be listed in platforms.feishu.tools.allowed_folder_tokens."}},"required":["title","folder_token"],"additionalProperties":false}`),
 	}
 }
 
-func docsAppendSpec() core.ToolSpec {
-	return core.ToolSpec{
+func docsAppendSpec() tooltypes.Spec {
+	return tooltypes.Spec{
 		Name:        appendToolName,
 		Description: "Append plain text paragraphs to an existing Feishu docx document. Requires an allowed folder token guard.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"token":{"type":"string"},"url":{"type":"string"},"content":{"type":"string"},"folder_token":{"type":"string","description":"Must be listed in platforms.feishu.tools.allowed_folder_tokens."}},"required":["content","folder_token"],"additionalProperties":false}`),

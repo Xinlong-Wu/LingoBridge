@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 )
 
 // Client is the common LLM client interface.
@@ -45,28 +46,6 @@ type ContextStreamingClient interface {
 	ChatStreamWithContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, onChunk func(chunk string) error) (Response, error)
 }
 
-// ToolSpec describes one client-side function exposed to an LLM provider.
-type ToolSpec struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
-}
-
-// ToolCall is a provider-neutral request to run a client-side tool.
-type ToolCall struct {
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
-}
-
-// ToolResult is the result returned to the provider for one tool call.
-type ToolResult struct {
-	CallID  string
-	Name    string
-	Content string
-	IsError bool
-}
-
 // ToolState stores opaque provider-owned items needed between tool-call turns.
 type ToolState struct {
 	Provider string
@@ -81,13 +60,13 @@ func (s ToolState) IsEmpty() bool {
 // ToolResponse contains either a final assistant response or requested tool calls.
 type ToolResponse struct {
 	Response
-	ToolCalls []ToolCall
+	ToolCalls []tooltypes.Call
 	ToolState ToolState
 }
 
 // ToolCallingClient can run one provider turn with tool definitions and tool results.
 type ToolCallingClient interface {
-	ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, tools []ToolSpec, previous ToolState, results []ToolResult, onChunk func(chunk string) error) (ToolResponse, error)
+	ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, specs []tooltypes.Spec, previous ToolState, results []tooltypes.Result, onChunk func(chunk string) error) (ToolResponse, error)
 }
 
 // Response is the common LLM response shape across providers.

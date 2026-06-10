@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	tooltypes "lingobridge/internal/tools"
 )
 
-func toolResultOutput(result ToolResult) string {
+func toolResultOutput(result tooltypes.Result) string {
 	if result.IsError {
 		return fmt.Sprintf("ERROR: %s", strings.TrimSpace(result.Content))
 	}

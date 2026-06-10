@@ -356,6 +356,55 @@ func TestLoadDefaultsAnthropicEndpointToMessages(t *testing.T) {
 	}
 }
 
+func TestMCPConfigDefaultsAndValidation(t *testing.T) {
+	cfg := MCPConfig{
+		Servers: map[string]MCPServerConfig{
+			"local": {
+				Transport: MCPTransportStdio,
+				Command:   "node",
+				Env:       map[string]string{" TOKEN ": " secret "},
+			},
+			"remote": {
+				Transport: MCPTransportStreamableHTTP,
+				URL:       "https://example.com/mcp",
+			},
+		},
+	}
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+	if !cfg.Servers["local"].IsEnabled() {
+		t.Fatal("local server disabled by default, want enabled")
+	}
+	if _, ok := cfg.Servers["local"].Env["TOKEN"]; !ok {
+		t.Fatalf("env keys = %#v, want trimmed TOKEN", cfg.Servers["local"].Env)
+	}
+
+	disabled := false
+	cfg.Servers["staged"] = MCPServerConfig{Enabled: &disabled}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate with disabled staged server returned error: %v", err)
+	}
+
+	cfg.Servers["missing_command"] = MCPServerConfig{Transport: MCPTransportStdio}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "command is required") {
+		t.Fatalf("Validate error = %v, want missing command", err)
+	}
+}
+
+func TestMCPConfigValidateHTTPURL(t *testing.T) {
+	cfg := MCPConfig{Servers: map[string]MCPServerConfig{
+		"remote": {Transport: MCPTransportStreamableHTTP, URL: "ftp://example.com/mcp"},
+	}}
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "http or https") {
+		t.Fatalf("Validate error = %v, want http url error", err)
+	}
+}
+
 func TestAddModelSetsFirstModelAsDefault(t *testing.T) {
 	cfg := DefaultConfig()
 

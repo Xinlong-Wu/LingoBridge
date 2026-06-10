@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 )
 
 type openaiChatClient struct {
@@ -116,7 +117,7 @@ func (c *openaiChatClient) ChatStream(systemPrompt string, messages []store.Mess
 	return Response{Text: text}, nil
 }
 
-func (c *openaiChatClient) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, tools []ToolSpec, previous ToolState, results []ToolResult, onChunk func(chunk string) error) (ToolResponse, error) {
+func (c *openaiChatClient) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, tools []tooltypes.Spec, previous ToolState, results []tooltypes.Result, onChunk func(chunk string) error) (ToolResponse, error) {
 	chatMessages, err := convertToOpenAIChatMessages(messages)
 	if err != nil {
 		return ToolResponse{}, err
@@ -169,7 +170,7 @@ func convertToOpenAIChatMessages(messages []store.Message) ([]openaiChatMessage,
 	return out, nil
 }
 
-func openAIChatTools(tools []ToolSpec) []openaiChatTool {
+func openAIChatTools(tools []tooltypes.Spec) []openaiChatTool {
 	out := make([]openaiChatTool, 0, len(tools))
 	for _, tool := range tools {
 		name := strings.TrimSpace(tool.Name)
@@ -207,7 +208,7 @@ func parseOpenAIChatToolMessage(msg openaiChatMessage) ToolResponse {
 		if len(args) == 0 {
 			args = json.RawMessage(`{}`)
 		}
-		resp.ToolCalls = append(resp.ToolCalls, ToolCall{
+		resp.ToolCalls = append(resp.ToolCalls, tooltypes.Call{
 			ID:        toolCall.ID,
 			Name:      toolCall.Function.Name,
 			Arguments: args,

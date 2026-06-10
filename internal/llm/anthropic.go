@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 )
 
 const (
@@ -181,7 +182,7 @@ func (c *anthropicClient) ChatStreamWithContext(systemPrompt string, messages []
 	return c.chatStream(systemPrompt, messages, providerContext, compact, true, onChunk)
 }
 
-func (c *anthropicClient) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, tools []ToolSpec, previous ToolState, results []ToolResult, onChunk func(chunk string) error) (ToolResponse, error) {
+func (c *anthropicClient) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, tools []tooltypes.Spec, previous ToolState, results []tooltypes.Result, onChunk func(chunk string) error) (ToolResponse, error) {
 	anthropicMsgs, system, err := convertToAnthropicMessagesWithContext(messages, systemPrompt, providerContext)
 	if err != nil {
 		return ToolResponse{}, err
@@ -326,7 +327,7 @@ func anthropicCompactTriggerTokens(compact CompactConfig) int {
 	return tokens
 }
 
-func anthropicTools(tools []ToolSpec) []anthropicTool {
+func anthropicTools(tools []tooltypes.Spec) []anthropicTool {
 	out := make([]anthropicTool, 0, len(tools))
 	for _, tool := range tools {
 		name := strings.TrimSpace(tool.Name)
@@ -394,7 +395,7 @@ func parseAnthropicToolResponse(body []byte) (ToolResponse, error) {
 		if len(args) == 0 {
 			args = json.RawMessage(`{}`)
 		}
-		resp.ToolCalls = append(resp.ToolCalls, ToolCall{
+		resp.ToolCalls = append(resp.ToolCalls, tooltypes.Call{
 			ID:        toolUse.ID,
 			Name:      toolUse.Name,
 			Arguments: args,

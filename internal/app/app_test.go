@@ -372,6 +372,9 @@ func TestRuntimeStateEnablesTextStreamingOnlyForFeishu(t *testing.T) {
 	if wechatRuntime.handler.TextChunkLimit != builtins.WeChatTextChunkLimit {
 		t.Fatalf("wechat TextChunkLimit = %d, want %d", wechatRuntime.handler.TextChunkLimit, builtins.WeChatTextChunkLimit)
 	}
+	if wechatRuntime.handler.ToolProvider != state.mcpHost {
+		t.Fatal("wechat ToolProvider is not the runtime MCP host")
+	}
 	_, feishuRuntime, ok := state.snapshot(store.PlatformFeishu)
 	if !ok {
 		t.Fatal("feishu runtime not found")
@@ -381,6 +384,12 @@ func TestRuntimeStateEnablesTextStreamingOnlyForFeishu(t *testing.T) {
 	}
 	if feishuRuntime.handler.TextChunkLimit != builtins.FeishuTextChunkLimit {
 		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishuRuntime.handler.TextChunkLimit, builtins.FeishuTextChunkLimit)
+	}
+	if feishuRuntime.handler.ToolProvider != state.mcpHost {
+		t.Fatal("feishu ToolProvider is not the runtime MCP host")
+	}
+	if err := state.Close(context.Background()); err != nil {
+		t.Fatalf("Close returned error: %v", err)
 	}
 }
 

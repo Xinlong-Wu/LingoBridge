@@ -7,6 +7,7 @@ import (
 
 	"lingobridge/internal/core"
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -25,7 +26,7 @@ type textProcessor interface {
 type bot struct {
 	handler       textProcessor
 	sender        textSender
-	tools         []core.Tool
+	tools         []tooltypes.Tool
 	botOpenID     string
 	eventCommands map[string][]string
 	deduper       *eventDeduper

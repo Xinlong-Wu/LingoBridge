@@ -19,6 +19,7 @@ import (
 	feishutools "lingobridge/internal/platform/feishu/tools"
 	"lingobridge/internal/session"
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 )
 
 var (
@@ -116,7 +117,7 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 	return runClient(ctx, wsClient)
 }
 
-func toolNames(tools []core.Tool) []string {
+func toolNames(tools []tooltypes.Tool) []string {
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
 		if tool == nil {

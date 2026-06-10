@@ -12,6 +12,7 @@ import (
 	"lingobridge/internal/llm"
 	"lingobridge/internal/logging"
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 )
 
 var coreLog = logging.For("core")
@@ -50,7 +51,7 @@ type InboundMessage struct {
 	MutateResponse     ResponseMutator
 	ErrorNotice        func(error) string
 	Metadata           map[string]string
-	Tools              []Tool
+	Tools              []tooltypes.Tool
 }
 
 type OutboundMessage struct {
@@ -80,9 +81,7 @@ type Bot struct {
 	ErrorNotice         func(error) string
 	TextChunkLimit      int
 	EnableTextStreaming bool
-	MaxToolCalls        int
-	ToolTimeout         time.Duration
-	ToolResultLimit     int
+	ToolProvider        tooltypes.Provider
 }
 
 func New(sessions ConversationManager, cfg config.LLMConfig) *Bot {
@@ -102,6 +101,7 @@ func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) err
 	if isCompactCommand(msg.CommandText) {
 		return b.handleCompactCommand(ctx, msg, sender)
 	}
+	msg.Tools = b.toolsForMessage(ctx, msg.Tools)
 	commandTools := commandToolSummaries(msg.Tools)
 	if resp, handled, err := commands.HandleWithOptions(msg.CommandText, msg.UserKey, b.Sessions, commands.HandleOptions{
 		Policy: msg.CommandPolicy,
@@ -119,6 +119,25 @@ func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) err
 		return nil
 	}
 	return b.reply(ctx, msg, sender)
+}
+
+func (b *Bot) toolsForMessage(ctx context.Context, messageTools []tooltypes.Tool) []tooltypes.Tool {
+	var provided []tooltypes.Tool
+	if b.ToolProvider != nil {
+		provided = b.ToolProvider.Tools()
+	}
+	tools := mergeTools(ctx, messageTools, provided)
+	if len(tools) != len(messageTools)+len(provided) {
+		coreLog.Debug(ctx, "merged tools platform=%d provider=%d effective=%d", len(messageTools), len(provided), len(tools))
+	}
+	return tools
+}
+
+func (b *Bot) toolOptions() tooltypes.Options {
+	if b.ToolProvider == nil {
+		return tooltypes.Options{}
+	}
+	return b.ToolProvider.ToolOptions()
 }
 
 func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) error {
@@ -303,7 +322,7 @@ func (b *Bot) chatWithoutTools(client llm.Client, compactAllowed bool, providerC
 	return client.ChatStream(b.LLMConfig.SystemPrompt, msgs, onChunk)
 }
 
-func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, systemPrompt string, msgs []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, compactAllowed bool, tools []Tool, onChunk func(string) error) (llm.Response, []store.ToolTrace, error) {
+func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, systemPrompt string, msgs []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, compactAllowed bool, tools []tooltypes.Tool, onChunk func(string) error) (llm.Response, []store.ToolTrace, error) {
 	specs := toolSpecs(tools)
 	if len(specs) == 0 {
 		coreLog.Warn(ctx, "tool calling requested with %d tool entries but no valid tool specs; falling back to plain chat", len(tools))
@@ -315,15 +334,13 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 		return resp, nil, err
 	}
 
-	maxCalls := b.MaxToolCalls
-	if maxCalls <= 0 {
-		maxCalls = defaultMaxToolCalls
-	}
+	options := b.toolOptions()
+	maxCalls := effectiveMaxToolCalls(options.MaxCalls)
 	lookup := toolMap(tools)
-	coreLog.Debug(ctx, "tool loop start tools=%d max_calls=%d timeout=%s result_limit=%d", len(specs), maxCalls, effectiveToolTimeout(b.ToolTimeout), effectiveToolResultLimit(b.ToolResultLimit))
+	coreLog.Debug(ctx, "tool loop start tools=%d max_calls=%d timeout=%s result_limit=%d", len(specs), maxCalls, effectiveToolTimeout(options.Timeout), effectiveToolResultLimit(options.ResultLimit))
 	var traces []store.ToolTrace
 	var previous llm.ToolState
-	var results []llm.ToolResult
+	var results []tooltypes.Result
 	totalCalls := 0
 	effectiveCompact := llm.CompactConfig{}
 	if compactAllowed {
@@ -354,7 +371,7 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 				coreLog.Warn(ctx, "model requested unavailable tool name=%s call_id=%s", call.Name, call.ID)
 			}
 			totalCalls++
-			result, trace := runTool(ctx, lookup[call.Name], call, b.ToolTimeout, b.ToolResultLimit)
+			result, trace := runTool(ctx, lookup[call.Name], call, options.Timeout, options.ResultLimit)
 			results = append(results, result)
 			traces = append(traces, trace)
 			if trace.Status == "error" {
@@ -364,6 +381,13 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 			}
 		}
 	}
+}
+
+func effectiveMaxToolCalls(maxCalls int) int {
+	if maxCalls <= 0 {
+		return defaultMaxToolCalls
+	}
+	return maxCalls
 }
 
 func effectiveToolTimeout(timeout time.Duration) time.Duration {

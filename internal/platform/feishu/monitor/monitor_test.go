@@ -16,6 +16,7 @@ import (
 	"lingobridge/internal/logging"
 	"lingobridge/internal/platform/feishu"
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -80,12 +81,12 @@ func (f *fakeProcessor) Handle(ctx context.Context, msg core.InboundMessage, sen
 
 type fakeCoreTool struct{}
 
-func (fakeCoreTool) Spec() core.ToolSpec {
-	return core.ToolSpec{Name: "fake_tool"}
+func (fakeCoreTool) Spec() tooltypes.Spec {
+	return tooltypes.Spec{Name: "fake_tool"}
 }
 
-func (fakeCoreTool) Execute(ctx context.Context, call core.ToolCall) core.ToolResult {
-	return core.ToolResult{CallID: call.ID, Name: call.Name, Content: "ok"}
+func (fakeCoreTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes.Result {
+	return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: "ok"}
 }
 
 type sentText struct {
@@ -751,7 +752,7 @@ func TestHandleTextMessageUsesBridgeAndReplies(t *testing.T) {
 func TestHandleGroupTextMessageRepliesToOriginal(t *testing.T) {
 	processor := &fakeProcessor{}
 	sender := &fakeSender{}
-	b := &bot{handler: processor, sender: sender, tools: []core.Tool{fakeCoreTool{}}}
+	b := &bot{handler: processor, sender: sender, tools: []tooltypes.Tool{fakeCoreTool{}}}
 
 	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"hi"}`, nil)); err != nil {
 		t.Fatalf("handleMessage returned error: %v", err)

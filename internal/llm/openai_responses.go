@@ -12,6 +12,7 @@ import (
 
 	"lingobridge/internal/logging"
 	"lingobridge/internal/store"
+	tooltypes "lingobridge/internal/tools"
 )
 
 var openAILog = logging.For("openai")
@@ -204,7 +205,7 @@ func (c *openaiResponsesClient) ChatStreamWithContext(systemPrompt string, messa
 	return c.chatResponses(systemPrompt, messages, providerContext, compact, true, onChunk)
 }
 
-func (c *openaiResponsesClient) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, tools []ToolSpec, previous ToolState, results []ToolResult, onChunk func(chunk string) error) (ToolResponse, error) {
+func (c *openaiResponsesClient) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact CompactConfig, tools []tooltypes.Spec, previous ToolState, results []tooltypes.Result, onChunk func(chunk string) error) (ToolResponse, error) {
 	input, err := c.convertToResponsesInputWithContext(messages, providerContext)
 	if err != nil {
 		return ToolResponse{}, err
@@ -384,7 +385,7 @@ func compactThresholdTokens(compact CompactConfig) int {
 	return int(math.Ceil(float64(compact.ContextWindow) * compact.Threshold))
 }
 
-func responsesTools(tools []ToolSpec) []responsesTool {
+func responsesTools(tools []tooltypes.Spec) []responsesTool {
 	out := make([]responsesTool, 0, len(tools))
 	for _, tool := range tools {
 		name := strings.TrimSpace(tool.Name)
@@ -702,7 +703,7 @@ func appendResponsesToolCall(resp *ToolResponse, item responsesOutputItem, raw j
 	if len(args) == 0 {
 		args = json.RawMessage(`{}`)
 	}
-	resp.ToolCalls = append(resp.ToolCalls, ToolCall{
+	resp.ToolCalls = append(resp.ToolCalls, tooltypes.Call{
 		ID:        callID,
 		Name:      item.Name,
 		Arguments: args,
