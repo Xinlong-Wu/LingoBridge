@@ -42,6 +42,7 @@ type TextStream interface {
 type InboundMessage struct {
 	Platform           string
 	AccountID          string
+	AccountName        string
 	UserKey            string
 	CommandText        string
 	CommandPolicy      commands.Policy
@@ -101,7 +102,8 @@ func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) err
 	if isCompactCommand(msg.CommandText) {
 		return b.handleCompactCommand(ctx, msg, sender)
 	}
-	msg.Tools = b.toolsForMessage(ctx, msg.Tools)
+	selection := b.resolveToolsForMessage(ctx, msg)
+	msg.Tools = selection.Tools
 	commandTools := commandToolSummaries(msg.Tools)
 	if resp, handled, err := commands.HandleWithOptions(msg.CommandText, msg.UserKey, b.Sessions, commands.HandleOptions{
 		Policy: msg.CommandPolicy,
@@ -118,29 +120,26 @@ func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) err
 	if strings.TrimSpace(msg.LLMText) == "" && msg.PrepareUserMessage == nil {
 		return nil
 	}
-	return b.reply(ctx, msg, sender)
+	return b.reply(ctx, msg, sender, selection.Options)
 }
 
-func (b *Bot) toolsForMessage(ctx context.Context, messageTools []tooltypes.Tool) []tooltypes.Tool {
-	var provided []tooltypes.Tool
+func (b *Bot) resolveToolsForMessage(ctx context.Context, msg InboundMessage) tooltypes.Selection {
+	var providerSelection tooltypes.Selection
 	if b.ToolProvider != nil {
-		provided = b.ToolProvider.Tools()
+		providerSelection = b.ToolProvider.Resolve(tooltypes.Scope{
+			Platform:    msg.Platform,
+			AccountID:   msg.AccountID,
+			AccountName: msg.AccountName,
+		})
 	}
-	tools := mergeTools(ctx, messageTools, provided)
-	if len(tools) != len(messageTools)+len(provided) {
-		coreLog.Debug(ctx, "merged tools platform=%d provider=%d effective=%d", len(messageTools), len(provided), len(tools))
+	tools := mergeTools(ctx, msg.Tools, providerSelection.Tools)
+	if len(tools) != len(msg.Tools)+len(providerSelection.Tools) {
+		coreLog.Debug(ctx, "merged tools platform=%d provider=%d effective=%d", len(msg.Tools), len(providerSelection.Tools), len(tools))
 	}
-	return tools
+	return tooltypes.Selection{Tools: tools, Options: providerSelection.Options}
 }
 
-func (b *Bot) toolOptions() tooltypes.Options {
-	if b.ToolProvider == nil {
-		return tooltypes.Options{}
-	}
-	return b.ToolProvider.ToolOptions()
-}
-
-func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) error {
+func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, toolOptions tooltypes.Options) error {
 	sess, err := b.Sessions.GetOrCreateCurrentSession(msg.UserKey)
 	if err != nil {
 		coreLog.Error(ctx, "get session: %v", err)
@@ -222,7 +221,7 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender) erro
 	var toolTraces []store.ToolTrace
 	if len(msg.Tools) > 0 {
 		if toolClient, ok := llmClient.(llm.ToolCallingClient); ok {
-			llmResponse, toolTraces, err = b.chatWithTools(ctx, toolClient, b.LLMConfig.SystemPrompt, msgs, providerContext, compact, compactAllowed, msg.Tools, onChunk)
+			llmResponse, toolTraces, err = b.chatWithTools(ctx, toolClient, b.LLMConfig.SystemPrompt, msgs, providerContext, compact, compactAllowed, msg.Tools, toolOptions, onChunk)
 		} else {
 			coreLog.Warn(ctx, "model provider=%s model=%s does not support tool calling; continuing without tools", provider, modelName)
 			llmResponse, err = b.chatWithoutTools(llmClient, compactAllowed, providerContext, compact, msgs, onChunk)
@@ -322,7 +321,7 @@ func (b *Bot) chatWithoutTools(client llm.Client, compactAllowed bool, providerC
 	return client.ChatStream(b.LLMConfig.SystemPrompt, msgs, onChunk)
 }
 
-func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, systemPrompt string, msgs []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, compactAllowed bool, tools []tooltypes.Tool, onChunk func(string) error) (llm.Response, []store.ToolTrace, error) {
+func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, systemPrompt string, msgs []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, compactAllowed bool, tools []tooltypes.Tool, options tooltypes.Options, onChunk func(string) error) (llm.Response, []store.ToolTrace, error) {
 	specs := toolSpecs(tools)
 	if len(specs) == 0 {
 		coreLog.Warn(ctx, "tool calling requested with %d tool entries but no valid tool specs; falling back to plain chat", len(tools))
@@ -334,7 +333,6 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 		return resp, nil, err
 	}
 
-	options := b.toolOptions()
 	maxCalls := effectiveMaxToolCalls(options.MaxCalls)
 	lookup := toolMap(tools)
 	coreLog.Debug(ctx, "tool loop start tools=%d max_calls=%d timeout=%s result_limit=%d", len(specs), maxCalls, effectiveToolTimeout(options.Timeout), effectiveToolResultLimit(options.ResultLimit))

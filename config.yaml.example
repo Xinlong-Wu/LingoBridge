@@ -59,6 +59,12 @@ mcp:
       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
       env: {}
       cwd: ""
+      # Optional scope. Omit scope to expose the server to all bot accounts.
+      # scope:
+      #   platforms: ["feishu"]
+      #   accounts:
+      #     - "feishu/fsbot"     # platform/account name
+      #     - "feishu:cli_xxx"   # stable account ID
 
     remote_docs:
       enabled: false

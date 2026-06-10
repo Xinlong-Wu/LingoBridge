@@ -27,6 +27,7 @@ type bot struct {
 	handler       textProcessor
 	sender        textSender
 	tools         []tooltypes.Tool
+	account       store.Account
 	botOpenID     string
 	eventCommands map[string][]string
 	deduper       *eventDeduper
@@ -157,6 +158,8 @@ func (b *bot) processMessage(in incomingMessage) {
 	defer stopReaction()
 	if err := b.handler.Handle(ctx, core.InboundMessage{
 		Platform:    store.PlatformFeishu,
+		AccountID:   b.account.ID,
+		AccountName: b.account.Name,
 		UserKey:     in.UserID,
 		CommandText: in.Text,
 		LLMText:     in.Text,

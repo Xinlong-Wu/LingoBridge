@@ -405,6 +405,68 @@ func TestMCPConfigValidateHTTPURL(t *testing.T) {
 	}
 }
 
+func TestMCPServerScopeEmptyIsGlobal(t *testing.T) {
+	var scope MCPServerScope
+	if !scope.IsZero() {
+		t.Fatalf("empty scope IsZero = false, want true")
+	}
+	if err := scope.Validate(); err != nil {
+		t.Fatalf("empty scope Validate returned error: %v", err)
+	}
+}
+
+func TestMCPConfigScopeDefaultsAndValidation(t *testing.T) {
+	cfg := MCPConfig{Servers: map[string]MCPServerConfig{
+		"scoped": {
+			Transport: MCPTransportStdio,
+			Command:   "server",
+			Scope: MCPServerScope{
+				Platforms: []string{" feishu "},
+				Accounts:  []string{" feishu/admin-bot ", "feishu:cli_xxx"},
+			},
+		},
+	}}
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+	scope := cfg.Servers["scoped"].Scope
+	if scope.Platforms[0] != "feishu" || scope.Accounts[0] != "feishu/admin-bot" {
+		t.Fatalf("scope = %#v, want trimmed selectors", scope)
+	}
+}
+
+func TestMCPConfigScopeRejectsBlankSelectors(t *testing.T) {
+	cfg := MCPConfig{Servers: map[string]MCPServerConfig{
+		"scoped": {
+			Transport: MCPTransportStdio,
+			Command:   "server",
+			Scope:     MCPServerScope{Accounts: []string{" "}},
+		},
+	}}
+	cfg.ApplyDefaults()
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "accounts[0] must not be empty") {
+		t.Fatalf("Validate error = %v, want blank account selector error", err)
+	}
+}
+
+func TestMCPConfigScopeValidatesPlatformSelectors(t *testing.T) {
+	cfg := MCPConfig{Servers: map[string]MCPServerConfig{
+		"scoped": {
+			Transport: MCPTransportStdio,
+			Command:   "server",
+			Scope:     MCPServerScope{Platforms: []string{"bad id"}},
+		},
+	}}
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "platforms[0]") {
+		t.Fatalf("Validate error = %v, want invalid platform selector error", err)
+	}
+}
+
 func TestAddModelSetsFirstModelAsDefault(t *testing.T) {
 	cfg := DefaultConfig()
 

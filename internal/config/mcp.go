@@ -31,6 +31,13 @@ type MCPServerConfig struct {
 	CWD       string            `yaml:"cwd,omitempty"`
 	URL       string            `yaml:"url,omitempty"`
 	Headers   map[string]string `yaml:"headers,omitempty"`
+	Scope     MCPServerScope    `yaml:"scope,omitempty"`
+}
+
+// MCPServerScope limits a server's tools to matching platforms or accounts.
+type MCPServerScope struct {
+	Platforms []string `yaml:"platforms,omitempty"`
+	Accounts  []string `yaml:"accounts,omitempty"`
 }
 
 // ApplyDefaults normalizes optional MCP configuration fields.
@@ -45,6 +52,7 @@ func (c *MCPConfig) ApplyDefaults() {
 		server.URL = strings.TrimSpace(server.URL)
 		server.Env = normalizeStringMap(server.Env)
 		server.Headers = normalizeStringMap(server.Headers)
+		server.Scope.ApplyDefaults()
 		c.Servers[id] = server
 	}
 }
@@ -58,6 +66,9 @@ func (c MCPConfig) Validate() error {
 		server := c.Servers[id]
 		if !server.IsEnabled() {
 			continue
+		}
+		if err := server.Scope.Validate(); err != nil {
+			return fmt.Errorf("mcp.servers.%s.scope: %w", id, err)
 		}
 		switch server.Transport {
 		case MCPTransportStdio:
@@ -88,6 +99,44 @@ func (s MCPServerConfig) IsEnabled() bool {
 	return s.Enabled == nil || *s.Enabled
 }
 
+// ApplyDefaults normalizes optional MCP server scope fields.
+func (s *MCPServerScope) ApplyDefaults() {
+	s.Platforms = normalizeStringSlice(s.Platforms)
+	s.Accounts = normalizeStringSlice(s.Accounts)
+}
+
+// IsZero reports whether the scope is omitted. Omitted scope means global.
+func (s MCPServerScope) IsZero() bool {
+	return len(s.Platforms) == 0 && len(s.Accounts) == 0
+}
+
+// Validate checks scope selectors.
+func (s MCPServerScope) Validate() error {
+	for i, platform := range s.Platforms {
+		if strings.TrimSpace(platform) == "" {
+			return fmt.Errorf("platforms[%d] must not be empty", i)
+		}
+		if err := ValidatePlatformID(platform); err != nil {
+			return fmt.Errorf("platforms[%d]: %w", i, err)
+		}
+	}
+	for i, account := range s.Accounts {
+		account = strings.TrimSpace(account)
+		if account == "" {
+			return fmt.Errorf("accounts[%d] must not be empty", i)
+		}
+		if platform, name, ok := strings.Cut(account, "/"); ok {
+			if strings.TrimSpace(platform) == "" || strings.TrimSpace(name) == "" {
+				return fmt.Errorf("accounts[%d] must be platform/name or account_id", i)
+			}
+			if err := ValidatePlatformID(platform); err != nil {
+				return fmt.Errorf("accounts[%d]: %w", i, err)
+			}
+		}
+	}
+	return nil
+}
+
 // ServerNames returns configured MCP server names in stable order.
 func (c MCPConfig) ServerNames() []string {
 	names := make([]string, 0, len(c.Servers))
@@ -96,6 +145,17 @@ func (c MCPConfig) ServerNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func normalizeStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, len(values))
+	for i, value := range values {
+		out[i] = strings.TrimSpace(value)
+	}
+	return out
 }
 
 func normalizeStringMap(values map[string]string) map[string]string {

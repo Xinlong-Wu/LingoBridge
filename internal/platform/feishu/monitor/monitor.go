@@ -84,6 +84,7 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 		handler:       handler,
 		sender:        &sdkSender{client: restClient},
 		tools:         tools,
+		account:       acc,
 		botOpenID:     botOpenID,
 		eventCommands: map[string][]string{},
 		deduper:       newEventDeduper(defaultFeishuDedupeTTL),

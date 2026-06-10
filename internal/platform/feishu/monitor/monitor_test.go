@@ -29,6 +29,9 @@ const testBotOpenID = "ou_bot"
 
 type fakeProcessor struct {
 	mu          sync.Mutex
+	platform    string
+	accountID   string
+	accountName string
 	userID      string
 	text        string
 	commandText string
@@ -41,6 +44,9 @@ type fakeProcessor struct {
 }
 
 type fakeProcessorSnapshot struct {
+	platform    string
+	accountID   string
+	accountName string
 	userID      string
 	text        string
 	commandText string
@@ -53,6 +59,9 @@ type fakeProcessorSnapshot struct {
 func (f *fakeProcessor) Handle(ctx context.Context, msg core.InboundMessage, sender core.Sender) error {
 	f.mu.Lock()
 	f.called = true
+	f.platform = msg.Platform
+	f.accountID = msg.AccountID
+	f.accountName = msg.AccountName
 	f.userID = msg.UserKey
 	f.text = msg.LLMText
 	f.commandText = msg.CommandText
@@ -249,6 +258,9 @@ func (f *fakeProcessor) snapshot() fakeProcessorSnapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return fakeProcessorSnapshot{
+		platform:    f.platform,
+		accountID:   f.accountID,
+		accountName: f.accountName,
 		userID:      f.userID,
 		text:        f.text,
 		commandText: f.commandText,
@@ -727,7 +739,11 @@ func TestHandleGroupUnsupportedMessageRepliesToOriginal(t *testing.T) {
 func TestHandleTextMessageUsesBridgeAndReplies(t *testing.T) {
 	processor := &fakeProcessor{}
 	sender := &fakeSender{}
-	b := &bot{handler: processor, sender: sender}
+	b := &bot{
+		handler: processor,
+		sender:  sender,
+		account: store.Account{ID: "feishu:cli_test", Name: "admin-bot"},
+	}
 
 	if err := b.handleMessage(context.Background(), feishuEvent("p2p", "text", `{"text":"hi"}`, nil)); err != nil {
 		t.Fatalf("handleMessage returned error: %v", err)
@@ -736,6 +752,9 @@ func TestHandleTextMessageUsesBridgeAndReplies(t *testing.T) {
 	senderSnap := waitForSentMessages(t, sender, 1)
 	if !processorSnap.called || processorSnap.userID != "feishu:ou_user" || processorSnap.text != "hi" {
 		t.Fatalf("processor = %#v", processorSnap)
+	}
+	if processorSnap.platform != store.PlatformFeishu || processorSnap.accountID != "feishu:cli_test" || processorSnap.accountName != "admin-bot" {
+		t.Fatalf("processor account scope = %#v, want feishu cli_test admin-bot", processorSnap)
 	}
 	if !senderSnap.called || senderSnap.chatID != "oc_chat" || senderSnap.text != "ok" {
 		t.Fatalf("sender = %#v", senderSnap)

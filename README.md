@@ -256,7 +256,10 @@ LingoBridge can expose global Model Context Protocol servers as LLM tools.
 Configure them under top-level `mcp.servers`. Supported transports are
 `stdio` for local command-based servers and `streamable_http` for remote MCP
 HTTP endpoints. MCP tools are available to every platform/account that uses a
-tool-capable model profile.
+tool-capable model profile. Omit `scope` to expose a server globally, or set
+`scope.platforms` / `scope.accounts` to limit it to specific bots. Account
+selectors support either `platform/account_name` or the stable stored account ID
+such as `feishu:cli_xxx`.
 
 MCP tool names are always prefixed as `mcp_<server>_<tool>` after safe-name
 normalization, for example `mcp_filesystem_read_file`. If an MCP server cannot
@@ -270,6 +273,11 @@ mcp:
       transport: stdio
       command: npx
       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      scope:
+        platforms: ["feishu"]
+        accounts:
+          - "feishu/fsbot"
+          - "feishu:cli_xxx"
     remote_docs:
       enabled: false
       transport: streamable_http
@@ -323,6 +331,8 @@ are not sent back to Feishu yet.
 | `mcp.servers.<name>.cwd` | — | Optional working directory for the `stdio` command |
 | `mcp.servers.<name>.url` | — | Absolute HTTP(S) URL for a `streamable_http` MCP server |
 | `mcp.servers.<name>.headers` | `{}` | Static HTTP headers for a `streamable_http` MCP server; prefer headers over URL query secrets |
+| `mcp.servers.<name>.scope.platforms` | `[]` | Optional platform IDs allowed to see this MCP server's tools; omitted scope is global |
+| `mcp.servers.<name>.scope.accounts` | `[]` | Optional account selectors allowed to see this MCP server's tools; entries may be `platform/account_name` or stable account ID |
 | `platforms.<platform>` | — | Platform-private config block; each platform owns its internal schema |
 | `platforms.feishu.accounts.<name>.app_id` | — | Feishu app ID for account `<name>` |
 | `platforms.feishu.accounts.<name>.app_secret` | — | Feishu app secret for account `<name>` |

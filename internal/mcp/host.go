@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,13 +23,18 @@ type Host struct {
 	connect        connector
 	connectTimeout time.Duration
 	servers        map[string]*serverConnection
-	tools          []tooltypes.Tool
+	tools          []scopedTool
 }
 
 type serverConnection struct {
 	id         string
 	session    session
 	redactions []string
+}
+
+type scopedTool struct {
+	tool  tooltypes.Tool
+	scope config.MCPServerScope
 }
 
 // NewHost creates a config-driven MCP host.
@@ -53,7 +59,7 @@ func (h *Host) Reload(ctx context.Context, cfg config.MCPConfig) error {
 	}
 
 	nextServers := map[string]*serverConnection{}
-	var nextTools []tooltypes.Tool
+	var nextTools []scopedTool
 	seenTools := map[string]bool{}
 
 	for _, serverID := range cfg.ServerNames() {
@@ -89,11 +95,11 @@ func (h *Host) Reload(ctx context.Context, cfg config.MCPConfig) error {
 				continue
 			}
 			seenTools[name] = true
-			nextTools = append(nextTools, tool)
+			nextTools = append(nextTools, scopedTool{tool: tool, scope: serverCfg.Scope})
 			registered++
 		}
 		nextServers[serverID] = conn
-		hostLog.Info(ctx, "registered mcp server server=%s transport=%s tools=%d", serverID, serverCfg.Transport, registered)
+		hostLog.Info(ctx, "registered mcp server server=%s transport=%s tools=%d scope=%s", serverID, serverCfg.Transport, registered, describeScope(serverCfg.Scope))
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -145,19 +151,20 @@ func (h *Host) loadServer(ctx context.Context, serverID string, serverCfg config
 	}, remoteTools, true, nil
 }
 
-// Tools returns the current MCP tool snapshot.
-func (h *Host) Tools() []tooltypes.Tool {
+// Resolve returns the current MCP tool snapshot for one scope.
+func (h *Host) Resolve(scope tooltypes.Scope) tooltypes.Selection {
 	if h == nil {
-		return nil
+		return tooltypes.Selection{}
 	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return append([]tooltypes.Tool(nil), h.tools...)
-}
-
-// ToolOptions intentionally leaves core tool loop defaults in effect.
-func (h *Host) ToolOptions() tooltypes.Options {
-	return tooltypes.Options{}
+	tools := make([]tooltypes.Tool, 0, len(h.tools))
+	for _, scoped := range h.tools {
+		if scopeMatches(scoped.scope, scope) {
+			tools = append(tools, scoped.tool)
+		}
+	}
+	return tooltypes.Selection{Tools: tools}
 }
 
 // Close closes all active MCP sessions.
@@ -191,13 +198,43 @@ func (h *Host) effectiveConnectTimeout() time.Duration {
 	return defaultConnectTimeout
 }
 
-func (h *Host) swap(servers map[string]*serverConnection, tools []tooltypes.Tool) map[string]*serverConnection {
+func (h *Host) swap(servers map[string]*serverConnection, tools []scopedTool) map[string]*serverConnection {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	old := h.servers
 	h.servers = servers
 	h.tools = tools
 	return old
+}
+
+func scopeMatches(scope config.MCPServerScope, candidate tooltypes.Scope) bool {
+	if scope.IsZero() {
+		return true
+	}
+	for _, platform := range scope.Platforms {
+		if platform == candidate.Platform {
+			return true
+		}
+	}
+	for _, account := range scope.Accounts {
+		if platform, name, ok := strings.Cut(account, "/"); ok {
+			if platform == candidate.Platform && name == candidate.AccountName {
+				return true
+			}
+			continue
+		}
+		if account == candidate.AccountID {
+			return true
+		}
+	}
+	return false
+}
+
+func describeScope(scope config.MCPServerScope) string {
+	if scope.IsZero() {
+		return "global"
+	}
+	return fmt.Sprintf("platforms=%d accounts=%d", len(scope.Platforms), len(scope.Accounts))
 }
 
 func closeServers(servers map[string]*serverConnection) error {

@@ -87,7 +87,7 @@ func TestHostReloadRegistersPrefixedToolsAndExecutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reload returned error: %v", err)
 	}
-	tools := host.Tools()
+	tools := host.Resolve(tooltypes.Scope{Platform: "feishu"}).Tools
 	if len(tools) != 2 {
 		t.Fatalf("tools = %d, want 2", len(tools))
 	}
@@ -135,16 +135,16 @@ func TestHostReloadSkipsFailedServersAndClosesOld(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("initial Reload returned error: %v", err)
 	}
-	if len(host.Tools()) != 1 {
-		t.Fatalf("initial tools = %d, want 1", len(host.Tools()))
+	if got := len(host.Resolve(tooltypes.Scope{}).Tools); got != 1 {
+		t.Fatalf("initial tools = %d, want 1", got)
 	}
 	if err := host.Reload(context.Background(), config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 		"bad": {Transport: config.MCPTransportStdio, Command: "bad"},
 	}}); err != nil {
 		t.Fatalf("reload with failed server returned error: %v", err)
 	}
-	if len(host.Tools()) != 0 {
-		t.Fatalf("tools after failed reload = %d, want 0", len(host.Tools()))
+	if got := len(host.Resolve(tooltypes.Scope{}).Tools); got != 0 {
+		t.Fatalf("tools after failed reload = %d, want 0", got)
 	}
 	if !oldSession.closed {
 		t.Fatal("old session was not closed")
@@ -168,8 +168,8 @@ func TestHostReloadClosesSessionWhenListToolsFails(t *testing.T) {
 	if !badSession.closed {
 		t.Fatal("failed list session was not closed")
 	}
-	if len(host.Tools()) != 0 {
-		t.Fatalf("tools = %d, want 0", len(host.Tools()))
+	if got := len(host.Resolve(tooltypes.Scope{}).Tools); got != 0 {
+		t.Fatalf("tools = %d, want 0", got)
 	}
 }
 
@@ -192,12 +192,98 @@ func TestHostReloadSkipsDuplicateExposedToolNames(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("Reload returned error: %v", err)
 	}
-	tools := host.Tools()
+	tools := host.Resolve(tooltypes.Scope{}).Tools
 	if len(tools) != 1 {
 		t.Fatalf("tools = %d, want duplicate skipped", len(tools))
 	}
 	if tools[0].Spec().Name != "mcp_files_read_file" {
 		t.Fatalf("tool name = %q, want mcp_files_read_file", tools[0].Spec().Name)
+	}
+}
+
+func TestHostResolveFiltersToolsByScope(t *testing.T) {
+	host := &Host{
+		connect: func(ctx context.Context, serverID string, server config.MCPServerConfig) (session, error) {
+			return &fakeSession{listResults: []*mcpsdk.ListToolsResult{{
+				Tools: []*mcpsdk.Tool{{Name: serverID}},
+			}}}, nil
+		},
+		connectTimeout: time.Second,
+	}
+	if err := host.Reload(context.Background(), config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"global": {
+			Transport: config.MCPTransportStdio,
+			Command:   "ok",
+		},
+		"platform": {
+			Transport: config.MCPTransportStdio,
+			Command:   "ok",
+			Scope:     config.MCPServerScope{Platforms: []string{"feishu"}},
+		},
+		"account_name": {
+			Transport: config.MCPTransportStdio,
+			Command:   "ok",
+			Scope:     config.MCPServerScope{Accounts: []string{"feishu/admin-bot"}},
+		},
+		"account_id": {
+			Transport: config.MCPTransportStdio,
+			Command:   "ok",
+			Scope:     config.MCPServerScope{Accounts: []string{"feishu:cli_xxx"}},
+		},
+	}}); err != nil {
+		t.Fatalf("Reload returned error: %v", err)
+	}
+
+	admin := host.Resolve(tooltypes.Scope{
+		Platform:    "feishu",
+		AccountID:   "feishu:cli_xxx",
+		AccountName: "admin-bot",
+	}).Tools
+	if got := len(admin); got != 4 {
+		t.Fatalf("admin scoped tools = %d, want 4", got)
+	}
+
+	otherFeishu := host.Resolve(tooltypes.Scope{
+		Platform:    "feishu",
+		AccountID:   "feishu:other",
+		AccountName: "other",
+	}).Tools
+	if got := len(otherFeishu); got != 2 {
+		t.Fatalf("other feishu scoped tools = %d, want global + platform", got)
+	}
+
+	wechat := host.Resolve(tooltypes.Scope{
+		Platform:    "wechat",
+		AccountID:   "wechat:test",
+		AccountName: "admin-bot",
+	}).Tools
+	if got := len(wechat); got != 1 {
+		t.Fatalf("wechat scoped tools = %d, want global only", got)
+	}
+}
+
+func TestHostResolveReturnsNoToolsForNonMatchingScope(t *testing.T) {
+	host := &Host{
+		connect: func(ctx context.Context, serverID string, server config.MCPServerConfig) (session, error) {
+			return &fakeSession{listResults: []*mcpsdk.ListToolsResult{{
+				Tools: []*mcpsdk.Tool{{Name: "read"}},
+			}}}, nil
+		},
+		connectTimeout: time.Second,
+	}
+	if err := host.Reload(context.Background(), config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"feishu_only": {
+			Transport: config.MCPTransportStdio,
+			Command:   "ok",
+			Scope:     config.MCPServerScope{Platforms: []string{"feishu"}},
+		},
+	}}); err != nil {
+		t.Fatalf("Reload returned error: %v", err)
+	}
+
+	tools := host.Resolve(tooltypes.Scope{Platform: "wechat"}).Tools
+	if len(tools) != 0 {
+		t.Fatalf("wechat scoped tools = %d, want no tools", len(tools))
 	}
 }
 

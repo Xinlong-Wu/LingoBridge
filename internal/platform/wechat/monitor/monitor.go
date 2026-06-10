@@ -53,6 +53,7 @@ type mediaSaver func(userID, sessionID, role string, index int, mimeType string,
 
 type bot struct {
 	client        wechatClient
+	account       store.Account
 	cursors       cursorStore
 	typingTick    time.Duration
 	cdnBaseURL    string
@@ -98,6 +99,7 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 
 	b := &bot{
 		client:     client,
+		account:    acc,
 		cursors:    p.store,
 		cdnBaseURL: defaultWeixinCDNBaseURL,
 		handler:    handler,
@@ -203,6 +205,8 @@ func (b *bot) processOne(msg *api.WeixinMessage) error {
 	if strings.HasPrefix(strings.TrimSpace(commandText), "/") {
 		return b.handleCore(context.Background(), core.InboundMessage{
 			Platform:    store.PlatformWeChat,
+			AccountID:   b.account.ID,
+			AccountName: b.account.Name,
 			UserKey:     fromUserID,
 			CommandText: commandText,
 			LLMText:     llmText,
@@ -392,6 +396,8 @@ func detectImageMIME(data []byte) string {
 func (b *bot) replyWithLLM(fromUserID, contextToken, text string, msg *api.WeixinMessage) error {
 	in := core.InboundMessage{
 		Platform:       store.PlatformWeChat,
+		AccountID:      b.account.ID,
+		AccountName:    b.account.Name,
 		UserKey:        fromUserID,
 		CommandText:    text,
 		LLMText:        text,

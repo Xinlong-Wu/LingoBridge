@@ -204,14 +204,12 @@ func (f *fakeTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes.R
 type fakeToolProvider struct {
 	tools   []tooltypes.Tool
 	options tooltypes.Options
+	scopes  []tooltypes.Scope
 }
 
-func (f fakeToolProvider) Tools() []tooltypes.Tool {
-	return f.tools
-}
-
-func (f fakeToolProvider) ToolOptions() tooltypes.Options {
-	return f.options
+func (f *fakeToolProvider) Resolve(scope tooltypes.Scope) tooltypes.Selection {
+	f.scopes = append(f.scopes, scope)
+	return tooltypes.Selection{Tools: f.tools, Options: f.options}
 }
 
 func (f *fakeNativeLLM) CompactContext(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig) (store.ProviderContext, error) {
@@ -346,7 +344,7 @@ func TestHandleHelpIncludesToolProviderSummaries(t *testing.T) {
 	sessions := &fakeSessions{}
 	client := &fakeLLM{}
 	b := testBot(sessions, client)
-	b.ToolProvider = fakeToolProvider{tools: []tooltypes.Tool{&fakeTool{
+	b.ToolProvider = &fakeToolProvider{tools: []tooltypes.Tool{&fakeTool{
 		spec: tooltypes.Spec{
 			Name:        "mcp_files_read_file",
 			Description: "Read a file through MCP.",
@@ -468,10 +466,14 @@ func TestHandleTextRunsToolProviderTools(t *testing.T) {
 	}
 	bot := New(sessions, testLLMConfig())
 	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
-	bot.ToolProvider = fakeToolProvider{tools: []tooltypes.Tool{tool}}
+	provider := &fakeToolProvider{tools: []tooltypes.Tool{tool}}
+	bot.ToolProvider = provider
 	sender := &fakeSender{}
 
 	err := bot.Handle(context.Background(), InboundMessage{
+		Platform:    "feishu",
+		AccountID:   "feishu:cli_xxx",
+		AccountName: "admin-bot",
 		UserKey:     "u1",
 		CommandText: "read file",
 		LLMText:     "read file",
@@ -484,6 +486,9 @@ func TestHandleTextRunsToolProviderTools(t *testing.T) {
 	}
 	if len(llmClient.toolSpecs) != 1 || llmClient.toolSpecs[0].Name != "mcp_files_read_file" {
 		t.Fatalf("tool specs = %#v, want provider tool spec", llmClient.toolSpecs)
+	}
+	if len(provider.scopes) != 1 || provider.scopes[0].Platform != "feishu" || provider.scopes[0].AccountID != "feishu:cli_xxx" || provider.scopes[0].AccountName != "admin-bot" {
+		t.Fatalf("provider scopes = %#v, want feishu admin-bot scope", provider.scopes)
 	}
 }
 
@@ -507,7 +512,7 @@ func TestHandleTextPlatformToolWinsDuplicateProviderTool(t *testing.T) {
 	}
 	bot := New(sessions, testLLMConfig())
 	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
-	bot.ToolProvider = fakeToolProvider{tools: []tooltypes.Tool{providerTool}}
+	bot.ToolProvider = &fakeToolProvider{tools: []tooltypes.Tool{providerTool}}
 	sender := &fakeSender{}
 
 	err := bot.Handle(context.Background(), InboundMessage{
@@ -573,7 +578,7 @@ func TestHandleTextToolTimeoutIsReturnedToModel(t *testing.T) {
 	}
 	tool := &fakeTool{block: true}
 	bot := New(sessions, testLLMConfig())
-	bot.ToolProvider = fakeToolProvider{options: tooltypes.Options{Timeout: time.Millisecond}}
+	bot.ToolProvider = &fakeToolProvider{options: tooltypes.Options{Timeout: time.Millisecond}}
 	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
 
 	err := bot.Handle(context.Background(), InboundMessage{
@@ -598,7 +603,7 @@ func TestHandleTextToolCallLimit(t *testing.T) {
 		},
 	}
 	bot := New(sessions, testLLMConfig())
-	bot.ToolProvider = fakeToolProvider{options: tooltypes.Options{MaxCalls: 1}}
+	bot.ToolProvider = &fakeToolProvider{options: tooltypes.Options{MaxCalls: 1}}
 	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
 
 	err := bot.Handle(context.Background(), InboundMessage{

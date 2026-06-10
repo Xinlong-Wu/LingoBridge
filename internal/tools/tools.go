@@ -35,14 +35,26 @@ type Options struct {
 	ResultLimit int
 }
 
+// Scope identifies the bot/account currently resolving tools.
+type Scope struct {
+	Platform    string
+	AccountID   string
+	AccountName string
+}
+
+// Selection is the provider-resolved tool set and shared execution options.
+type Selection struct {
+	Tools   []Tool
+	Options Options
+}
+
 // Tool is a function that can be exposed to a tool-capable LLM.
 type Tool interface {
 	Spec() Spec
 	Execute(ctx context.Context, call Call) Result
 }
 
-// Provider supplies global tools and their generic execution options.
+// Provider resolves tools and generic execution options for one scope.
 type Provider interface {
-	Tools() []Tool
-	ToolOptions() Options
+	Resolve(scope Scope) Selection
 }
