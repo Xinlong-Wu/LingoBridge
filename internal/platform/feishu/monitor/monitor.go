@@ -75,6 +75,7 @@ func (p *Platform) Run(ctx context.Context, handler core.Handler) error {
 		return fmt.Errorf("resolve feishu bot identity for account %s: %w", acc.Name, err)
 	}
 	tools := feishutools.NewDocsTools(restClient, p.config.Tools)
+	tools = append(tools, feishutools.NewLiteLLMAccountTools(restClient, p.config.Tools)...)
 	if names := toolNames(tools); len(names) > 0 {
 		feishuLog.Info(ctx, "registered tools for account %s (%s): %s", acc.Name, acc.ID, strings.Join(names, ", "))
 	} else {

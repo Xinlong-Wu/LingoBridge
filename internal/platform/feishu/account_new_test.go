@@ -7,6 +7,7 @@ import (
 
 	"lingobridge/internal/config"
 	"lingobridge/internal/core"
+	feishutools "lingobridge/internal/platform/feishu/tools"
 	"lingobridge/internal/store"
 
 	"gopkg.in/yaml.v3"
@@ -224,6 +225,13 @@ func TestLoadConfigParsesSharedToolsConfig(t *testing.T) {
   docs:
     enabled: true
     allow_write: true
+  litellm:
+    enabled: true
+    base_url: " https://litellm.example/ "
+    api_key: " sk-admin "
+    bitable:
+      app_token: " base_token "
+      table_id: " tbl_token "
 `), &node); err != nil {
 		t.Fatalf("Unmarshal returned error: %v", err)
 	}
@@ -251,5 +259,17 @@ func TestLoadConfigParsesSharedToolsConfig(t *testing.T) {
 	}
 	if !tools.Docs.Enabled || !tools.Docs.AllowWrite {
 		t.Fatalf("docs config = %#v, want enabled write tools", tools.Docs)
+	}
+	if !tools.LiteLLM.Enabled || tools.LiteLLM.BaseURL != "https://litellm.example" || tools.LiteLLM.APIKey != "sk-admin" {
+		t.Fatalf("litellm config = %#v, want normalized base/api", tools.LiteLLM)
+	}
+	if tools.LiteLLM.UserRole != feishutools.DefaultLiteLLMUserRole {
+		t.Fatalf("litellm user_role = %q, want default", tools.LiteLLM.UserRole)
+	}
+	if tools.LiteLLM.Bitable.AppToken != "base_token" || tools.LiteLLM.Bitable.TableID != "tbl_token" {
+		t.Fatalf("litellm bitable = %#v, want normalized ids", tools.LiteLLM.Bitable)
+	}
+	if tools.LiteLLM.Bitable.EmailField != feishutools.DefaultLiteLLMEmailField || tools.LiteLLM.Bitable.ReasonField != feishutools.DefaultLiteLLMReasonField || tools.LiteLLM.Bitable.OwnerField != feishutools.DefaultLiteLLMOwnerField {
+		t.Fatalf("litellm bitable fields = %#v, want defaults", tools.LiteLLM.Bitable)
 	}
 }

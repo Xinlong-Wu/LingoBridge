@@ -110,3 +110,26 @@ platforms:
         # Write tools are registered only when this is true and at least one
         # allowed_folder_tokens entry is configured.
         allow_write: false
+
+      litellm:
+        # Disabled by default. When enabled, tool-capable models can create a
+        # LiteLLM user invitation from natural language after the user provides
+        # both an email and application reason.
+        enabled: false
+        # LiteLLM proxy base URL. Invitation links are returned as:
+        #   <base_url>/ui?invitation_id=<id>
+        base_url: "https://litellm.example"
+        # LiteLLM admin/master API key. Do not share this value in chat.
+        api_key: "sk-litellm-admin-key"
+        # Optional. Defaults to "internal_user".
+        user_role: "internal_user"
+        bitable:
+          # Target Bitable Base token and table ID. These are not Feishu app
+          # credentials; API auth reuses platforms.feishu.accounts.<name>.
+          app_token: "base_xxx"
+          table_id: "tbl_xxx"
+          # Required logical fields; defaults shown below.
+          email_field: "邮箱"
+          reason_field: "申请原因"
+          # Person field receiving the Feishu user who sent the request.
+          owner_field: "所有者"

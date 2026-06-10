@@ -13,7 +13,6 @@ import (
 	larkdocx "github.com/larksuite/oapi-sdk-go/v3/service/docx/v1"
 	larksearch "github.com/larksuite/oapi-sdk-go/v3/service/search/v2"
 
-	"lingobridge/internal/platform/feishu"
 	tooltypes "lingobridge/internal/tools"
 )
 
@@ -29,12 +28,12 @@ type docsTool struct {
 	name   string
 	spec   tooltypes.Spec
 	client *lark.Client
-	cfg    feishu.ToolsConfig
+	cfg    Config
 }
 
 // NewDocsTools returns Feishu document tools for tool-capable LLM providers.
-func NewDocsTools(client *lark.Client, cfg feishu.ToolsConfig) []tooltypes.Tool {
-	cfg = feishu.NormalizeToolsConfig(cfg)
+func NewDocsTools(client *lark.Client, cfg Config) []tooltypes.Tool {
+	cfg = NormalizeConfig(cfg)
 	if client == nil || !cfg.Docs.Enabled {
 		return nil
 	}

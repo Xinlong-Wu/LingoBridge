@@ -295,6 +295,18 @@ tenant token, so access follows the app's document permissions rather than the
 asking user's personal permissions. Strict per-user document access requires a
 separate Feishu OAuth flow.
 
+Feishu can also expose `feishu_litellm_invite_create` for LiteLLM account
+requests. Enable it under `platforms.feishu.tools.litellm` and use a
+tool-capable model profile. The user must provide both `邮箱` and `申请原因` in
+natural language. The tool writes those fields plus the Feishu sender to the
+configured Bitable Person field, creates a LiteLLM user through `/user/new` with
+the sender name as `user_alias` when the app can read it, creates an invitation
+through `/invitation/new`, and returns a password setup link as
+`[Invitation Link](<litellm_base_url>/ui?invitation_id=<id>)`.
+The owner Person field uses the message sender's `open_id`; resolving the
+sender display name for LiteLLM `user_alias` requires the Feishu app to have
+permission to read basic contact user information.
+
 Feishu conversation history is isolated per user in 1:1 chats and shared by
 `chat_id` in group chats, so everyone who mentions the bot in the same group
 continues the same group session.
@@ -344,6 +356,15 @@ are not sent back to Feishu yet.
 | `platforms.feishu.tools.allowed_space_ids` | `[]` | Shared Wiki space ID allowlist for Feishu tools; currently used for Docs search narrowing |
 | `platforms.feishu.tools.docs.enabled` | `false` | Enable Feishu Docs tools for tool-capable LLM profiles |
 | `platforms.feishu.tools.docs.allow_write` | `false` | Register Feishu Docs create/append tools when enabled and folder allowlist is configured |
+| `platforms.feishu.tools.litellm.enabled` | `false` | Enable the Feishu natural-language LiteLLM account invitation tool |
+| `platforms.feishu.tools.litellm.base_url` | — | LiteLLM proxy base URL used for API calls and invitation link construction |
+| `platforms.feishu.tools.litellm.api_key` | — | LiteLLM admin/master API key used for `/user/new` and `/invitation/new` |
+| `platforms.feishu.tools.litellm.user_role` | `internal_user` | LiteLLM role sent when creating the user |
+| `platforms.feishu.tools.litellm.bitable.app_token` | — | Target Bitable Base token, not the Feishu Open Platform App ID; auth reuses `platforms.feishu.accounts.<name>` |
+| `platforms.feishu.tools.litellm.bitable.table_id` | — | Target Bitable table ID used to record account requests |
+| `platforms.feishu.tools.litellm.bitable.email_field` | `邮箱` | Bitable field receiving the applicant email |
+| `platforms.feishu.tools.litellm.bitable.reason_field` | `申请原因` | Bitable field receiving the application reason |
+| `platforms.feishu.tools.litellm.bitable.owner_field` | `所有者` | Bitable Person field receiving the Feishu user who sent the request |
 Each model profile is independent. `provider`, `base_url`, `api_key`, and `id` are required; `endpoint` is optional and defaults to `chat`.
 For Anthropic model profiles, an omitted `endpoint` defaults to `messages`.
 Native context compaction defaults to `compact.mode: auto`. OpenAI-compatible
@@ -413,7 +434,7 @@ internal/platform/wechat/   # WeChat frontend adapter: native events/API <-> cor
 internal/platform/wechat/monitor/ # WeChat monitor, reply sender, and media handling
 internal/platform/feishu/   # Feishu frontend adapter and its private config schema
 internal/platform/feishu/monitor/ # Feishu long-connection monitor, message/text-stream adapter, and event hooks
-internal/platform/feishu/tools/ # Feishu platform-level LLM tools, including Docs search/read/write helpers
+internal/platform/feishu/tools/ # Feishu platform-level LLM tools, including Docs helpers and LiteLLM account invitations
 internal/core/              # Middle layer: scoped platform config/data APIs, tool orchestration, commands, sessions, LLM orchestration
 internal/tools/             # Shared tool domain interfaces and provider-neutral spec/call/result/options types
 internal/mcp/               # Global MCP host/client sessions and MCP tool adapters exposed through tools.Provider

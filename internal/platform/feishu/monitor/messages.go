@@ -41,6 +41,7 @@ type postElement struct {
 type incomingMessage struct {
 	UserID           string
 	SenderOpenID     string
+	SenderUserID     string
 	ChatID           string
 	MessageID        string
 	ReplyToMessageID string
@@ -80,17 +81,19 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1, botOp
 	if chatID == "" {
 		return incomingMessage{}, false
 	}
-	openID := userOpenID(event.Event.Sender.SenderId)
-	if openID == "" {
-		openID = userID(event.Event.Sender.SenderId)
+	senderOpenID := userOpenID(event.Event.Sender.SenderId)
+	senderUserID := userID(event.Event.Sender.SenderId)
+	senderID := senderOpenID
+	if senderID == "" {
+		senderID = senderUserID
 	}
-	if openID == "" {
+	if senderID == "" {
 		return incomingMessage{}, false
 	}
 
 	chatType := deref(msg.ChatType)
 
-	userKey := "feishu:" + openID
+	userKey := "feishu:" + senderID
 	replyToMessageID := ""
 	if chatType != "p2p" {
 		userKey = "feishu:group:" + chatID
@@ -106,13 +109,13 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1, botOp
 	case "post":
 		text, err = extractPostMarkdown(deref(msg.Content), mentions, botOpenID)
 	default:
-		return incomingMessage{UserID: userKey, SenderOpenID: openID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), Unsupported: true}, true
+		return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), Unsupported: true}, true
 	}
 	if err != nil {
 		feishuLog.Warn(ctx, "parse %s message: %v", deref(msg.MessageType), err)
-		return incomingMessage{UserID: userKey, SenderOpenID: openID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), Unsupported: true}, true
+		return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), Unsupported: true}, true
 	}
-	return incomingMessage{UserID: userKey, SenderOpenID: openID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Text: text, Mentions: mentions.list()}, true
+	return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Text: text, Mentions: mentions.list()}, true
 }
 
 func extractText(raw string, mentions *mentionCatalog) (string, error) {

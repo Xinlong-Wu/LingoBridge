@@ -15,6 +15,7 @@ import (
 	"lingobridge/internal/core"
 	"lingobridge/internal/logging"
 	"lingobridge/internal/platform/feishu"
+	feishutools "lingobridge/internal/platform/feishu/tools"
 	"lingobridge/internal/store"
 	tooltypes "lingobridge/internal/tools"
 
@@ -36,6 +37,8 @@ type fakeProcessor struct {
 	text        string
 	commandText string
 	metadata    map[string]string
+	actor       feishutools.Actor
+	actorOK     bool
 	tools       int
 	called      bool
 	calls       int
@@ -51,12 +54,15 @@ type fakeProcessorSnapshot struct {
 	text        string
 	commandText string
 	metadata    map[string]string
+	actor       feishutools.Actor
+	actorOK     bool
 	tools       int
 	called      bool
 	calls       int
 }
 
 func (f *fakeProcessor) Handle(ctx context.Context, msg core.InboundMessage, sender core.Sender) error {
+	actor, actorOK := feishutools.ActorFromContext(ctx)
 	f.mu.Lock()
 	f.called = true
 	f.platform = msg.Platform
@@ -66,6 +72,8 @@ func (f *fakeProcessor) Handle(ctx context.Context, msg core.InboundMessage, sen
 	f.text = msg.LLMText
 	f.commandText = msg.CommandText
 	f.metadata = msg.Metadata
+	f.actor = actor
+	f.actorOK = actorOK
 	f.tools = len(msg.Tools)
 	f.calls++
 	started := f.started
@@ -265,6 +273,8 @@ func (f *fakeProcessor) snapshot() fakeProcessorSnapshot {
 		text:        f.text,
 		commandText: f.commandText,
 		metadata:    f.metadata,
+		actor:       f.actor,
+		actorOK:     f.actorOK,
 		tools:       f.tools,
 		called:      f.called,
 		calls:       f.calls,
@@ -786,6 +796,9 @@ func TestHandleGroupTextMessageRepliesToOriginal(t *testing.T) {
 	}
 	if processorSnap.metadata["feishu.chat_id"] != "oc_chat" || processorSnap.metadata["feishu.message_id"] != "om_message" || processorSnap.metadata["feishu.sender_open_id"] != "ou_user" {
 		t.Fatalf("processor metadata = %#v", processorSnap.metadata)
+	}
+	if !processorSnap.actorOK || processorSnap.actor.OpenID != "ou_user" {
+		t.Fatalf("processor actor = %#v ok=%v, want sender open_id", processorSnap.actor, processorSnap.actorOK)
 	}
 	if len(senderSnap.replyCreates) != 1 || senderSnap.replyCreates[0].messageID != "om_message" || senderSnap.replyCreates[0].text != "ok" {
 		t.Fatalf("reply creates = %#v, want ok reply to om_message", senderSnap.replyCreates)

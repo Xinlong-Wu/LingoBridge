@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"lingobridge/internal/core"
+	feishutools "lingobridge/internal/platform/feishu/tools"
 	"lingobridge/internal/store"
 	tooltypes "lingobridge/internal/tools"
 
@@ -146,7 +147,10 @@ func logReceivedMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) {
 }
 
 func (b *bot) processMessage(in incomingMessage) {
-	ctx := b.processingContext()
+	ctx := feishutools.WithActor(b.processingContext(), feishutools.Actor{
+		OpenID: in.SenderOpenID,
+		UserID: in.SenderUserID,
+	})
 	resp := feishuResponder{sender: b.sender, chatID: in.ChatID, messageID: in.MessageID, replyToMessageID: in.ReplyToMessageID, mentions: in.Mentions}
 	if in.Unsupported {
 		if err := resp.Send(ctx, core.OutboundMessage{Text: unsupportedMessageText}); err != nil {
@@ -167,6 +171,7 @@ func (b *bot) processMessage(in incomingMessage) {
 			"feishu.chat_id":        in.ChatID,
 			"feishu.message_id":     in.MessageID,
 			"feishu.sender_open_id": in.SenderOpenID,
+			"feishu.sender_user_id": in.SenderUserID,
 		},
 		Tools: b.tools,
 	}, resp); err != nil {

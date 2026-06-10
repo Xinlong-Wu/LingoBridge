@@ -4,19 +4,17 @@ import (
 	"testing"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
-
-	"lingobridge/internal/platform/feishu"
 )
 
 func TestDocsToolConfigDefaultsAndRegistration(t *testing.T) {
-	cfg := feishu.NormalizeToolsConfig(feishu.ToolsConfig{})
+	cfg := NormalizeConfig(Config{})
 	if cfg.Docs.Enabled {
 		t.Fatal("docs tools enabled by default, want disabled")
 	}
 	if cfg.Docs.AllowWrite {
 		t.Fatal("docs tools allow_write = true by default, want false")
 	}
-	if cfg.MaxResults != feishu.DefaultToolMaxResults || cfg.MaxChars != feishu.DefaultToolMaxChars {
+	if cfg.MaxResults != DefaultMaxResults || cfg.MaxChars != DefaultMaxChars {
 		t.Fatalf("defaults = %#v, want max defaults", cfg)
 	}
 

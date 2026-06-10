@@ -8,6 +8,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"lingobridge/internal/core"
+	feishutools "lingobridge/internal/platform/feishu/tools"
 	"lingobridge/internal/store"
 )
 
@@ -22,7 +23,7 @@ type Credentials struct {
 type Config struct {
 	Accounts map[string]AccountConfig `yaml:"accounts"`
 	Events   []EventConfig            `yaml:"events,omitempty"`
-	Tools    ToolsConfig              `yaml:"tools,omitempty"`
+	Tools    feishutools.Config       `yaml:"tools,omitempty"`
 }
 
 // AccountConfig holds one Feishu self-built app account config.
@@ -38,26 +39,6 @@ type EventConfig struct {
 	Version string   `yaml:"version"`
 	Run     ShellRun `yaml:"run"`
 }
-
-// ToolsConfig holds optional LLM tool plugins exposed by the Feishu platform.
-type ToolsConfig struct {
-	MaxResults          int             `yaml:"max_results,omitempty"`
-	MaxChars            int             `yaml:"max_chars,omitempty"`
-	AllowedFolderTokens []string        `yaml:"allowed_folder_tokens,omitempty"`
-	AllowedSpaceIDs     []string        `yaml:"allowed_space_ids,omitempty"`
-	Docs                DocsToolsConfig `yaml:"docs,omitempty"`
-}
-
-// DocsToolsConfig controls Feishu document tools exposed to tool-capable models.
-type DocsToolsConfig struct {
-	Enabled    bool `yaml:"enabled,omitempty"`
-	AllowWrite bool `yaml:"allow_write,omitempty"`
-}
-
-const (
-	DefaultToolMaxResults = 5
-	DefaultToolMaxChars   = 12000
-)
 
 // ShellRun is one shell script or a sequence of shell scripts.
 type ShellRun []string
@@ -222,7 +203,7 @@ func (c *Config) ApplyDefaults() {
 		event.Run = normalizeShellRun(event.Run)
 		c.Events[i] = event
 	}
-	c.Tools = NormalizeToolsConfig(c.Tools)
+	c.Tools = feishutools.NormalizeConfig(c.Tools)
 }
 
 func normalizeAccountConfig(account AccountConfig) AccountConfig {
@@ -243,30 +224,4 @@ func normalizeShellRun(run ShellRun) ShellRun {
 		}
 	}
 	return normalized
-}
-
-func NormalizeToolsConfig(cfg ToolsConfig) ToolsConfig {
-	if cfg.MaxResults <= 0 {
-		cfg.MaxResults = DefaultToolMaxResults
-	}
-	if cfg.MaxChars <= 0 {
-		cfg.MaxChars = DefaultToolMaxChars
-	}
-	cfg.AllowedFolderTokens = normalizeStringList(cfg.AllowedFolderTokens)
-	cfg.AllowedSpaceIDs = normalizeStringList(cfg.AllowedSpaceIDs)
-	return cfg
-}
-
-func normalizeStringList(values []string) []string {
-	out := []string{}
-	seen := map[string]bool{}
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
-			continue
-		}
-		out = append(out, value)
-		seen[value] = true
-	}
-	return out
 }
