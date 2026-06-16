@@ -12,6 +12,7 @@ import (
 	"lingobridge/internal/platform"
 	"lingobridge/internal/platform/feishu"
 	feishumonitor "lingobridge/internal/platform/feishu/monitor"
+	githubplatform "lingobridge/internal/platform/github"
 	"lingobridge/internal/platform/wechat/login"
 	wechatmonitor "lingobridge/internal/platform/wechat/monitor"
 	"lingobridge/internal/store"
@@ -24,7 +25,7 @@ const (
 
 func NewRegistry() (*platform.Registry, error) {
 	r := platform.NewRegistry()
-	for _, def := range []platform.Definition{wechatDefinition(), feishuDefinition()} {
+	for _, def := range []platform.Definition{wechatDefinition(), feishuDefinition(), githubDefinition()} {
 		if err := r.Register(def); err != nil {
 			return nil, err
 		}
@@ -138,5 +139,66 @@ func feishuDefinition() platform.Definition {
 		CommandPolicy:       commands.DefaultPolicy(),
 		TextChunkLimit:      FeishuTextChunkLimit,
 		EnableTextStreaming: true,
+	}
+}
+
+func githubDefinition() platform.Definition {
+	return platform.Definition{
+		ID:              store.PlatformGitHub,
+		AccountNewUsage: "lingobridge account new github [--name <name>] [--app-id <id>] [--installation-id <id>] [--private-key-path <pem>] --repo owner/repo [--repo owner/other] [--poll-interval 2m] [--base-url <url>] [--web-url <url>]",
+		ParseAccountNewFlags: func(args []string, io platform.AccountNewIO) (platform.AccountNewOptions, error) {
+			accountIO := normalizeAccountNewIO(io)
+			values, err := githubplatform.ParseAccountNewFlags(args, accountIO.In, accountIO.Out)
+			if err != nil {
+				return platform.AccountNewOptions{}, err
+			}
+			return platform.AccountNewOptions{
+				Name:   normalizeAccountName(values.Name),
+				Values: values,
+			}, nil
+		},
+		CreateOrUpdateAccount: func(ctx platform.AccountNewContext, opts platform.AccountNewOptions) error {
+			values, ok := opts.Values.(githubplatform.AccountNewOptions)
+			if !ok {
+				return fmt.Errorf("invalid github account options")
+			}
+			accountConfig := githubplatform.AccountConfig{
+				AppID:          values.AppID,
+				InstallationID: values.InstallationID,
+				PrivateKeyPath: values.PrivateKeyPath,
+				BaseURL:        values.BaseURL,
+				WebURL:         values.WebURL,
+				Repositories:   values.Repositories,
+			}
+			if values.PollInterval > 0 {
+				accountConfig.PollInterval = githubplatform.NewDuration(values.PollInterval)
+			}
+			if err := githubplatform.UpsertAccountConfig(ctx.Platform, opts.Name, accountConfig); err != nil {
+				return err
+			}
+			acc, err := githubplatform.NewAccount(opts.Name, values.AppID, values.InstallationID, values.PrivateKeyPath, values.BaseURL)
+			if err != nil {
+				return err
+			}
+			if err := ctx.Platform.DataStore().SaveAccount(acc); err != nil {
+				return fmt.Errorf("save account: %w", err)
+			}
+			fmt.Printf("✅ 已添加 GitHub 账户: %s (%s)\n", acc.Name, acc.ID)
+			fmt.Println("Note: Configure platforms.github.accounts.<name>.mcp.command and .mcp.args before running this account.")
+			return nil
+		},
+		DeleteAccount: func(ctx platform.AccountDeleteContext) error {
+			return githubplatform.DeleteAccountConfig(ctx.Platform, ctx.Account.Name)
+		},
+		NewRuntimePlatform: func(ctx platform.RuntimeContext) (core.Platform, error) {
+			githubConfig, err := githubplatform.LoadConfig(ctx.Platform)
+			if err != nil {
+				return nil, err
+			}
+			return githubplatform.NewPlatform(ctx.Account, githubConfig, ctx.Store), nil
+		},
+		CommandPolicy:       commands.DefaultPolicy(),
+		TextChunkLimit:      0,
+		EnableTextStreaming: false,
 	}
 }

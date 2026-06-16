@@ -32,6 +32,8 @@ const (
 	PlatformWeChat = "wechat"
 	// PlatformFeishu identifies accounts backed by the Feishu Open Platform.
 	PlatformFeishu = "feishu"
+	// PlatformGitHub identifies accounts backed by GitHub App PR review polling.
+	PlatformGitHub = "github"
 )
 
 // Account represents a bot account saved during login or configuration.

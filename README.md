@@ -1,6 +1,6 @@
 # LingoBridge
 
-WeChat/Feishu Bot → LLM direct bridge. Connects chat bot accounts to OpenAI/Anthropic-compatible LLM APIs.
+WeChat/Feishu/GitHub Bot → LLM direct bridge. Connects chat bot and PR review accounts to OpenAI/Anthropic-compatible LLM APIs.
 
 ## Quick Start
 
@@ -70,6 +70,24 @@ Feishu app credentials are saved under `platforms.feishu.accounts` in the
 shared `~/.lingobridge/config.yaml`. The Feishu platform defines the schema
 inside its own `platforms.feishu` config block.
 
+Or add a GitHub App PR review account:
+
+```bash
+./lingobridge account new github \
+  --name reviewer \
+  --app-id 123456 \
+  --installation-id 987654 \
+  --private-key-path /etc/lingobridge/github-app.pem \
+  --repo owner/repo \
+  --poll-interval 2m
+```
+
+GitHub App credentials and repository allowlists are saved under
+`platforms.github.accounts`. Before running the GitHub account, explicitly set
+`platforms.github.accounts.<name>.mcp.command` and `.mcp.args` to point at your
+GitHub MCP server. LingoBridge does not write or assume default GitHub MCP
+command arguments.
+
 For Feishu, enable bot capability and long-connection event subscription for
 `im.message.receive_v1` in the Feishu Open Platform app console. Add any
 extra event subscriptions, such as `p2p_chat_create` or
@@ -110,8 +128,9 @@ when relevant config changes.
 |---|---|
 | `account new weixin [--name <name>]` | Add a WeChat bot account via QR login and reload a running bot process |
 | `account new feishu [--name <name>] [--app-id <id>] [--app-secret <secret>] [--base-url <url>]` | Add a Feishu self-built app account, write Feishu config, and reload a running bot process |
+| `account new github [--name <name>] [--app-id <id>] [--installation-id <id>] [--private-key-path <pem>] --repo owner/repo [--repo owner/other] [--poll-interval <duration>] [--base-url <url>] [--web-url <url>]` | Add a GitHub App PR review account, write GitHub config, and reload a running bot process |
 | `account list` | List all accounts as `platform/name` with their account ID |
-| `account delete <name\|platform/name>` | Delete an account from its platform data domain, remove Feishu account config when applicable, and reload a running bot process |
+| `account delete <name\|platform/name>` | Delete an account from its platform data domain, remove Feishu/GitHub account config when applicable, and reload a running bot process |
 | `model add <name> [--provider <openai\|anthropic>] [--base-url <url>] [--api-key <key>] [--id <model-id>] [--endpoint <mode>] [--context-window <tokens>] [--compact <true\|false\|auto>] [--compact-threshold <ratio>] [--compact-instructions <text>] [--default]` | Add an LLM model profile to config and optionally make it the default |
 | `run [--account <name>] [--verbose <all\|debug\|info\|warn\|error>]` | Start the bot loop with optional log level, default `info` |
 
@@ -315,6 +334,33 @@ Feishu image, file, video, and voice messages are acknowledged with an
 unsupported-message notice in this first version. Generated images from the LLM
 are not sent back to Feishu yet.
 
+### GitHub
+
+GitHub support uses a GitHub App installation token and polls configured
+repositories for open pull requests. Draft PRs are skipped. A PR is reviewed
+when it first appears or when its `head.sha` changes; unchanged PRs are tracked
+through the platform `sync_cursors` buffer and are not reviewed again.
+
+Review instructions are read from `.github/review_instructions.md`: first from
+the base repository at the PR base SHA, then from the head repository at the PR
+head SHA only if the base file is missing. If both files are missing, that PR
+SHA is marked `missing_instructions` and retried only after the head SHA
+changes.
+
+Each review starts a fresh GitHub MCP host from
+`platforms.github.accounts.<name>.mcp`. The server id is fixed to `github`, so
+MCP tools are exposed to the LLM as `mcp_github_<tool>`, such as
+`mcp_github_pull_request_read`. LingoBridge injects the short-lived GitHub App
+installation token as `GITHUB_PERSONAL_ACCESS_TOKEN` and, when configured,
+injects `GITHUB_HOST` from `web_url`.
+
+The GitHub platform wraps configured MCP tools with PR-review guards. Tool calls
+must target the current PR. File reads are limited to the current base or head
+SHA, and review writes can only create a pending review, add inline comments,
+and submit that pending review as `COMMENT`. Approvals, request-changes reviews,
+thread resolution, PR updates, branch updates, merges, and repository writes are
+rejected before reaching the MCP server.
+
 ## Configuration
 
 `~/.lingobridge/config.yaml`:
@@ -344,6 +390,20 @@ are not sent back to Feishu yet.
 | `mcp.servers.<name>.scope.platforms` | `[]` | Optional platform IDs allowed to see this MCP server's tools; omitted scope is global |
 | `mcp.servers.<name>.scope.accounts` | `[]` | Optional account selectors allowed to see this MCP server's tools; entries may be `platform/account_name` or stable account ID |
 | `platforms.<platform>` | — | Platform-private config block; each platform owns its internal schema |
+| `platforms.github.accounts.<name>.app_id` | — | GitHub App ID for account `<name>` |
+| `platforms.github.accounts.<name>.installation_id` | — | GitHub App installation ID used to create installation tokens |
+| `platforms.github.accounts.<name>.private_key_path` | — | Local PEM private key path for signing GitHub App JWTs |
+| `platforms.github.accounts.<name>.base_url` | `https://api.github.com` | GitHub REST API base URL |
+| `platforms.github.accounts.<name>.web_url` | `https://github.com` | GitHub web URL and MCP `GITHUB_HOST` value |
+| `platforms.github.accounts.<name>.poll_interval` | `2m` | Interval between PR polling passes |
+| `platforms.github.accounts.<name>.repositories` | — | Repository allowlist in `owner/repo` form; at least one is required |
+| `platforms.github.accounts.<name>.review.max_tool_calls` | `30` | Tool-call limit for one automated PR review |
+| `platforms.github.accounts.<name>.review.tool_timeout` | `30s` | Per-tool timeout for one automated PR review |
+| `platforms.github.accounts.<name>.review.tool_result_limit` | `60000` | Maximum tool result characters returned to the LLM per call |
+| `platforms.github.accounts.<name>.mcp.command` | — | Required command used to start the per-review GitHub MCP server |
+| `platforms.github.accounts.<name>.mcp.args` | — | Required arguments for the per-review GitHub MCP server; include explicit `--tools=...` |
+| `platforms.github.accounts.<name>.mcp.env` | `{}` | Extra MCP server environment variables; GitHub tokens are injected automatically and should not be configured here |
+| `platforms.github.accounts.<name>.mcp.cwd` | — | Optional working directory for the per-review GitHub MCP server |
 | `platforms.feishu.accounts.<name>.app_id` | — | Feishu app ID for account `<name>` |
 | `platforms.feishu.accounts.<name>.app_secret` | — | Feishu app secret for account `<name>` |
 | `platforms.feishu.accounts.<name>.base_url` | `https://open.feishu.cn` | Feishu Open Platform base URL |
@@ -409,16 +469,21 @@ saved per-user model preference that no longer exists back to
       data/
         lingobridge.db                   # Feishu account metadata, sessions, user preferences
         sessions/{userId}/{sessionId}.jsonl # Conversation snapshots; may include compact provider_contexts and tool_traces
+    github/
+      data/
+        lingobridge.db                   # GitHub account metadata, review sessions, sync cursors
+        sessions/{reviewKey}/{sessionId}.jsonl # Synthetic review history and tool_traces
 ```
 
 Each platform has its own SQLite database and data directory. The middle layer
 opens a store for the selected platform and passes only that scoped store to the
 platform adapter, so WeChat code cannot read Feishu data and Feishu code cannot
 read WeChat data through the storage API. The `accounts` table stores account
-metadata; Feishu `app_id/app_secret/base_url` live in
-`platforms.feishu.accounts.<name>` rather than SQLite. Removed global data
-layouts and legacy storage schemas are not migrated automatically; add accounts
-again with the current CLI if needed.
+metadata; Feishu `app_id/app_secret/base_url` and GitHub App configuration live
+under their platform-private `platforms.<platform>.accounts.<name>` config
+blocks rather than SQLite. Removed global data layouts and legacy storage
+schemas are not migrated automatically; add accounts again with the current CLI
+if needed.
 
 ## Internal Architecture
 
@@ -429,12 +494,13 @@ cmd/lingobridge/            # Thin CLI entrypoint
 internal/app/               # CLI dispatch, account catalog, model setup, runtime orchestration, reload wiring
 internal/config/            # Shared config load/save, paths, LLM/MCP defaults/validation, platforms.<platform> YAML preservation
 internal/platform/          # Platform registry and shared platform definition types
-internal/platform/builtins/ # Built-in WeChat/Feishu account/runtime definition registration
+internal/platform/builtins/ # Built-in WeChat/Feishu/GitHub account/runtime definition registration
 internal/platform/wechat/   # WeChat frontend adapter: native events/API <-> core messages
 internal/platform/wechat/monitor/ # WeChat monitor, reply sender, and media handling
 internal/platform/feishu/   # Feishu frontend adapter and its private config schema
 internal/platform/feishu/monitor/ # Feishu long-connection monitor, message/text-stream adapter, and event hooks
 internal/platform/feishu/tools/ # Feishu platform-level LLM tools, including Docs helpers and LiteLLM account invitations
+internal/platform/github/   # GitHub App auth, PR polling, review prompt construction, and MCP review tool guards
 internal/core/              # Middle layer: scoped platform config/data APIs, tool orchestration, commands, sessions, LLM orchestration
 internal/tools/             # Shared tool domain interfaces and provider-neutral spec/call/result/options types
 internal/mcp/               # Global MCP host/client sessions and MCP tool adapters exposed through tools.Provider

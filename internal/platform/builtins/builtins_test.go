@@ -7,6 +7,7 @@ import (
 	"lingobridge/internal/core"
 	"lingobridge/internal/platform"
 	"lingobridge/internal/platform/feishu"
+	githubplatform "lingobridge/internal/platform/github"
 	"lingobridge/internal/session"
 	"lingobridge/internal/store"
 )
@@ -23,6 +24,7 @@ func TestDefaultRegistryLookupAliases(t *testing.T) {
 		"微信":     store.PlatformWeChat,
 		"feishu": store.PlatformFeishu,
 		"飞书":     store.PlatformFeishu,
+		"github": store.PlatformGitHub,
 	}
 	for name, want := range tests {
 		def, ok := registry.Lookup(name)
@@ -79,6 +81,17 @@ func TestDefaultDefinitionsSetCoreRuntimeOptions(t *testing.T) {
 	if !feishu.EnableTextStreaming {
 		t.Fatal("feishu EnableTextStreaming = false, want true")
 	}
+
+	github, ok := registry.LookupAccountPlatform(store.PlatformGitHub)
+	if !ok {
+		t.Fatal("github definition not found")
+	}
+	if github.TextChunkLimit != 0 {
+		t.Fatalf("github TextChunkLimit = %d, want 0", github.TextChunkLimit)
+	}
+	if github.EnableTextStreaming {
+		t.Fatal("github EnableTextStreaming = true, want false")
+	}
 }
 
 func TestDefaultDefinitionsCreateRuntimePlatforms(t *testing.T) {
@@ -97,6 +110,11 @@ func TestDefaultDefinitionsCreateRuntimePlatforms(t *testing.T) {
 		t.Fatalf("Open feishu returned error: %v", err)
 	}
 	defer feishuStore.Close()
+	githubStore, err := store.Open(store.PlatformGitHub)
+	if err != nil {
+		t.Fatalf("Open github returned error: %v", err)
+	}
+	defer githubStore.Close()
 
 	cfg := config.DefaultConfig()
 	if err := config.AddModel(&cfg, "deepseek", config.LLMModelConfig{
@@ -114,6 +132,18 @@ func TestDefaultDefinitionsCreateRuntimePlatforms(t *testing.T) {
 	if err := feishu.UpsertAccountConfig(feishuCtx, "fsbot", feishu.AccountConfig{AppID: "cli_xxx", AppSecret: "secret"}); err != nil {
 		t.Fatalf("UpsertAccountConfig returned error: %v", err)
 	}
+	githubCtx, err := core.NewPlatformContext(store.PlatformGitHub, &cfg, githubStore, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext github returned error: %v", err)
+	}
+	if err := githubplatform.UpsertAccountConfig(githubCtx, "ghbot", githubplatform.AccountConfig{
+		AppID:          "123",
+		InstallationID: "456",
+		PrivateKeyPath: "/tmp/github-app.pem",
+		Repositories:   []string{"owner/repo"},
+	}); err != nil {
+		t.Fatalf("UpsertAccountConfig github returned error: %v", err)
+	}
 
 	for _, tc := range []struct {
 		account store.Account
@@ -121,6 +151,7 @@ func TestDefaultDefinitionsCreateRuntimePlatforms(t *testing.T) {
 	}{
 		{account: store.Account{ID: "wechat:test", Name: "wxbot", Platform: store.PlatformWeChat}, st: wechatStore},
 		{account: store.Account{ID: "feishu:cli_xxx", Name: "fsbot", Platform: store.PlatformFeishu}, st: feishuStore},
+		{account: store.Account{ID: "github:456", Name: "ghbot", Platform: store.PlatformGitHub}, st: githubStore},
 	} {
 		account := tc.account
 		def, ok := registry.LookupAccountPlatform(account.Platform)

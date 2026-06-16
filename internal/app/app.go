@@ -163,10 +163,10 @@ func cmdModel(args []string) error {
 }
 
 func printUsage() {
-	fmt.Println("LingoBridge - WeChat/Feishu Bot → LLM Direct Bridge")
+	fmt.Println("LingoBridge - WeChat/Feishu/GitHub Bot → LLM Direct Bridge")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  lingobridge account new <weixin|feishu> [platform options]")
+	fmt.Println("  lingobridge account new <weixin|feishu|github> [platform options]")
 	fmt.Println("                                           Add a bot account")
 	fmt.Println("  lingobridge account list                   List all accounts")
 	fmt.Println("  lingobridge account delete <name|platform/name>")
@@ -179,7 +179,7 @@ func printUsage() {
 
 func printAccountUsage() {
 	fmt.Println("Usage:")
-	fmt.Println("  lingobridge account new <weixin|feishu> [platform options]")
+	fmt.Println("  lingobridge account new <weixin|feishu|github> [platform options]")
 	fmt.Println("  lingobridge account list")
 	fmt.Println("  lingobridge account delete <name|platform/name>")
 }
@@ -631,7 +631,7 @@ func cmdAccountNew(args []string) error {
 
 func cmdAccountNewWithRegistry(args []string, registry *platform.Registry) error {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		fmt.Println("Usage: lingobridge account new <weixin|feishu> [platform options]")
+		fmt.Println("Usage: lingobridge account new <weixin|feishu|github> [platform options]")
 		return ErrUsage
 	}
 	def, ok := registry.Lookup(args[0])
