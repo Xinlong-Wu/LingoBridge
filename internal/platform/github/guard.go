@@ -66,7 +66,14 @@ func githubRemoteToolName(exposed string) (string, bool) {
 }
 
 func (t guardedTool) Spec() tooltypes.Spec {
-	return t.inner.Spec()
+	spec := t.inner.Spec()
+	switch t.remote {
+	case "get_file_contents":
+		spec.Description = appendGetFileContentsGuardDescription(spec.Description, t.pr)
+	case "pull_request_review_write":
+		spec.Parameters = restrictReviewWriteSchema(spec.Parameters)
+	}
+	return spec
 }
 
 func (t guardedTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes.Result {
@@ -162,8 +169,8 @@ func validateFileContentsArgs(args map[string]any, pr PullRequest) error {
 			return fmt.Errorf("get_file_contents sha must be current PR base or head SHA")
 		}
 	case hasRef:
-		if !allowedReviewSHA(ref, pr) {
-			return fmt.Errorf("get_file_contents ref must be current PR base or head SHA")
+		if !allowedReviewRef(ref, target, pr) {
+			return fmt.Errorf("get_file_contents ref must be current PR base/head branch ref, refs/pull/%d/head, or current PR base/head SHA", pr.Number)
 		}
 	default:
 		args["sha"] = pr.Head.SHA
@@ -213,7 +220,44 @@ func validateReviewCommentArgs(args map[string]any) error {
 	if !ok || strings.TrimSpace(body) == "" {
 		return fmt.Errorf("body is required")
 	}
-	return nil
+	subjectType, ok := stringArg(args, "subjectType")
+	if !ok {
+		return fmt.Errorf("subjectType is required")
+	}
+	switch subjectType {
+	case "FILE":
+		if _, hasStartLine := intArg(args, "startLine"); hasStartLine {
+			return fmt.Errorf("startLine is only allowed for LINE comments")
+		}
+		if _, hasStartSide := stringArg(args, "startSide"); hasStartSide {
+			return fmt.Errorf("startSide is only allowed for LINE comments")
+		}
+		return nil
+	case "LINE":
+		if _, ok := intArg(args, "line"); !ok {
+			return fmt.Errorf("line is required for LINE comments")
+		}
+		side, ok := stringArg(args, "side")
+		if !ok || !validReviewCommentSide(side) {
+			return fmt.Errorf("side must be LEFT or RIGHT for LINE comments")
+		}
+		_, hasStartLine := intArg(args, "startLine")
+		startSide, hasStartSide := stringArg(args, "startSide")
+		if hasStartLine != hasStartSide {
+			return fmt.Errorf("startLine and startSide must be provided together for multi-line comments")
+		}
+		if hasStartSide && !validReviewCommentSide(startSide) {
+			return fmt.Errorf("startSide must be LEFT or RIGHT")
+		}
+		return nil
+	default:
+		return fmt.Errorf("subjectType must be FILE or LINE")
+	}
+}
+
+func validReviewCommentSide(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "LEFT" || value == "RIGHT"
 }
 
 func isCommentSubmit(args map[string]any) bool {
@@ -225,6 +269,100 @@ func isCommentSubmit(args map[string]any) bool {
 func allowedReviewSHA(value string, pr PullRequest) bool {
 	value = strings.TrimSpace(value)
 	return value != "" && (value == strings.TrimSpace(pr.Base.SHA) || value == strings.TrimSpace(pr.Head.SHA))
+}
+
+func allowedReviewRef(value string, target Repository, pr PullRequest) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if allowedReviewSHA(value, pr) {
+		return true
+	}
+	if sameRepo(target, pr.Base.Repo) && branchRefMatches(value, pr.Base.Ref) {
+		return true
+	}
+	if sameRepo(target, pr.Head.Repo) && branchRefMatches(value, pr.Head.Ref) {
+		return true
+	}
+	return sameRepo(target, pr.Base.Repo) && value == fmt.Sprintf("refs/pull/%d/head", pr.Number)
+}
+
+func branchRefMatches(value, branch string) bool {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return false
+	}
+	return value == branch || value == "refs/heads/"+branch
+}
+
+func appendGetFileContentsGuardDescription(description string, pr PullRequest) string {
+	description = strings.TrimSpace(description)
+	var b strings.Builder
+	if description != "" {
+		b.WriteString(description)
+		b.WriteString("\n\n")
+	}
+	fmt.Fprintf(&b, "LingoBridge GitHub PR review guard: owner/repo must be the current PR base repo (%s) or head repo (%s). ",
+		pr.Base.Repo.FullName(), pr.Head.Repo.FullName())
+	fmt.Fprintf(&b, "sha may only be the current base SHA (%s) or head SHA (%s). ", pr.Base.SHA, pr.Head.SHA)
+	fmt.Fprintf(&b, "ref may only be the matching current PR branch ref (base %q or head %q), refs/heads/<that branch>, refs/pull/%d/head on the base repo, or one of those SHAs. ",
+		pr.Base.Ref, pr.Head.Ref, pr.Number)
+	b.WriteString("If neither sha nor ref is provided, the guard defaults to the current head SHA.")
+	return b.String()
+}
+
+func restrictReviewWriteSchema(raw json.RawMessage) json.RawMessage {
+	return restrictSchema(raw, map[string]schemaPropertyPatch{
+		"method": {
+			Enum:        []string{"create", "submit_pending"},
+			Description: "Review operation allowed by LingoBridge. Use create without event to create a pending review, then submit_pending with event=COMMENT.",
+		},
+		"event": {
+			Enum:        []string{"COMMENT"},
+			Description: "Only COMMENT is allowed when submitting a pending review.",
+		},
+	})
+}
+
+type schemaPropertyPatch struct {
+	Enum        []string
+	Description string
+}
+
+func restrictSchema(raw json.RawMessage, patches map[string]schemaPropertyPatch) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return raw
+	}
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return raw
+	}
+	for name, patch := range patches {
+		property, ok := properties[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		if len(patch.Enum) > 0 {
+			values := make([]any, 0, len(patch.Enum))
+			for _, value := range patch.Enum {
+				values = append(values, value)
+			}
+			property["enum"] = values
+		}
+		if patch.Description != "" {
+			property["description"] = patch.Description
+		}
+	}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return raw
+	}
+	return data
 }
 
 func stringArg(args map[string]any, key string) (string, bool) {

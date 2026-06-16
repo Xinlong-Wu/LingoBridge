@@ -38,9 +38,10 @@ type AccountConfig struct {
 }
 
 type ReviewConfig struct {
-	MaxToolCalls    int      `yaml:"max_tool_calls,omitempty"`
-	ToolTimeout     Duration `yaml:"tool_timeout,omitempty"`
-	ToolResultLimit int      `yaml:"tool_result_limit,omitempty"`
+	MaxToolCalls        int      `yaml:"max_tool_calls,omitempty"`
+	ToolTimeout         Duration `yaml:"tool_timeout,omitempty"`
+	ToolResultLimit     int      `yaml:"tool_result_limit,omitempty"`
+	DefaultInstructions string   `yaml:"default_instructions,omitempty"`
 }
 
 type MCPConfig struct {
@@ -192,6 +193,7 @@ func normalizeAccountConfig(account AccountConfig) AccountConfig {
 }
 
 func normalizeReviewConfig(review ReviewConfig) ReviewConfig {
+	review.DefaultInstructions = strings.TrimSpace(review.DefaultInstructions)
 	if review.MaxToolCalls <= 0 {
 		review.MaxToolCalls = DefaultMaxToolCalls
 	}

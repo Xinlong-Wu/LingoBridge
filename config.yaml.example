@@ -91,6 +91,11 @@ platforms:
           max_tool_calls: 30
           tool_timeout: "30s"
           tool_result_limit: 60000
+          # Optional default used only when neither base nor head contains
+          # .github/review_instructions.md.
+          default_instructions: |
+            Review this pull request for correctness, regressions, security issues,
+            and missing tests. Leave concise inline comments where useful.
         # Required for GitHub review accounts. LingoBridge injects
         # GITHUB_PERSONAL_ACCESS_TOKEN and GITHUB_HOST at runtime; do not put
         # GitHub tokens here.

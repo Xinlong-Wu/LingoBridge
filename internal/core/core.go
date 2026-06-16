@@ -341,13 +341,19 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 	var previous llm.ToolState
 	var results []tooltypes.Result
 	totalCalls := 0
+	pendingBudgetReminder := toolBudgetReminderNone
+	pendingBudgetRemaining := maxCalls
+	sentBudget10 := false
+	sentBudget5 := false
 	effectiveCompact := llm.CompactConfig{}
 	if compactAllowed {
 		effectiveCompact = compact
 	}
 
 	for {
-		resp, err := client.ChatStreamWithTools(systemPrompt, msgs, providerContext, effectiveCompact, specs, previous, results, onChunk)
+		turnSystemPrompt := toolBudgetSystemPrompt(systemPrompt, maxCalls, pendingBudgetReminder, pendingBudgetRemaining)
+		pendingBudgetReminder = toolBudgetReminderNone
+		resp, err := client.ChatStreamWithTools(turnSystemPrompt, msgs, providerContext, effectiveCompact, specs, previous, results, onChunk)
 		if err != nil {
 			return llm.Response{}, traces, err
 		}
@@ -378,6 +384,20 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 			} else {
 				coreLog.Debug(ctx, "tool call finished name=%s call_id=%s status=%s duration_ms=%d", trace.Name, trace.CallID, trace.Status, trace.DurationMillis)
 			}
+		}
+		remaining := maxCalls - totalCalls
+		switch nextToolBudgetReminder(maxCalls, remaining, sentBudget10, sentBudget5) {
+		case toolBudgetReminderFivePercent:
+			pendingBudgetReminder = toolBudgetReminderFivePercent
+			pendingBudgetRemaining = remaining
+			sentBudget5 = true
+			sentBudget10 = true
+			coreLog.Debug(ctx, "tool budget reminder queued severity=5%% remaining=%d max_calls=%d", remaining, maxCalls)
+		case toolBudgetReminderTenPercent:
+			pendingBudgetReminder = toolBudgetReminderTenPercent
+			pendingBudgetRemaining = remaining
+			sentBudget10 = true
+			coreLog.Debug(ctx, "tool budget reminder queued severity=10%% remaining=%d max_calls=%d", remaining, maxCalls)
 		}
 	}
 }

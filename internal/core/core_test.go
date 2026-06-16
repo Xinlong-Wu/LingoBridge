@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -142,12 +143,14 @@ type fakeNativeLLM struct {
 
 type fakeToolLLM struct {
 	fakeLLM
-	turns       int
-	calls       []tooltypes.Call
-	results     []tooltypes.Result
-	toolSpecs   []tooltypes.Spec
-	finalText   string
-	providerCtx store.ProviderContext
+	turns         int
+	calls         []tooltypes.Call
+	callTurns     [][]tooltypes.Call
+	results       []tooltypes.Result
+	toolSpecs     []tooltypes.Spec
+	finalText     string
+	providerCtx   store.ProviderContext
+	systemPrompts []string
 }
 
 func (f *fakeToolLLM) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, tools []tooltypes.Spec, previous llm.ToolState, results []tooltypes.Result, onChunk func(chunk string) error) (llm.ToolResponse, error) {
@@ -155,11 +158,22 @@ func (f *fakeToolLLM) ChatStreamWithTools(systemPrompt string, messages []store.
 	f.messages = messages
 	f.providerCtx = providerContext
 	f.toolSpecs = tools
+	f.systemPrompts = append(f.systemPrompts, systemPrompt)
 	f.results = append(f.results, results...)
-	if f.turns == 0 {
-		f.turns++
+	turn := f.turns
+	f.turns++
+	var calls []tooltypes.Call
+	switch {
+	case len(f.callTurns) > 0:
+		if turn < len(f.callTurns) {
+			calls = f.callTurns[turn]
+		}
+	case turn == 0:
+		calls = f.calls
+	}
+	if len(calls) > 0 {
 		return llm.ToolResponse{
-			ToolCalls: f.calls,
+			ToolCalls: calls,
 			ToolState: llm.ToolState{
 				Provider: "fake",
 				Endpoint: "tools",
@@ -199,6 +213,18 @@ func (f *fakeTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes.R
 		return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: f.err, IsError: true}
 	}
 	return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: f.result}
+}
+
+func makeToolCalls(count, offset int) []tooltypes.Call {
+	calls := make([]tooltypes.Call, 0, count)
+	for i := 0; i < count; i++ {
+		calls = append(calls, tooltypes.Call{
+			ID:        "call_" + strconv.Itoa(offset+i+1),
+			Name:      "fake_tool",
+			Arguments: json.RawMessage(`{}`),
+		})
+	}
+	return calls
 }
 
 type fakeToolProvider struct {
@@ -644,6 +670,105 @@ func TestHandleTextMessageToolOptionsOverrideProviderOptions(t *testing.T) {
 	}
 	if len(tool.calls) != 2 {
 		t.Fatalf("tool calls = %d, want 2", len(tool.calls))
+	}
+}
+
+func TestHandleTextToolBudgetPromptIncludesMaxCalls(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{finalText: "done"}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:     "u1",
+		LLMText:     "try it",
+		Tools:       []tooltypes.Tool{&fakeTool{}},
+		ToolOptions: tooltypes.Options{MaxCalls: 50},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(llmClient.systemPrompts) != 1 {
+		t.Fatalf("system prompts = %d, want 1", len(llmClient.systemPrompts))
+	}
+	if !strings.Contains(llmClient.systemPrompts[0], "at most 50 times") {
+		t.Fatalf("system prompt = %q, want max call budget", llmClient.systemPrompts[0])
+	}
+	if len(llmClient.results) != 0 {
+		t.Fatalf("tool results = %#v, want no fake reminder result", llmClient.results)
+	}
+}
+
+func TestHandleTextToolBudgetReminderThresholds(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		callTurns: [][]tooltypes.Call{
+			makeToolCalls(18, 0),
+			makeToolCalls(1, 18),
+		},
+		finalText: "done",
+	}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:     "u1",
+		LLMText:     "try it",
+		Tools:       []tooltypes.Tool{&fakeTool{}},
+		ToolOptions: tooltypes.Options{MaxCalls: 20},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(llmClient.systemPrompts) != 3 {
+		t.Fatalf("system prompts = %d, want 3", len(llmClient.systemPrompts))
+	}
+	if strings.Contains(llmClient.systemPrompts[0], "tool_call_budget_reminder") {
+		t.Fatalf("initial prompt has reminder: %q", llmClient.systemPrompts[0])
+	}
+	if !strings.Contains(llmClient.systemPrompts[1], `severity="10%"`) || !strings.Contains(llmClient.systemPrompts[1], `remaining="2"`) {
+		t.Fatalf("second prompt = %q, want 10%% reminder with 2 remaining", llmClient.systemPrompts[1])
+	}
+	if !strings.Contains(llmClient.systemPrompts[2], `severity="5%"`) || !strings.Contains(llmClient.systemPrompts[2], `remaining="1"`) {
+		t.Fatalf("third prompt = %q, want 5%% reminder with 1 remaining", llmClient.systemPrompts[2])
+	}
+	allPrompts := strings.Join(llmClient.systemPrompts, "\n")
+	if strings.Count(allPrompts, `severity="10%"`) != 1 || strings.Count(allPrompts, `severity="5%"`) != 1 {
+		t.Fatalf("system prompts = %#v, want each reminder once", llmClient.systemPrompts)
+	}
+	if len(llmClient.results) != 19 {
+		t.Fatalf("tool results = %d, want only 19 real tool results", len(llmClient.results))
+	}
+}
+
+func TestHandleTextToolBudgetReminderUsesHighestSeverityWhenThresholdsCrossTogether(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		callTurns: [][]tooltypes.Call{
+			makeToolCalls(48, 0),
+		},
+		finalText: "done",
+	}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:     "u1",
+		LLMText:     "try it",
+		Tools:       []tooltypes.Tool{&fakeTool{}},
+		ToolOptions: tooltypes.Options{MaxCalls: 50},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(llmClient.systemPrompts) != 2 {
+		t.Fatalf("system prompts = %d, want 2", len(llmClient.systemPrompts))
+	}
+	if !strings.Contains(llmClient.systemPrompts[1], `severity="5%"`) || !strings.Contains(llmClient.systemPrompts[1], `remaining="2"`) {
+		t.Fatalf("second prompt = %q, want 5%% reminder with 2 remaining", llmClient.systemPrompts[1])
+	}
+	if strings.Contains(llmClient.systemPrompts[1], `severity="10%"`) {
+		t.Fatalf("second prompt = %q, want highest severity only", llmClient.systemPrompts[1])
 	}
 }
 

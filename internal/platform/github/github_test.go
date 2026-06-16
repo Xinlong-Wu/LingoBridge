@@ -74,6 +74,7 @@ func TestParseAccountNewFlagsAndConfigDefaults(t *testing.T) {
 		InstallationID: values.InstallationID,
 		PrivateKeyPath: values.PrivateKeyPath,
 		Repositories:   values.Repositories,
+		Review:         ReviewConfig{DefaultInstructions: " default instructions "},
 	}); err != nil {
 		t.Fatalf("UpsertAccountConfig returned error: %v", err)
 	}
@@ -89,6 +90,9 @@ func TestParseAccountNewFlagsAndConfigDefaults(t *testing.T) {
 	}
 	if account.MCP.Command != "" || len(account.MCP.Args) != 0 {
 		t.Fatalf("mcp defaults = %#v, want no command or args", account.MCP)
+	}
+	if account.Review.DefaultInstructions != "default instructions" {
+		t.Fatalf("default instructions = %q, want trimmed", account.Review.DefaultInstructions)
 	}
 	if err := validateAccountRuntime("reviewer", account); err == nil || !strings.Contains(err.Error(), "mcp.command") {
 		t.Fatalf("validateAccountRuntime error = %v, want missing mcp.command", err)
@@ -194,6 +198,62 @@ func TestReviewInstructionsReadOrder(t *testing.T) {
 	}
 }
 
+func TestReviewInstructionsConfigDefault(t *testing.T) {
+	pr := testPullRequest()
+	p := &Platform{account: store.Account{ID: "github:456", Name: "reviewer", Platform: store.PlatformGitHub}}
+	client := &fakeAPIClient{}
+
+	instructions, ok, err := p.reviewInstructions(context.Background(), AccountConfig{}, client, pr)
+	if err != nil || ok || instructions.Text != "" {
+		t.Fatalf("no default = %#v ok=%t err=%v, want missing", instructions, ok, err)
+	}
+	if client.instructionsCalls != 1 {
+		t.Fatalf("instructionsCalls = %d, want 1", client.instructionsCalls)
+	}
+
+	accountCfg := normalizeAccountConfig(AccountConfig{
+		Review: ReviewConfig{DefaultInstructions: " default instructions "},
+	})
+	instructions, ok, err = p.reviewInstructions(context.Background(), accountCfg, client, pr)
+	if err != nil || !ok || instructions.Text != "default instructions" {
+		t.Fatalf("default = %#v ok=%t err=%v", instructions, ok, err)
+	}
+	if instructions.Source != "config:platforms.github.accounts.reviewer.review.default_instructions" {
+		t.Fatalf("default source = %q", instructions.Source)
+	}
+
+	client.instructions = ReviewInstructions{Text: "repo instructions", Source: "repo"}
+	client.instructionsOK = true
+	instructions, ok, err = p.reviewInstructions(context.Background(), accountCfg, client, pr)
+	if err != nil || !ok || instructions.Text != "repo instructions" || instructions.Source != "repo" {
+		t.Fatalf("repo instructions = %#v ok=%t err=%v", instructions, ok, err)
+	}
+}
+
+func TestBuildReviewPromptDocumentsDiffFallbackAndPendingReviewFlow(t *testing.T) {
+	prompt := buildReviewPrompt(testPullRequest(), ReviewInstructions{Text: "review carefully", Source: "test"})
+	checks := []string{
+		"For small PRs",
+		"method=get_diff may be useful",
+		"HTTP 406",
+		"too_large",
+		"diff exceeded the maximum number of files",
+		"method=get_files with perPage=100 and page=<n>",
+		"single pending review",
+		"method=create with no event",
+		"add every finding to that same pending review",
+		"method=submit_pending, event=COMMENT",
+		"subjectType=LINE",
+		"side=RIGHT",
+		"subjectType=FILE",
+	}
+	for _, check := range checks {
+		if !strings.Contains(prompt, check) {
+			t.Fatalf("prompt missing %q:\n%s", check, prompt)
+		}
+	}
+}
+
 func TestCursorDecisions(t *testing.T) {
 	pr := testPullRequest()
 	state := cursorState{PRs: map[string]cursorEntry{}}
@@ -213,11 +273,24 @@ func TestCursorDecisions(t *testing.T) {
 func TestMCPGuardAllowsCommentReviewAndRejectsUnsafeCalls(t *testing.T) {
 	pr := testPullRequest()
 	state := &reviewGuardState{}
-	submit := &fakeTool{spec: tooltypes.Spec{Name: "mcp_github_pull_request_review_write"}}
+	submit := &fakeTool{spec: tooltypes.Spec{
+		Name: "mcp_github_pull_request_review_write",
+		Parameters: json.RawMessage(`{
+			"type":"object",
+			"properties":{
+				"method":{"type":"string","enum":["create","submit_pending","delete_pending","resolve_thread","unresolve_thread"]},
+				"event":{"type":"string","enum":["APPROVE","REQUEST_CHANGES","COMMENT"]}
+			}
+		}`),
+	}}
 	guarded := guardReviewTools(context.Background(), []tooltypes.Tool{submit}, pr, state)
 	if len(guarded) != 1 {
 		t.Fatalf("guarded tools = %d, want 1", len(guarded))
 	}
+	spec := guarded[0].Spec()
+	assertSchemaEnum(t, spec.Parameters, "method", []string{"create", "submit_pending"})
+	assertSchemaEnum(t, spec.Parameters, "event", []string{"COMMENT"})
+
 	result := guarded[0].Execute(context.Background(), tooltypes.Call{
 		ID:   "1",
 		Name: "mcp_github_pull_request_review_write",
@@ -243,6 +316,18 @@ func TestMCPGuardAllowsCommentReviewAndRejectsUnsafeCalls(t *testing.T) {
 		t.Fatalf("approve result = %#v submitted=%t, want rejected", result, state.SubmittedComment)
 	}
 
+	result = guarded[0].Execute(context.Background(), tooltypes.Call{
+		ID:   "2b",
+		Name: "mcp_github_pull_request_review_write",
+		Arguments: json.RawMessage(`{
+			"owner":"base","repo":"repo","pullNumber":7,
+			"method":"create","event":"COMMENT","body":"done"
+		}`),
+	})
+	if !result.IsError {
+		t.Fatalf("create with event result = %#v, want rejected", result)
+	}
+
 	read := &fakeTool{spec: tooltypes.Spec{Name: "mcp_github_get_file_contents"}}
 	guarded = guardReviewTools(context.Background(), []tooltypes.Tool{read}, pr, state)
 	result = guarded[0].Execute(context.Background(), tooltypes.Call{
@@ -264,6 +349,204 @@ func TestMCPGuardAllowsCommentReviewAndRejectsUnsafeCalls(t *testing.T) {
 	})
 	if !result.IsError {
 		t.Fatalf("cross repo result = %#v, want error", result)
+	}
+}
+
+func TestMCPGuardPullRequestReadAllowsDiff(t *testing.T) {
+	pr := testPullRequest()
+	read := &fakeTool{spec: tooltypes.Spec{
+		Name:        "mcp_github_pull_request_read",
+		Description: "Read pull requests",
+		Parameters: json.RawMessage(`{
+			"type":"object",
+			"properties":{
+				"method":{"type":"string","enum":["get","get_diff","get_files"]},
+				"owner":{"type":"string"},
+				"repo":{"type":"string"},
+				"pullNumber":{"type":"number"}
+			}
+		}`),
+	}}
+	guarded := guardReviewTools(context.Background(), []tooltypes.Tool{read}, pr, &reviewGuardState{})
+	if len(guarded) != 1 {
+		t.Fatalf("guarded tools = %d, want 1", len(guarded))
+	}
+
+	spec := guarded[0].Spec()
+	if spec.Description != "Read pull requests" {
+		t.Fatalf("description = %q, want unchanged", spec.Description)
+	}
+	assertSchemaEnum(t, spec.Parameters, "method", []string{"get", "get_diff", "get_files"})
+
+	result := guarded[0].Execute(context.Background(), tooltypes.Call{
+		ID:   "1",
+		Name: "mcp_github_pull_request_read",
+		Arguments: json.RawMessage(`{
+			"owner":"base","repo":"repo","pullNumber":7,
+			"method":"get_diff"
+		}`),
+	})
+	if result.IsError {
+		t.Fatalf("get_diff result = %#v, want allowed", result)
+	}
+
+	result = guarded[0].Execute(context.Background(), tooltypes.Call{
+		ID:   "2",
+		Name: "mcp_github_pull_request_read",
+		Arguments: json.RawMessage(`{
+			"owner":"base","repo":"repo","pullNumber":7,
+			"method":"get_files"
+		}`),
+	})
+	if result.IsError {
+		t.Fatalf("get_files result = %#v, want allowed", result)
+	}
+}
+
+func TestMCPGuardAddCommentToPendingReviewValidatesSubjectType(t *testing.T) {
+	pr := testPullRequest()
+	comment := &fakeTool{spec: tooltypes.Spec{Name: "mcp_github_add_comment_to_pending_review"}}
+	guarded := guardReviewTools(context.Background(), []tooltypes.Tool{comment}, pr, &reviewGuardState{})
+	if len(guarded) != 1 {
+		t.Fatalf("guarded tools = %d, want 1", len(guarded))
+	}
+
+	tests := []struct {
+		name      string
+		args      string
+		wantError bool
+	}{
+		{
+			name: "line comment passes",
+			args: `{"owner":"base","repo":"repo","pullNumber":7,"path":"README.md","body":"check this","subjectType":"LINE","line":42,"side":"RIGHT"}`,
+		},
+		{
+			name: "multi line comment passes",
+			args: `{"owner":"base","repo":"repo","pullNumber":7,"path":"README.md","body":"check range","subjectType":"LINE","startLine":40,"startSide":"RIGHT","line":42,"side":"RIGHT"}`,
+		},
+		{
+			name: "file comment passes without line",
+			args: `{"owner":"base","repo":"repo","pullNumber":7,"path":"README.md","body":"file level","subjectType":"FILE"}`,
+		},
+		{
+			name:      "line comment missing line rejected",
+			args:      `{"owner":"base","repo":"repo","pullNumber":7,"path":"README.md","body":"missing line","subjectType":"LINE","side":"RIGHT"}`,
+			wantError: true,
+		},
+		{
+			name:      "line comment missing side rejected",
+			args:      `{"owner":"base","repo":"repo","pullNumber":7,"path":"README.md","body":"missing side","subjectType":"LINE","line":42}`,
+			wantError: true,
+		},
+		{
+			name:      "invalid subject rejected",
+			args:      `{"owner":"base","repo":"repo","pullNumber":7,"path":"README.md","body":"bad subject","subjectType":"THREAD"}`,
+			wantError: true,
+		},
+		{
+			name:      "cross pr rejected",
+			args:      `{"owner":"base","repo":"repo","pullNumber":8,"path":"README.md","body":"wrong pr","subjectType":"FILE"}`,
+			wantError: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := guarded[0].Execute(context.Background(), tooltypes.Call{
+				ID:        tc.name,
+				Name:      "mcp_github_add_comment_to_pending_review",
+				Arguments: json.RawMessage(tc.args),
+			})
+			if result.IsError != tc.wantError {
+				t.Fatalf("result = %#v, want error=%t", result, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestMCPGuardGetFileContentsAllowsCurrentPRRefs(t *testing.T) {
+	pr := testPullRequest()
+	read := &fakeTool{spec: tooltypes.Spec{Name: "mcp_github_get_file_contents", Description: "Get file contents"}}
+	guarded := guardReviewTools(context.Background(), []tooltypes.Tool{read}, pr, &reviewGuardState{})
+	if len(guarded) != 1 {
+		t.Fatalf("guarded tools = %d, want 1", len(guarded))
+	}
+
+	spec := guarded[0].Spec()
+	if !strings.Contains(spec.Description, "refs/pull/7/head") || !strings.Contains(spec.Description, "base/repo") || !strings.Contains(spec.Description, "head/repo") {
+		t.Fatalf("guarded description = %q, want PR ref guidance", spec.Description)
+	}
+
+	tests := []struct {
+		name      string
+		owner     string
+		repo      string
+		ref       string
+		sha       string
+		wantRef   string
+		wantSHA   string
+		wantError bool
+	}{
+		{name: "base sha passes unchanged", owner: "base", repo: "repo", sha: pr.Base.SHA, wantSHA: pr.Base.SHA},
+		{name: "head sha passes unchanged", owner: "head", repo: "repo", sha: pr.Head.SHA, wantSHA: pr.Head.SHA},
+		{name: "base short branch passes unchanged", owner: "base", repo: "repo", ref: pr.Base.Ref, wantRef: pr.Base.Ref},
+		{name: "base refs heads branch passes unchanged", owner: "base", repo: "repo", ref: "refs/heads/" + pr.Base.Ref, wantRef: "refs/heads/" + pr.Base.Ref},
+		{name: "head short branch passes unchanged", owner: "head", repo: "repo", ref: pr.Head.Ref, wantRef: pr.Head.Ref},
+		{name: "head refs heads branch passes unchanged", owner: "head", repo: "repo", ref: "refs/heads/" + pr.Head.Ref, wantRef: "refs/heads/" + pr.Head.Ref},
+		{name: "pull head ref passes unchanged on base repo", owner: "base", repo: "repo", ref: "refs/pull/7/head", wantRef: "refs/pull/7/head"},
+		{name: "ref may be base sha unchanged", owner: "base", repo: "repo", ref: pr.Base.SHA, wantRef: pr.Base.SHA},
+		{name: "tag rejected", owner: "base", repo: "repo", ref: "refs/tags/v1.0.0", wantError: true},
+		{name: "other branch rejected", owner: "base", repo: "repo", ref: "release", wantError: true},
+		{name: "head branch on base fork repo rejected", owner: "base", repo: "repo", ref: pr.Head.Ref, wantError: true},
+		{name: "base branch on head fork repo rejected", owner: "head", repo: "repo", ref: pr.Base.Ref, wantError: true},
+		{name: "pull merge ref rejected", owner: "base", repo: "repo", ref: "refs/pull/7/merge", wantError: true},
+		{name: "other pull head ref rejected", owner: "base", repo: "repo", ref: "refs/pull/8/head", wantError: true},
+		{name: "pull head ref on head fork repo rejected", owner: "head", repo: "repo", ref: "refs/pull/7/head", wantError: true},
+		{name: "unknown sha rejected", owner: "base", repo: "repo", sha: "unknown-sha", wantError: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := map[string]any{
+				"owner": tc.owner,
+				"repo":  tc.repo,
+				"path":  "README.md",
+			}
+			if tc.ref != "" {
+				args["ref"] = tc.ref
+			}
+			if tc.sha != "" {
+				args["sha"] = tc.sha
+			}
+			raw, err := json.Marshal(args)
+			if err != nil {
+				t.Fatalf("marshal args: %v", err)
+			}
+			result := guarded[0].Execute(context.Background(), tooltypes.Call{
+				ID:        tc.name,
+				Name:      "mcp_github_get_file_contents",
+				Arguments: raw,
+			})
+			if result.IsError != tc.wantError {
+				t.Fatalf("result = %#v, want error=%t", result, tc.wantError)
+			}
+			if tc.wantError {
+				return
+			}
+			if tc.wantRef != "" {
+				if got := read.lastArgs["ref"]; got != tc.wantRef {
+					t.Fatalf("ref = %#v, want %q", got, tc.wantRef)
+				}
+				if _, ok := read.lastArgs["sha"]; ok {
+					t.Fatalf("sha = %#v, want no normalization", read.lastArgs["sha"])
+				}
+			}
+			if tc.wantSHA != "" {
+				if got := read.lastArgs["sha"]; got != tc.wantSHA {
+					t.Fatalf("sha = %#v, want %q", got, tc.wantSHA)
+				}
+			}
+		})
 	}
 }
 
@@ -311,8 +594,30 @@ type fakeTool struct {
 func (f *fakeTool) Spec() tooltypes.Spec { return f.spec }
 
 func (f *fakeTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes.Result {
+	f.lastArgs = nil
 	_ = json.Unmarshal(call.Arguments, &f.lastArgs)
 	return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: "ok"}
+}
+
+func assertSchemaEnum(t *testing.T, raw json.RawMessage, property string, want []string) {
+	t.Helper()
+	var schema struct {
+		Properties map[string]struct {
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+	got := schema.Properties[property].Enum
+	if len(got) != len(want) {
+		t.Fatalf("%s enum = %#v, want %#v", property, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s enum = %#v, want %#v", property, got, want)
+		}
+	}
 }
 
 type fakeAPIClient struct {
