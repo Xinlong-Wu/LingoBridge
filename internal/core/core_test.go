@@ -619,6 +619,34 @@ func TestHandleTextToolCallLimit(t *testing.T) {
 	}
 }
 
+func TestHandleTextMessageToolOptionsOverrideProviderOptions(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		calls: []tooltypes.Call{
+			{ID: "call_1", Name: "fake_tool", Arguments: json.RawMessage(`{}`)},
+			{ID: "call_2", Name: "fake_tool", Arguments: json.RawMessage(`{}`)},
+		},
+		finalText: "handled",
+	}
+	tool := &fakeTool{result: "ok"}
+	bot := New(sessions, testLLMConfig())
+	bot.ToolProvider = &fakeToolProvider{options: tooltypes.Options{MaxCalls: 1}}
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:     "u1",
+		LLMText:     "try it",
+		Tools:       []tooltypes.Tool{tool},
+		ToolOptions: tooltypes.Options{MaxCalls: 2},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(tool.calls) != 2 {
+		t.Fatalf("tool calls = %d, want 2", len(tool.calls))
+	}
+}
+
 func TestHandleTextCompactsNativeContextAndSavesRecentHistory(t *testing.T) {
 	var history []store.Message
 	for i := 0; i < nativeContextKeepRecentMessages+3; i++ {

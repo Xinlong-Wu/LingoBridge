@@ -90,6 +90,19 @@ func commandToolSummaries(tools []tooltypes.Tool) []commands.ToolSummary {
 	return summaries
 }
 
+func mergeToolOptions(base, override tooltypes.Options) tooltypes.Options {
+	if override.MaxCalls > 0 {
+		base.MaxCalls = override.MaxCalls
+	}
+	if override.Timeout > 0 {
+		base.Timeout = override.Timeout
+	}
+	if override.ResultLimit > 0 {
+		base.ResultLimit = override.ResultLimit
+	}
+	return base
+}
+
 func toolSpec(tool tooltypes.Tool) tooltypes.Spec {
 	if tool == nil {
 		return tooltypes.Spec{}

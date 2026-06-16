@@ -53,6 +53,7 @@ type InboundMessage struct {
 	ErrorNotice        func(error) string
 	Metadata           map[string]string
 	Tools              []tooltypes.Tool
+	ToolOptions        tooltypes.Options
 }
 
 type OutboundMessage struct {
@@ -136,7 +137,7 @@ func (b *Bot) resolveToolsForMessage(ctx context.Context, msg InboundMessage) to
 	if len(tools) != len(msg.Tools)+len(providerSelection.Tools) {
 		coreLog.Debug(ctx, "merged tools platform=%d provider=%d effective=%d", len(msg.Tools), len(providerSelection.Tools), len(tools))
 	}
-	return tooltypes.Selection{Tools: tools, Options: providerSelection.Options}
+	return tooltypes.Selection{Tools: tools, Options: mergeToolOptions(providerSelection.Options, msg.ToolOptions)}
 }
 
 func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, toolOptions tooltypes.Options) error {
