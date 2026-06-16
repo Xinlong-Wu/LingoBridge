@@ -1000,7 +1000,7 @@ func TestWechatSenderSendsMarkdownImageSyntaxAsText(t *testing.T) {
 
 func TestProcessOneLongReplyIsChunked(t *testing.T) {
 	b, client, _, llmClient := newTestBot()
-	llmClient.response.Text = strings.Repeat("甲", textChunkLimit+50)
+	llmClient.response.Text = strings.Repeat("甲", TextChunkLimit+50)
 
 	if err := b.processOne(textMessage("hi")); err != nil {
 		t.Fatalf("processOne returned error: %v", err)
@@ -1014,15 +1014,15 @@ func TestProcessOneLongReplyIsChunked(t *testing.T) {
 	}
 	for i, msg := range client.sent {
 		text := msg.ItemList[0].TextItem.Text
-		if got := len([]rune(text)); got > textChunkLimit {
-			t.Fatalf("chunk %d rune length = %d, want <= %d", i+1, got, textChunkLimit)
+		if got := len([]rune(text)); got > TextChunkLimit {
+			t.Fatalf("chunk %d rune length = %d, want <= %d", i+1, got, TextChunkLimit)
 		}
 	}
 }
 
 func TestProcessOneReturnsErrorWhenReplyChunkSendFails(t *testing.T) {
 	b, client, sessions, llmClient := newTestBot()
-	llmClient.response.Text = strings.Repeat("x", textChunkLimit+1)
+	llmClient.response.Text = strings.Repeat("x", TextChunkLimit+1)
 	client.failSendAt = 2
 	client.sendErr = errors.New("send failed")
 

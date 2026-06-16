@@ -494,13 +494,14 @@ cmd/lingobridge/            # Thin CLI entrypoint
 internal/app/               # CLI dispatch, account catalog, model setup, runtime orchestration, reload wiring
 internal/config/            # Shared config load/save, paths, LLM/MCP defaults/validation, platforms.<platform> YAML preservation
 internal/platform/          # Platform registry and shared platform definition types
-internal/platform/builtins/ # Built-in WeChat/Feishu/GitHub account/runtime definition registration
-internal/platform/wechat/   # WeChat frontend adapter: native events/API <-> core messages
+internal/platform/builtins/ # Built-in platform registry assembly
+internal/platform/wechat/   # WeChat account/runtime definition and frontend adapter: native events/API <-> core messages
 internal/platform/wechat/monitor/ # WeChat monitor, reply sender, and media handling
-internal/platform/feishu/   # Feishu frontend adapter and its private config schema
+internal/platform/feishu/   # Feishu account config schema and frontend support types
+internal/platform/feishu/definition/ # Feishu account/runtime definition assembly
 internal/platform/feishu/monitor/ # Feishu long-connection monitor, message/text-stream adapter, and event hooks
 internal/platform/feishu/tools/ # Feishu platform-level LLM tools, including Docs helpers and LiteLLM account invitations
-internal/platform/github/   # GitHub App auth, PR polling, review prompt construction, and MCP review tool guards
+internal/platform/github/   # GitHub account/runtime definition, App auth, PR polling, review prompt construction, and MCP review tool guards
 internal/core/              # Middle layer: scoped platform config/data APIs, tool orchestration, commands, sessions, LLM orchestration
 internal/tools/             # Shared tool domain interfaces and provider-neutral spec/call/result/options types
 internal/mcp/               # Global MCP host/client sessions and MCP tool adapters exposed through tools.Provider
@@ -514,8 +515,9 @@ internal/control/           # Local Unix-socket reload control API
 
 In-chat slash commands live in `internal/commands/` and are shared by every
 platform adapter unless that platform's command policy disables them.
-Built-in platforms register account parameter handlers and runtime factories
-through `internal/platform/builtins`. The app layer and runtime create a
+Built-in platforms are assembled by `internal/platform/builtins`; platform-side
+packages own their account parameter handlers and runtime factories through
+exported `Definition` functions. The app layer and runtime create a
 `core.PlatformContext` for the active platform, and platform code uses that
 context to persist its own config and data without receiving access to other
 platform stores.

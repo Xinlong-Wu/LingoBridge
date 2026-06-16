@@ -25,7 +25,7 @@ const (
 	sessionExpiryPause  = 1 * time.Hour
 	maxConsecutiveFails = 3
 	backoffBase         = 5 * time.Second
-	textChunkLimit      = 4000
+	TextChunkLimit      = 4000
 	typingKeepalive     = 5 * time.Second
 	defaultImagePrompt  = "请描述这张图片。"
 	maxVisionImageBytes = 20 * 1024 * 1024
@@ -499,7 +499,7 @@ func (b *bot) saveMediaFile(userID, sessionID, role string, index int, mimeType 
 }
 
 func (b *bot) sendText(toUserID, text, contextToken string) error {
-	chunks := core.SplitTextChunksByRunes(text, textChunkLimit)
+	chunks := core.SplitTextChunksByRunes(text, TextChunkLimit)
 	for i, chunk := range chunks {
 		msg := message.BuildTextMessage(toUserID, chunk, contextToken)
 		if err := b.client.SendMessage(msg); err != nil {

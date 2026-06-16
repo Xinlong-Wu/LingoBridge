@@ -13,8 +13,8 @@ import (
 	"lingobridge/internal/core"
 	"lingobridge/internal/logging"
 	"lingobridge/internal/platform"
-	"lingobridge/internal/platform/builtins"
 	"lingobridge/internal/platform/feishu"
+	wechatplatform "lingobridge/internal/platform/wechat"
 	"lingobridge/internal/runner"
 	"lingobridge/internal/store"
 )
@@ -369,8 +369,8 @@ func TestRuntimeStateEnablesTextStreamingOnlyForFeishu(t *testing.T) {
 	if wechatRuntime.handler.EnableTextStreaming {
 		t.Fatal("wechat EnableTextStreaming = true, want false")
 	}
-	if wechatRuntime.handler.TextChunkLimit != builtins.WeChatTextChunkLimit {
-		t.Fatalf("wechat TextChunkLimit = %d, want %d", wechatRuntime.handler.TextChunkLimit, builtins.WeChatTextChunkLimit)
+	if wechatRuntime.handler.TextChunkLimit != wechatplatform.TextChunkLimit {
+		t.Fatalf("wechat TextChunkLimit = %d, want %d", wechatRuntime.handler.TextChunkLimit, wechatplatform.TextChunkLimit)
 	}
 	if wechatRuntime.handler.ToolProvider != state.mcpHost {
 		t.Fatal("wechat ToolProvider is not the runtime MCP host")
@@ -382,8 +382,8 @@ func TestRuntimeStateEnablesTextStreamingOnlyForFeishu(t *testing.T) {
 	if !feishuRuntime.handler.EnableTextStreaming {
 		t.Fatal("feishu EnableTextStreaming = false, want true")
 	}
-	if feishuRuntime.handler.TextChunkLimit != builtins.FeishuTextChunkLimit {
-		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishuRuntime.handler.TextChunkLimit, builtins.FeishuTextChunkLimit)
+	if feishuRuntime.handler.TextChunkLimit != feishu.TextChunkLimit {
+		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishuRuntime.handler.TextChunkLimit, feishu.TextChunkLimit)
 	}
 	if feishuRuntime.handler.ToolProvider != state.mcpHost {
 		t.Fatal("feishu ToolProvider is not the runtime MCP host")

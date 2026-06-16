@@ -6,8 +6,9 @@ import (
 	"lingobridge/internal/config"
 	"lingobridge/internal/core"
 	"lingobridge/internal/platform"
-	"lingobridge/internal/platform/feishu"
+	feishuplatform "lingobridge/internal/platform/feishu"
 	githubplatform "lingobridge/internal/platform/github"
+	wechatplatform "lingobridge/internal/platform/wechat"
 	"lingobridge/internal/session"
 	"lingobridge/internal/store"
 )
@@ -58,27 +59,27 @@ func TestDefaultDefinitionsSetCoreRuntimeOptions(t *testing.T) {
 	if !ok {
 		t.Fatal("wechat definition not found")
 	}
-	if WeChatTextChunkLimit != 4000 {
-		t.Fatalf("WeChatTextChunkLimit = %d, want 4000", WeChatTextChunkLimit)
+	if wechatplatform.TextChunkLimit != 4000 {
+		t.Fatalf("wechat TextChunkLimit = %d, want 4000", wechatplatform.TextChunkLimit)
 	}
-	if wechat.TextChunkLimit != WeChatTextChunkLimit {
+	if wechat.TextChunkLimit != wechatplatform.TextChunkLimit {
 		t.Fatalf("wechat TextChunkLimit = %d, want 4000", wechat.TextChunkLimit)
 	}
 	if wechat.EnableTextStreaming {
 		t.Fatal("wechat EnableTextStreaming = true, want false")
 	}
 
-	feishu, ok := registry.LookupAccountPlatform(store.PlatformFeishu)
+	feishuDef, ok := registry.LookupAccountPlatform(store.PlatformFeishu)
 	if !ok {
 		t.Fatal("feishu definition not found")
 	}
-	if FeishuTextChunkLimit != 25*1024 {
-		t.Fatalf("FeishuTextChunkLimit = %d, want %d", FeishuTextChunkLimit, 25*1024)
+	if feishuplatform.TextChunkLimit != 25*1024 {
+		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishuplatform.TextChunkLimit, 25*1024)
 	}
-	if feishu.TextChunkLimit != FeishuTextChunkLimit {
-		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishu.TextChunkLimit, FeishuTextChunkLimit)
+	if feishuDef.TextChunkLimit != feishuplatform.TextChunkLimit {
+		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishuDef.TextChunkLimit, feishuplatform.TextChunkLimit)
 	}
-	if !feishu.EnableTextStreaming {
+	if !feishuDef.EnableTextStreaming {
 		t.Fatal("feishu EnableTextStreaming = false, want true")
 	}
 
@@ -129,7 +130,7 @@ func TestDefaultDefinitionsCreateRuntimePlatforms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPlatformContext feishu returned error: %v", err)
 	}
-	if err := feishu.UpsertAccountConfig(feishuCtx, "fsbot", feishu.AccountConfig{AppID: "cli_xxx", AppSecret: "secret"}); err != nil {
+	if err := feishuplatform.UpsertAccountConfig(feishuCtx, "fsbot", feishuplatform.AccountConfig{AppID: "cli_xxx", AppSecret: "secret"}); err != nil {
 		t.Fatalf("UpsertAccountConfig returned error: %v", err)
 	}
 	githubCtx, err := core.NewPlatformContext(store.PlatformGitHub, &cfg, githubStore, nil)

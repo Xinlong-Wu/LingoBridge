@@ -12,7 +12,10 @@ import (
 	"lingobridge/internal/store"
 )
 
-const DefaultBaseURL = "https://open.feishu.cn"
+const (
+	DefaultBaseURL = "https://open.feishu.cn"
+	TextChunkLimit = 25 * 1024
+)
 
 type Credentials struct {
 	AppID     string `json:"app_id"`
