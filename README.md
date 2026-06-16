@@ -67,8 +67,8 @@ If Feishu credentials are omitted, LingoBridge prompts for them interactively:
 ```
 
 Feishu app credentials are saved under `platforms.feishu.accounts` in the
-shared `~/.lingobridge/config.yaml`. The Feishu platform defines the schema
-inside its own `platforms.feishu` config block.
+shared `~/.lingobridge/config.yaml`. Those config entries are the Feishu
+account source used by `account list` and `run`.
 
 Or add a GitHub App PR review account:
 
@@ -83,10 +83,11 @@ Or add a GitHub App PR review account:
 ```
 
 GitHub App credentials and repository allowlists are saved under
-`platforms.github.accounts`. Before running the GitHub account, explicitly set
-`platforms.github.accounts.<name>.mcp.command` and `.mcp.args` to point at your
-GitHub MCP server. LingoBridge does not write or assume default GitHub MCP
-command arguments.
+`platforms.github.accounts`, and those config entries are the GitHub account
+source used by `account list` and `run`. Before running the GitHub account,
+explicitly set `platforms.github.accounts.<name>.mcp.command` and `.mcp.args`
+to point at your GitHub MCP server. LingoBridge does not write or assume
+default GitHub MCP command arguments.
 
 For Feishu, enable bot capability and long-connection event subscription for
 `im.message.receive_v1` in the Feishu Open Platform app console. Add any
@@ -130,7 +131,7 @@ when relevant config changes.
 | `account new feishu [--name <name>] [--app-id <id>] [--app-secret <secret>] [--base-url <url>]` | Add a Feishu self-built app account, write Feishu config, and reload a running bot process |
 | `account new github [--name <name>] [--app-id <id>] [--installation-id <id>] [--private-key-path <pem>] --repo owner/repo [--repo owner/other] [--poll-interval <duration>] [--base-url <url>] [--web-url <url>]` | Add a GitHub App PR review account, write GitHub config, and reload a running bot process |
 | `account list` | List all accounts as `platform/name` with their account ID |
-| `account delete <name\|platform/name>` | Delete an account from its platform data domain, remove Feishu/GitHub account config when applicable, and reload a running bot process |
+| `account delete <name\|platform/name>` | Delete an account from its platform-owned account source, clear its sync cursor, and reload a running bot process |
 | `model add <name> [--provider <openai\|anthropic>] [--base-url <url>] [--api-key <key>] [--id <model-id>] [--endpoint <mode>] [--context-window <tokens>] [--compact <true\|false\|auto>] [--compact-threshold <ratio>] [--compact-instructions <text>] [--default]` | Add an LLM model profile to config and optionally make it the default |
 | `run [--account <name>] [--verbose <all\|debug\|info\|warn\|error>]` | Start the bot loop with optional log level, default `info` |
 
@@ -467,23 +468,24 @@ saved per-user model preference that no longer exists back to
         media/{safeUserId}/{safeSessionId}/
     feishu/
       data/
-        lingobridge.db                   # Feishu account metadata, sessions, user preferences
+        lingobridge.db                   # Feishu sessions, user preferences, sync cursors, and legacy account rows
         sessions/{userId}/{sessionId}.jsonl # Conversation snapshots; may include compact provider_contexts and tool_traces
     github/
       data/
-        lingobridge.db                   # GitHub account metadata, review sessions, sync cursors
+        lingobridge.db                   # GitHub review sessions, sync cursors, and legacy account rows
         sessions/{reviewKey}/{sessionId}.jsonl # Synthetic review history and tool_traces
 ```
 
 Each platform has its own SQLite database and data directory. The middle layer
 opens a store for the selected platform and passes only that scoped store to the
 platform adapter, so WeChat code cannot read Feishu data and Feishu code cannot
-read WeChat data through the storage API. The `accounts` table stores account
-metadata; Feishu `app_id/app_secret/base_url` and GitHub App configuration live
-under their platform-private `platforms.<platform>.accounts.<name>` config
-blocks rather than SQLite. Removed global data layouts and legacy storage
-schemas are not migrated automatically; add accounts again with the current CLI
-if needed.
+read WeChat data through the storage API. Account ownership is platform
+specific: WeChat accounts live in SQLite because QR login returns upstream
+session state, while Feishu and GitHub accounts live only under
+`platforms.<platform>.accounts.<name>` in config. Deleting a Feishu or GitHub
+account removes the config entry, clears that account's sync cursor, and removes
+a matching legacy SQLite account row if one exists; sessions and media are left
+intact because current history records are not account-id scoped.
 
 ## Internal Architecture
 
@@ -516,7 +518,7 @@ internal/control/           # Local Unix-socket reload control API
 In-chat slash commands live in `internal/commands/` and are shared by every
 platform adapter unless that platform's command policy disables them.
 Built-in platforms are assembled by `internal/platform/builtins`; platform-side
-packages own their account parameter handlers and runtime factories through
+packages own account listing, creation, deletion, and runtime factories through
 exported `Definition` functions. The app layer and runtime create a
 `core.PlatformContext` for the active platform, and platform code uses that
 context to persist its own config and data without receiving access to other

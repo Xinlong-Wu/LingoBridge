@@ -204,12 +204,18 @@ func openStore(platformID string) (*store.Store, error) {
 }
 
 type accountCatalog struct {
+	registry *platform.Registry
 	stores   map[string]*store.Store
-	accounts []store.Account
+	mu       sync.RWMutex
+	cfg      config.Config
 }
 
-func openAccountCatalog(registry *platform.Registry) (*accountCatalog, error) {
-	catalog := &accountCatalog{stores: map[string]*store.Store{}}
+func openAccountCatalog(registry *platform.Registry, cfg config.Config) (*accountCatalog, error) {
+	catalog := &accountCatalog{
+		registry: registry,
+		stores:   map[string]*store.Store{},
+		cfg:      cfg,
+	}
 	for _, platformID := range registry.PlatformNames() {
 		st, err := openStore(platformID)
 		if err != nil {
@@ -217,12 +223,6 @@ func openAccountCatalog(registry *platform.Registry) (*accountCatalog, error) {
 			return nil, err
 		}
 		catalog.stores[platformID] = st
-		accounts, err := st.ListAccounts()
-		if err != nil {
-			catalog.Close()
-			return nil, fmt.Errorf("list %s accounts: %w", platformID, err)
-		}
-		catalog.accounts = append(catalog.accounts, accounts...)
 	}
 	return catalog, nil
 }
@@ -233,13 +233,43 @@ func (c *accountCatalog) Close() {
 	}
 }
 
+func (c *accountCatalog) UpdateConfig(cfg config.Config) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg = cfg
+}
+
+func (c *accountCatalog) configSnapshot() config.Config {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg
+}
+
+func (c *accountCatalog) platformContext(platformID string, saveConfig func(config.Config) error) (*core.PlatformContext, error) {
+	st, ok := c.stores[platformID]
+	if !ok {
+		return nil, fmt.Errorf("store for platform %q is not open", platformID)
+	}
+	cfg := c.configSnapshot()
+	return core.NewPlatformContext(platformID, &cfg, st, saveConfig)
+}
+
 func (c *accountCatalog) ListAccounts() ([]store.Account, error) {
 	accounts := make([]store.Account, 0)
-	for platformID, st := range c.stores {
-		platformAccounts, err := st.ListAccounts()
+	for _, platformID := range c.registry.PlatformNames() {
+		def, ok := c.registry.LookupAccountPlatform(platformID)
+		if !ok {
+			return nil, fmt.Errorf("unsupported account platform %q", platformID)
+		}
+		platformCtx, err := c.platformContext(platformID, nil)
+		if err != nil {
+			return nil, err
+		}
+		platformAccounts, err := def.ListAccounts(platform.AccountListContext{Platform: platformCtx})
 		if err != nil {
 			return nil, fmt.Errorf("list %s accounts: %w", platformID, err)
 		}
+		runtimeLog.Debug(context.Background(), "listed platform accounts platform=%s count=%d", platformID, len(platformAccounts))
 		accounts = append(accounts, platformAccounts...)
 	}
 	return accounts, nil
@@ -644,18 +674,22 @@ func cmdAccountNewWithRegistry(args []string, registry *platform.Registry) error
 		return ErrUsage
 	}
 
-	catalog, err := openAccountCatalog(registry)
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	catalog, err := openAccountCatalog(registry, cfg)
 	if err != nil {
 		return err
 	}
 	defer catalog.Close()
 
-	st, ok := catalog.stores[def.ID]
-	if !ok {
-		return fmt.Errorf("store for platform %q is not open", def.ID)
+	accounts, err := catalog.ListAccounts()
+	if err != nil {
+		return fmt.Errorf("list accounts: %w", err)
 	}
 	exists := func(name string) bool {
-		for _, a := range catalog.accounts {
+		for _, a := range accounts {
 			if a.Name == name {
 				return true
 			}
@@ -673,11 +707,7 @@ func cmdAccountNewWithRegistry(args []string, registry *platform.Registry) error
 		fmt.Printf("Name %q already exists, using %q instead.\n", originalName, opts.Name)
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-	platformCtx, err := core.NewPlatformContext(def.ID, &cfg, st, config.Save)
+	platformCtx, err := catalog.platformContext(def.ID, config.Save)
 	if err != nil {
 		return err
 	}
@@ -726,7 +756,7 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	catalog, err := openAccountCatalog(registry)
+	catalog, err := openAccountCatalog(registry, cfg)
 	if err != nil {
 		return err
 	}
@@ -794,6 +824,7 @@ func cmdRun(args []string) error {
 		if err := state.updateConfig(ctx, cfg); err != nil {
 			return err
 		}
+		catalog.UpdateConfig(cfg)
 		return supervisor.Reconcile(runCtx)
 	})
 	if err != nil {
@@ -840,7 +871,11 @@ func cmdAccountList(args []string) error {
 	if err != nil {
 		return err
 	}
-	catalog, err := openAccountCatalog(registry)
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	catalog, err := openAccountCatalog(registry, cfg)
 	if err != nil {
 		return err
 	}
@@ -878,7 +913,11 @@ func cmdAccountDelete(args []string) error {
 	if err != nil {
 		return err
 	}
-	catalog, err := openAccountCatalog(registry)
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	catalog, err := openAccountCatalog(registry, cfg)
 	if err != nil {
 		return err
 	}
@@ -894,35 +933,16 @@ func cmdAccountDelete(args []string) error {
 		return err
 	}
 
-	st, ok := catalog.stores[target.Platform]
-	if !ok {
-		return fmt.Errorf("store for platform %q is not open", target.Platform)
-	}
 	def, ok := registry.LookupAccountPlatform(target.Platform)
 	if !ok {
 		return fmt.Errorf("unsupported account platform %q", target.Platform)
 	}
-	var deletePlatformAccount func() error
-	if def.DeleteAccount != nil {
-		cfg, err := config.Load()
-		if err != nil {
-			return fmt.Errorf("load config: %w", err)
-		}
-		platformCtx, err := core.NewPlatformContext(target.Platform, &cfg, st, config.Save)
-		if err != nil {
-			return err
-		}
-		deletePlatformAccount = func() error {
-			return def.DeleteAccount(platform.AccountDeleteContext{Platform: platformCtx, Account: target})
-		}
+	platformCtx, err := catalog.platformContext(target.Platform, config.Save)
+	if err != nil {
+		return err
 	}
-	if err := st.DeleteAccount(target.ID); err != nil {
-		return fmt.Errorf("delete account: %w", err)
-	}
-	if deletePlatformAccount != nil {
-		if err := deletePlatformAccount(); err != nil {
-			return fmt.Errorf("delete %s account config: %w", target.Platform, err)
-		}
+	if err := def.DeleteAccount(platform.AccountDeleteContext{Platform: platformCtx, Account: target}); err != nil {
+		return fmt.Errorf("delete %s account: %w", target.Platform, err)
 	}
 
 	fmt.Printf("Deleted account: %s\n", accountDisplayName(target))

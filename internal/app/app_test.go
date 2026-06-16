@@ -14,12 +14,13 @@ import (
 	"lingobridge/internal/logging"
 	"lingobridge/internal/platform"
 	"lingobridge/internal/platform/feishu"
+	githubplatform "lingobridge/internal/platform/github"
 	wechatplatform "lingobridge/internal/platform/wechat"
 	"lingobridge/internal/runner"
 	"lingobridge/internal/store"
 )
 
-func TestCmdAccountNewFeishuSavesAccount(t *testing.T) {
+func TestCmdAccountNewFeishuSavesConfigAccount(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	writeTestConfig(t)
 
@@ -39,15 +40,12 @@ func TestCmdAccountNewFeishuSavesAccount(t *testing.T) {
 	}
 	defer st.Close()
 
-	acc, err := st.GetAccount("feishu:cli_xxx")
+	accounts, err := st.ListAccounts()
 	if err != nil {
-		t.Fatalf("GetAccount returned error: %v", err)
+		t.Fatalf("ListAccounts returned error: %v", err)
 	}
-	if acc.Name != "fsbot" || acc.Platform != store.PlatformFeishu || acc.BaseURL != feishu.DefaultBaseURL {
-		t.Fatalf("account = %#v", acc)
-	}
-	if acc.CredentialsJSON != "{}" {
-		t.Fatalf("credentials_json = %q, want {}", acc.CredentialsJSON)
+	if len(accounts) != 0 {
+		t.Fatalf("sqlite feishu accounts = %#v, want none", accounts)
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -75,7 +73,7 @@ func TestCmdAccountNewFeishuRequiresCredentials(t *testing.T) {
 	}
 }
 
-func TestCmdAccountNewFeishuAliasSavesAccount(t *testing.T) {
+func TestCmdAccountNewFeishuAliasSavesConfigAccount(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	writeTestConfig(t)
 
@@ -89,18 +87,56 @@ func TestCmdAccountNewFeishuAliasSavesAccount(t *testing.T) {
 		t.Fatalf("cmdAccountNew returned error: %v", err)
 	}
 
-	st, err := store.Open(store.PlatformFeishu)
+	cfg, err := config.Load()
 	if err != nil {
-		t.Fatalf("Open returned error: %v", err)
+		t.Fatalf("Load returned error: %v", err)
 	}
-	defer st.Close()
+	platformCtx, err := core.NewPlatformContext(store.PlatformFeishu, &cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+	feishuAccount, ok, err := feishu.ResolveAccountConfig(platformCtx, "fsbot")
+	if err != nil {
+		t.Fatalf("ResolveAccountConfig returned error: %v", err)
+	}
+	if !ok || feishuAccount.AppID != "cli_alias" {
+		t.Fatalf("feishu account = %#v ok=%v", feishuAccount, ok)
+	}
+}
 
-	acc, err := st.GetAccount("feishu:cli_alias")
+func TestCmdAccountNewGitHubSavesConfigAccount(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	writeTestConfig(t)
+
+	err := cmdAccountNew([]string{
+		"github",
+		"--name", "reviewer",
+		"--app-id", "123456",
+		"--installation-id", "987654",
+		"--private-key-path", "/tmp/github-app.pem",
+		"--repo", "owner/repo",
+	})
 	if err != nil {
-		t.Fatalf("GetAccount returned error: %v", err)
+		t.Fatalf("cmdAccountNew returned error: %v", err)
 	}
-	if acc.Platform != store.PlatformFeishu {
-		t.Fatalf("platform = %q, want feishu", acc.Platform)
+
+	if accounts := listTestAccounts(t, store.PlatformGitHub); len(accounts) != 0 {
+		t.Fatalf("sqlite github accounts = %#v, want none", accounts)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	platformCtx, err := core.NewPlatformContext(store.PlatformGitHub, &cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+	githubAccount, ok, err := githubplatform.ResolveAccountConfig(platformCtx, "reviewer")
+	if err != nil {
+		t.Fatalf("ResolveAccountConfig returned error: %v", err)
+	}
+	if !ok || githubAccount.InstallationID != "987654" || len(githubAccount.Repositories) != 1 {
+		t.Fatalf("github account = %#v ok=%v", githubAccount, ok)
 	}
 }
 
@@ -160,6 +196,7 @@ func TestCmdAccountDeleteUniqueNameDeletesAndNotesWithoutRun(t *testing.T) {
 		CredentialsJSON: "{}",
 		Enabled:         true,
 	})
+	saveTestSyncCursor(t, store.PlatformWeChat, "wechat:test", "buf")
 
 	out, err := captureStdout(t, func() error {
 		return cmdAccountDelete([]string{"default"})
@@ -176,6 +213,9 @@ func TestCmdAccountDeleteUniqueNameDeletesAndNotesWithoutRun(t *testing.T) {
 	if accounts := listTestAccounts(t, store.PlatformWeChat); len(accounts) != 0 {
 		t.Fatalf("wechat accounts = %#v, want empty after delete", accounts)
 	}
+	if got := loadTestSyncCursor(t, store.PlatformWeChat, "wechat:test"); got != "" {
+		t.Fatalf("wechat sync cursor = %q, want deleted", got)
+	}
 }
 
 func TestCmdAccountDeleteAmbiguousNameRequiresPlatformName(t *testing.T) {
@@ -188,13 +228,7 @@ func TestCmdAccountDeleteAmbiguousNameRequiresPlatformName(t *testing.T) {
 		CredentialsJSON: "{}",
 		Enabled:         true,
 	})
-	saveTestAccount(t, store.Account{
-		ID:              "feishu:cli_xxx",
-		Name:            "default",
-		Platform:        store.PlatformFeishu,
-		CredentialsJSON: "{}",
-		Enabled:         true,
-	})
+	upsertTestFeishuAccountConfig(t, "default", "cli_xxx")
 
 	err := cmdAccountDelete([]string{"default"})
 	if err == nil {
@@ -208,8 +242,16 @@ func TestCmdAccountDeleteAmbiguousNameRequiresPlatformName(t *testing.T) {
 	if accounts := listTestAccounts(t, store.PlatformWeChat); len(accounts) != 1 {
 		t.Fatalf("wechat accounts = %#v, want unchanged", accounts)
 	}
-	if accounts := listTestAccounts(t, store.PlatformFeishu); len(accounts) != 1 {
-		t.Fatalf("feishu accounts = %#v, want unchanged", accounts)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	platformCtx, err := core.NewPlatformContext(store.PlatformFeishu, &cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+	if _, ok, err := feishu.ResolveAccountConfig(platformCtx, "default"); err != nil || !ok {
+		t.Fatalf("feishu config account ok=%v err=%v, want unchanged", ok, err)
 	}
 }
 
@@ -233,6 +275,7 @@ func TestCmdAccountDeletePlatformSelectorDeletesMatchingAccountAndFeishuConfig(t
 		Enabled:         true,
 	})
 	upsertTestFeishuAccountConfig(t, "default", "cli_xxx")
+	saveTestSyncCursor(t, store.PlatformFeishu, "feishu:cli_xxx", `{"old":true}`)
 
 	out, err := captureStdout(t, func() error {
 		return cmdAccountDelete([]string{"feishu/default"})
@@ -245,6 +288,9 @@ func TestCmdAccountDeletePlatformSelectorDeletesMatchingAccountAndFeishuConfig(t
 	}
 	if accounts := listTestAccounts(t, store.PlatformFeishu); len(accounts) != 0 {
 		t.Fatalf("feishu accounts = %#v, want empty after delete", accounts)
+	}
+	if got := loadTestSyncCursor(t, store.PlatformFeishu, "feishu:cli_xxx"); got != "" {
+		t.Fatalf("feishu sync cursor = %q, want deleted", got)
 	}
 	if accounts := listTestAccounts(t, store.PlatformWeChat); len(accounts) != 1 || accounts[0].Name != "default" {
 		t.Fatalf("wechat accounts = %#v, want default account preserved", accounts)
@@ -269,6 +315,7 @@ func TestCmdAccountDeletePlatformSelectorDeletesMatchingAccountAndFeishuConfig(t
 
 func TestCmdAccountListShowsPlatformName(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	writeTestConfig(t)
 	saveTestAccount(t, store.Account{
 		ID:              "wechat:test",
 		Name:            "default",
@@ -276,13 +323,7 @@ func TestCmdAccountListShowsPlatformName(t *testing.T) {
 		CredentialsJSON: "{}",
 		Enabled:         true,
 	})
-	saveTestAccount(t, store.Account{
-		ID:              "feishu:cli_xxx",
-		Name:            "default",
-		Platform:        store.PlatformFeishu,
-		CredentialsJSON: "{}",
-		Enabled:         true,
-	})
+	upsertTestFeishuAccountConfig(t, "default", "cli_xxx")
 
 	out, err := captureStdout(t, func() error {
 		return cmdAccountList(nil)
@@ -297,6 +338,91 @@ func TestCmdAccountListShowsPlatformName(t *testing.T) {
 	}
 	if strings.Contains(out, "default [feishu]") || strings.Contains(out, "default [wechat]") {
 		t.Fatalf("output = %q, want platform/name format", out)
+	}
+}
+
+func TestCmdAccountListShowsConfigGitHubAccount(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	writeTestConfig(t)
+	upsertTestGitHubAccountConfig(t, "reviewer", "987654")
+
+	out, err := captureStdout(t, func() error {
+		return cmdAccountList(nil)
+	})
+	if err != nil {
+		t.Fatalf("cmdAccountList returned error: %v", err)
+	}
+	if !strings.Contains(out, "github/reviewer") || !strings.Contains(out, "github:987654") {
+		t.Fatalf("output = %q, want github config account", out)
+	}
+}
+
+func TestCmdRunStartsConfigGitHubAccountAndReportsMissingMCP(t *testing.T) {
+	home, err := os.MkdirTemp("/tmp", "lb-gh-run-")
+	if err != nil {
+		t.Fatalf("MkdirTemp returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	writeTestConfig(t)
+	upsertTestGitHubAccountConfig(t, "reviewer", "987654")
+
+	err = cmdRun([]string{"--account", "reviewer"})
+	if err == nil {
+		t.Fatal("cmdRun returned nil error, want missing github mcp config")
+	}
+	for _, want := range []string{"monitor exited", "platform=github", "name=reviewer", "mcp.command"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("cmdRun error = %q, want %q", err.Error(), want)
+		}
+	}
+}
+
+func TestCmdAccountDeleteGitHubDeletesConfigCursorAndLegacyAccount(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	writeTestConfig(t)
+	upsertTestGitHubAccountConfig(t, "reviewer", "987654")
+	saveTestAccount(t, store.Account{
+		ID:              "github:987654",
+		Name:            "reviewer",
+		Platform:        store.PlatformGitHub,
+		BaseURL:         githubplatform.DefaultBaseURL,
+		UserID:          "987654",
+		CredentialsJSON: "{}",
+		Enabled:         true,
+	})
+	saveTestSyncCursor(t, store.PlatformGitHub, "github:987654", `{"old":true}`)
+
+	out, err := captureStdout(t, func() error {
+		return cmdAccountDelete([]string{"github/reviewer"})
+	})
+	if err != nil {
+		t.Fatalf("cmdAccountDelete returned error: %v", err)
+	}
+	if !strings.Contains(out, "Deleted account: github/reviewer") {
+		t.Fatalf("output = %q, want github/reviewer delete", out)
+	}
+	if accounts := listTestAccounts(t, store.PlatformGitHub); len(accounts) != 0 {
+		t.Fatalf("github legacy accounts = %#v, want empty after delete", accounts)
+	}
+	if got := loadTestSyncCursor(t, store.PlatformGitHub, "github:987654"); got != "" {
+		t.Fatalf("github sync cursor = %q, want deleted", got)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	platformCtx, err := core.NewPlatformContext(store.PlatformGitHub, &cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+	_, ok, err := githubplatform.ResolveAccountConfig(platformCtx, "reviewer")
+	if err != nil {
+		t.Fatalf("ResolveAccountConfig returned error: %v", err)
+	}
+	if ok {
+		t.Fatal("github account config still exists after account delete")
 	}
 }
 
@@ -521,6 +647,12 @@ func newFakeAccountNewRegistry(t *testing.T) *platform.Registry {
 				Enabled:         true,
 			})
 		},
+		ListAccounts: func(ctx platform.AccountListContext) ([]store.Account, error) {
+			return ctx.Platform.DataStore().ListAccounts()
+		},
+		DeleteAccount: func(ctx platform.AccountDeleteContext) error {
+			return ctx.Platform.DataStore().DeleteAccount(ctx.Account.ID)
+		},
 		NewRuntimePlatform: func(ctx platform.RuntimeContext) (core.Platform, error) {
 			return fakeRuntimePlatform{}, nil
 		},
@@ -597,6 +729,52 @@ func upsertTestFeishuAccountConfig(t *testing.T, name, appID string) {
 	}); err != nil {
 		t.Fatalf("UpsertAccountConfig returned error: %v", err)
 	}
+}
+
+func upsertTestGitHubAccountConfig(t *testing.T, name, installationID string) {
+	t.Helper()
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	platformCtx, err := core.NewPlatformContext(store.PlatformGitHub, &cfg, nil, config.Save)
+	if err != nil {
+		t.Fatalf("NewPlatformContext returned error: %v", err)
+	}
+	if err := githubplatform.UpsertAccountConfig(platformCtx, name, githubplatform.AccountConfig{
+		AppID:          "123456",
+		InstallationID: installationID,
+		PrivateKeyPath: "/tmp/github-app.pem",
+		Repositories:   []string{"owner/repo"},
+	}); err != nil {
+		t.Fatalf("UpsertAccountConfig returned error: %v", err)
+	}
+}
+
+func saveTestSyncCursor(t *testing.T, platformID, accountID, buf string) {
+	t.Helper()
+	st, err := store.Open(platformID)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer st.Close()
+	if err := st.SaveSyncBuf(accountID, buf); err != nil {
+		t.Fatalf("SaveSyncBuf returned error: %v", err)
+	}
+}
+
+func loadTestSyncCursor(t *testing.T, platformID, accountID string) string {
+	t.Helper()
+	st, err := store.Open(platformID)
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer st.Close()
+	buf, err := st.GetSyncBuf(accountID)
+	if err != nil {
+		t.Fatalf("GetSyncBuf returned error: %v", err)
+	}
+	return buf
 }
 
 func writeTestConfig(t *testing.T) {

@@ -36,9 +36,22 @@ func Definition() platform.Definition {
 			}
 			return platform.AccountNewOptions{Name: normalizeAccountName(*name)}, nil
 		},
+		ListAccounts: func(ctx platform.AccountListContext) ([]store.Account, error) {
+			return ctx.Platform.DataStore().ListAccounts()
+		},
 		CreateOrUpdateAccount: func(ctx platform.AccountNewContext, opts platform.AccountNewOptions) error {
 			if err := login.Login(ctx.Platform.DataStore(), opts.Name); err != nil {
 				return fmt.Errorf("login failed: %w", err)
+			}
+			return nil
+		},
+		DeleteAccount: func(ctx platform.AccountDeleteContext) error {
+			st := ctx.Platform.DataStore()
+			if err := st.DeleteAccount(ctx.Account.ID); err != nil {
+				return fmt.Errorf("delete account: %w", err)
+			}
+			if err := st.DeleteSyncBuf(ctx.Account.ID); err != nil {
+				return fmt.Errorf("delete sync cursor: %w", err)
 			}
 			return nil
 		},

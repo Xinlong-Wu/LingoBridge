@@ -3,6 +3,7 @@ package github
 import (
 	"fmt"
 	"os"
+	"sort"
 
 	"lingobridge/internal/commands"
 	"lingobridge/internal/core"
@@ -28,10 +29,38 @@ func Definition() platform.Definition {
 				Values: values,
 			}, nil
 		},
+		ListAccounts: func(ctx platform.AccountListContext) ([]store.Account, error) {
+			cfg, err := LoadConfig(ctx.Platform)
+			if err != nil {
+				return nil, err
+			}
+			names := make([]string, 0, len(cfg.Accounts))
+			for name := range cfg.Accounts {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			accounts := make([]store.Account, 0, len(names))
+			for _, name := range names {
+				accountConfig := cfg.Accounts[name]
+				if err := validateAccountSetup(name, accountConfig); err != nil {
+					return nil, err
+				}
+				acc, err := NewAccount(name, accountConfig.AppID, accountConfig.InstallationID, accountConfig.PrivateKeyPath, accountConfig.BaseURL)
+				if err != nil {
+					return nil, fmt.Errorf("platforms.github.accounts.%s: %w", name, err)
+				}
+				accounts = append(accounts, acc)
+			}
+			return accounts, nil
+		},
 		CreateOrUpdateAccount: func(ctx platform.AccountNewContext, opts platform.AccountNewOptions) error {
 			values, ok := opts.Values.(AccountNewOptions)
 			if !ok {
 				return fmt.Errorf("invalid github account options")
+			}
+			acc, err := NewAccount(opts.Name, values.AppID, values.InstallationID, values.PrivateKeyPath, values.BaseURL)
+			if err != nil {
+				return err
 			}
 			accountConfig := AccountConfig{
 				AppID:          values.AppID,
@@ -47,19 +76,22 @@ func Definition() platform.Definition {
 			if err := UpsertAccountConfig(ctx.Platform, opts.Name, accountConfig); err != nil {
 				return err
 			}
-			acc, err := NewAccount(opts.Name, values.AppID, values.InstallationID, values.PrivateKeyPath, values.BaseURL)
-			if err != nil {
-				return err
-			}
-			if err := ctx.Platform.DataStore().SaveAccount(acc); err != nil {
-				return fmt.Errorf("save account: %w", err)
-			}
 			fmt.Printf("✅ 已添加 GitHub 账户: %s (%s)\n", acc.Name, acc.ID)
 			fmt.Println("Note: Configure platforms.github.accounts.<name>.mcp.command and .mcp.args before running this account.")
 			return nil
 		},
 		DeleteAccount: func(ctx platform.AccountDeleteContext) error {
-			return DeleteAccountConfig(ctx.Platform, ctx.Account.Name)
+			if err := DeleteAccountConfig(ctx.Platform, ctx.Account.Name); err != nil {
+				return err
+			}
+			st := ctx.Platform.DataStore()
+			if err := st.DeleteSyncBuf(ctx.Account.ID); err != nil {
+				return fmt.Errorf("delete sync cursor: %w", err)
+			}
+			if err := st.DeleteAccount(ctx.Account.ID); err != nil {
+				return fmt.Errorf("delete legacy account: %w", err)
+			}
+			return nil
 		},
 		NewRuntimePlatform: func(ctx platform.RuntimeContext) (core.Platform, error) {
 			githubConfig, err := LoadConfig(ctx.Platform)

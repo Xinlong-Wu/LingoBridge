@@ -3,6 +3,7 @@ package definition
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"lingobridge/internal/commands"
@@ -32,10 +33,35 @@ func Definition() platform.Definition {
 				Values: values,
 			}, nil
 		},
+		ListAccounts: func(ctx platform.AccountListContext) ([]store.Account, error) {
+			cfg, err := feishu.LoadConfig(ctx.Platform)
+			if err != nil {
+				return nil, err
+			}
+			names := make([]string, 0, len(cfg.Accounts))
+			for name := range cfg.Accounts {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			accounts := make([]store.Account, 0, len(names))
+			for _, name := range names {
+				accountConfig := cfg.Accounts[name]
+				acc, err := feishu.NewAccount(name, accountConfig.AppID, accountConfig.AppSecret, accountConfig.BaseURL)
+				if err != nil {
+					return nil, fmt.Errorf("platforms.feishu.accounts.%s: %w", name, err)
+				}
+				accounts = append(accounts, acc)
+			}
+			return accounts, nil
+		},
 		CreateOrUpdateAccount: func(ctx platform.AccountNewContext, opts platform.AccountNewOptions) error {
 			values, ok := opts.Values.(feishu.AccountNewOptions)
 			if !ok {
 				return fmt.Errorf("invalid feishu account options")
+			}
+			acc, err := feishu.NewAccount(opts.Name, values.AppID, values.AppSecret, values.BaseURL)
+			if err != nil {
+				return err
 			}
 			if err := feishu.UpsertAccountConfig(ctx.Platform, opts.Name, feishu.AccountConfig{
 				AppID:     values.AppID,
@@ -44,18 +70,21 @@ func Definition() platform.Definition {
 			}); err != nil {
 				return err
 			}
-			acc, err := feishu.NewAccount(opts.Name, values.AppID, values.AppSecret, values.BaseURL)
-			if err != nil {
-				return err
-			}
-			if err := ctx.Platform.DataStore().SaveAccount(acc); err != nil {
-				return fmt.Errorf("save account: %w", err)
-			}
 			fmt.Printf("✅ 已添加飞书账户: %s (%s)\n", acc.Name, acc.ID)
 			return nil
 		},
 		DeleteAccount: func(ctx platform.AccountDeleteContext) error {
-			return feishu.DeleteAccountConfig(ctx.Platform, ctx.Account.Name)
+			if err := feishu.DeleteAccountConfig(ctx.Platform, ctx.Account.Name); err != nil {
+				return err
+			}
+			st := ctx.Platform.DataStore()
+			if err := st.DeleteSyncBuf(ctx.Account.ID); err != nil {
+				return fmt.Errorf("delete sync cursor: %w", err)
+			}
+			if err := st.DeleteAccount(ctx.Account.ID); err != nil {
+				return fmt.Errorf("delete legacy account: %w", err)
+			}
+			return nil
 		},
 		NewRuntimePlatform: func(ctx platform.RuntimeContext) (core.Platform, error) {
 			feishuConfig, err := feishu.LoadConfig(ctx.Platform)
