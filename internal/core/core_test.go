@@ -162,6 +162,8 @@ type fakeToolLLM struct {
 	providerCtx   store.ProviderContext
 	systemPrompts []string
 	turnErrs      map[int]error
+	previousTurns []llm.ToolState
+	resultTurns   [][]tooltypes.Result
 }
 
 func (f *fakeToolLLM) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, tools []tooltypes.Spec, previous llm.ToolState, results []tooltypes.Result, onChunk func(chunk string) error) (llm.ToolResponse, error) {
@@ -171,6 +173,8 @@ func (f *fakeToolLLM) ChatStreamWithTools(systemPrompt string, messages []store.
 	f.toolSpecs = tools
 	f.systemPrompts = append(f.systemPrompts, systemPrompt)
 	f.results = append(f.results, results...)
+	f.previousTurns = append(f.previousTurns, previous)
+	f.resultTurns = append(f.resultTurns, append([]tooltypes.Result(nil), results...))
 	turn := f.turns
 	f.turns++
 	if f.turnErrs != nil {
@@ -259,6 +263,23 @@ func makeToolCalls(count, offset int) []tooltypes.Call {
 		})
 	}
 	return calls
+}
+
+func TestSummarizeToolArgumentsForLogRedactsSensitiveKeys(t *testing.T) {
+	got := summarizeToolArgumentsForLog(json.RawMessage(`{
+		"query":"roadmap",
+		"token":"secret-token",
+		"nested":{"password":"secret-password","Authorization":"Bearer secret"},
+		"items":[{"api_key":"secret-api-key"}]
+	}`), 4096)
+	for _, secret := range []string{"secret-token", "secret-password", "Bearer secret", "secret-api-key"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("summary contains secret %q: %s", secret, got)
+		}
+	}
+	if !strings.Contains(got, `"query":"roadmap"`) || strings.Count(got, "[REDACTED]") != 4 {
+		t.Fatalf("summary = %s, want query plus redactions", got)
+	}
 }
 
 type fakeToolProvider struct {
@@ -619,6 +640,55 @@ func TestHandleTextRetriesToolTurnWithoutRepeatingToolCalls(t *testing.T) {
 	}
 	if sessions.saved == nil || len(sessions.saved.Messages[1].ToolTraces) != 1 {
 		t.Fatalf("saved = %#v, want one tool trace", sessions.saved)
+	}
+}
+
+func TestHandleTextToolLoopAccumulatesToolContext(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		callTurns: [][]tooltypes.Call{
+			{{
+				ID:        "call_1",
+				Name:      "fake_tool",
+				Arguments: json.RawMessage(`{"query":"one"}`),
+			}},
+			{{
+				ID:        "call_2",
+				Name:      "fake_tool",
+				Arguments: json.RawMessage(`{"query":"two"}`),
+			}},
+		},
+		finalText: "done",
+	}
+	tool := &fakeTool{result: `{"ok":true}`}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey: "u1",
+		LLMText: "review",
+		Tools:   []tooltypes.Tool{tool},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(tool.calls) != 2 {
+		t.Fatalf("tool calls = %#v, want two executions", tool.calls)
+	}
+	if len(llmClient.previousTurns) != 3 || len(llmClient.resultTurns) != 3 {
+		t.Fatalf("turns previous=%d results=%d, want 3", len(llmClient.previousTurns), len(llmClient.resultTurns))
+	}
+	if got := len(llmClient.previousTurns[1].Items); got != 1 {
+		t.Fatalf("turn 2 previous items = %d, want first tool-call state", got)
+	}
+	if got := len(llmClient.resultTurns[1]); got != 1 {
+		t.Fatalf("turn 2 results = %d, want first tool result", got)
+	}
+	if got := len(llmClient.previousTurns[2].Items); got != 2 {
+		t.Fatalf("turn 3 previous items = %d, want cumulative tool-call states", got)
+	}
+	if got := len(llmClient.resultTurns[2]); got != 2 {
+		t.Fatalf("turn 3 results = %d, want cumulative tool results", got)
 	}
 }
 
@@ -1016,13 +1086,14 @@ func TestHandleTextToolBudgetReminderThresholds(t *testing.T) {
 		},
 		finalText: "done",
 	}
+	tool := &fakeTool{}
 	bot := New(sessions, testLLMConfig())
 	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
 
 	err := bot.Handle(context.Background(), InboundMessage{
 		UserKey:     "u1",
 		LLMText:     "try it",
-		Tools:       []tooltypes.Tool{&fakeTool{}},
+		Tools:       []tooltypes.Tool{tool},
 		ToolOptions: tooltypes.Options{MaxCalls: 20},
 	}, &fakeSender{})
 	if err != nil {
@@ -1044,8 +1115,12 @@ func TestHandleTextToolBudgetReminderThresholds(t *testing.T) {
 	if strings.Count(allPrompts, `severity="10%"`) != 1 || strings.Count(allPrompts, `severity="5%"`) != 1 {
 		t.Fatalf("system prompts = %#v, want each reminder once", llmClient.systemPrompts)
 	}
-	if len(llmClient.results) != 19 {
-		t.Fatalf("tool results = %d, want only 19 real tool results", len(llmClient.results))
+	if len(tool.calls) != 19 {
+		t.Fatalf("tool calls = %d, want 19 real tool executions", len(tool.calls))
+	}
+	lastResults := llmClient.resultTurns[len(llmClient.resultTurns)-1]
+	if len(lastResults) != 19 {
+		t.Fatalf("last turn tool results = %d, want only 19 real tool results", len(lastResults))
 	}
 }
 

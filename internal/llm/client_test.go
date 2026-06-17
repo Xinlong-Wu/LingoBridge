@@ -717,6 +717,41 @@ func TestOpenAIResponsesStreamingToolStateOmitsMessageContent(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesToolTranscriptInterleavesCumulativeResults(t *testing.T) {
+	var reqBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{openaiBase: openaiBase{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "gpt-test"}, httpClient: server.Client()}}
+	previous := ToolState{
+		Provider: openAIRefProvider,
+		Endpoint: openAIEndpointResponses,
+		Items: []json.RawMessage{
+			json.RawMessage(`{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read","arguments":"{}"}`),
+			json.RawMessage(`{"type":"function_call","id":"fc_2","call_id":"call_2","name":"read","arguments":"{}"}`),
+		},
+	}
+	results := []tooltypes.Result{
+		{CallID: "call_1", Name: "read", Content: `{"page":1}`},
+		{CallID: "call_2", Name: "read", Content: `{"page":2}`},
+	}
+	if _, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, nil, previous, results, nil); err != nil {
+		t.Fatalf("ChatStreamWithTools returned error: %v", err)
+	}
+	input := reqBody["input"].([]any)
+	got := responseToolTranscriptOrder(input)
+	want := []string{"function_call:call_1", "function_call_output:call_1", "function_call:call_2", "function_call_output:call_2"}
+	if !stringSlicesEqual(got, want) {
+		t.Fatalf("tool transcript order = %#v, want %#v; input=%#v", got, want, input)
+	}
+}
+
 func TestOpenAIChatToolCallingRoundTrip(t *testing.T) {
 	var bodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -757,6 +792,41 @@ func TestOpenAIChatToolCallingRoundTrip(t *testing.T) {
 	last := messages[len(messages)-1].(map[string]any)
 	if last["role"] != "tool" || last["tool_call_id"] != "call_1" {
 		t.Fatalf("last message = %#v, want tool result", last)
+	}
+}
+
+func TestOpenAIChatToolTranscriptInterleavesCumulativeResults(t *testing.T) {
+	var reqBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`))
+	}))
+	defer server.Close()
+
+	client := &openaiChatClient{openaiBase: openaiBase{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "gpt-test"}, httpClient: server.Client()}}
+	previous := ToolState{
+		Provider: openAIRefProvider,
+		Endpoint: openAIEndpointChat,
+		Items: []json.RawMessage{
+			json.RawMessage(`{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]}`),
+			json.RawMessage(`{"role":"assistant","tool_calls":[{"id":"call_2","type":"function","function":{"name":"read","arguments":"{}"}}]}`),
+		},
+	}
+	results := []tooltypes.Result{
+		{CallID: "call_1", Name: "read", Content: `{"page":1}`},
+		{CallID: "call_2", Name: "read", Content: `{"page":2}`},
+	}
+	if _, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, nil, previous, results, nil); err != nil {
+		t.Fatalf("ChatStreamWithTools returned error: %v", err)
+	}
+	messages := reqBody["messages"].([]any)
+	got := chatToolTranscriptOrder(messages)
+	want := []string{"assistant:call_1", "tool:call_1", "assistant:call_2", "tool:call_2"}
+	if !stringSlicesEqual(got, want) {
+		t.Fatalf("tool transcript order = %#v, want %#v; messages=%#v", got, want, messages)
 	}
 }
 
@@ -802,6 +872,41 @@ func TestAnthropicToolCallingRoundTrip(t *testing.T) {
 	result := content[0].(map[string]any)
 	if result["type"] != "tool_result" || result["tool_use_id"] != "toolu_1" {
 		t.Fatalf("tool result = %#v, want anthropic tool_result", result)
+	}
+}
+
+func TestAnthropicToolTranscriptInterleavesCumulativeResults(t *testing.T) {
+	var reqBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"content":[{"type":"text","text":"done"}]}`))
+	}))
+	defer server.Close()
+
+	client := &anthropicClient{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "claude-test"}, httpClient: server.Client()}
+	previous := ToolState{
+		Provider: anthropicRefProvider,
+		Endpoint: anthropicEndpointMessages,
+		Items: []json.RawMessage{
+			json.RawMessage(`{"type":"tool_use","id":"toolu_1","name":"read","input":{}}`),
+			json.RawMessage(`{"type":"tool_use","id":"toolu_2","name":"read","input":{}}`),
+		},
+	}
+	results := []tooltypes.Result{
+		{CallID: "toolu_1", Name: "read", Content: `{"page":1}`},
+		{CallID: "toolu_2", Name: "read", Content: `{"page":2}`},
+	}
+	if _, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, nil, previous, results, nil); err != nil {
+		t.Fatalf("ChatStreamWithTools returned error: %v", err)
+	}
+	messages := reqBody["messages"].([]any)
+	got := anthropicToolTranscriptOrder(messages)
+	want := []string{"assistant:tool_use:toolu_1", "user:tool_result:toolu_1", "assistant:tool_use:toolu_2", "user:tool_result:toolu_2"}
+	if !stringSlicesEqual(got, want) {
+		t.Fatalf("tool transcript order = %#v, want %#v; messages=%#v", got, want, messages)
 	}
 }
 
@@ -1445,4 +1550,81 @@ func TestParseResponsesImageMalformedBase64(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "decode response image result") {
 		t.Fatalf("parseResponsesOutput error = %v, want decode response image result", err)
 	}
+}
+
+func responseToolTranscriptOrder(input []any) []string {
+	var out []string
+	for _, item := range input {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		typ, _ := m["type"].(string)
+		switch typ {
+		case "function_call", "function_call_output":
+			callID, _ := m["call_id"].(string)
+			out = append(out, typ+":"+callID)
+		}
+	}
+	return out
+}
+
+func chatToolTranscriptOrder(messages []any) []string {
+	var out []string
+	for _, item := range messages {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := m["role"].(string)
+		switch role {
+		case "assistant":
+			rawCalls, _ := m["tool_calls"].([]any)
+			for _, rawCall := range rawCalls {
+				call, _ := rawCall.(map[string]any)
+				id, _ := call["id"].(string)
+				out = append(out, "assistant:"+id)
+			}
+		case "tool":
+			callID, _ := m["tool_call_id"].(string)
+			out = append(out, "tool:"+callID)
+		}
+	}
+	return out
+}
+
+func anthropicToolTranscriptOrder(messages []any) []string {
+	var out []string
+	for _, item := range messages {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := m["role"].(string)
+		content, _ := m["content"].([]any)
+		for _, rawBlock := range content {
+			block, _ := rawBlock.(map[string]any)
+			switch block["type"] {
+			case "tool_use":
+				id, _ := block["id"].(string)
+				out = append(out, role+":tool_use:"+id)
+			case "tool_result":
+				id, _ := block["tool_use_id"].(string)
+				out = append(out, role+":tool_result:"+id)
+			}
+		}
+	}
+	return out
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }

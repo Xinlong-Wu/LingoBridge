@@ -304,6 +304,53 @@ func summarizeJSON(raw json.RawMessage, limit int) string {
 	return truncateText(string(raw), limit)
 }
 
+func summarizeToolArgumentsForLog(raw json.RawMessage, limit int) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err == nil {
+		v = redactToolLogValue(v)
+		if normalized, err := json.Marshal(v); err == nil {
+			return truncateText(string(normalized), limit)
+		}
+	}
+	return truncateText(string(raw), limit)
+}
+
+func redactToolLogValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			if sensitiveToolArgumentKey(key) {
+				out[key] = "[REDACTED]"
+				continue
+			}
+			out[key] = redactToolLogValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = redactToolLogValue(child)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func sensitiveToolArgumentKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, pattern := range []string{"token", "secret", "password", "api_key", "apikey", "authorization", "auth"} {
+		if strings.Contains(key, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 func truncateText(text string, limit int) string {
 	if limit <= 0 || utf8.RuneCountInString(text) <= limit {
 		return text

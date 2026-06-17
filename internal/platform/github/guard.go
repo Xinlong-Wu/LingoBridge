@@ -9,7 +9,10 @@ import (
 	tooltypes "lingobridge/internal/tools"
 )
 
-const githubMCPToolPrefix = "mcp_github_"
+const (
+	githubMCPToolPrefix = "mcp_github_"
+	reviewLogTextLimit  = 500
+)
 
 var allowedReviewRemoteTools = map[string]bool{
 	"pull_request_read":             true,
@@ -29,8 +32,12 @@ var allowedReviewReadMethods = map[string]bool{
 var allowedReviewReadMethodList = []string{"get", "get_diff", "get_files", "get_status", "get_check_runs"}
 
 type reviewGuardState struct {
-	SubmittedComment bool
-	WriteAttempted   bool
+	SubmittedComment        bool
+	WriteAttempted          bool
+	PendingReviewCreated    bool
+	InlineCommentsAttempted int
+	InlineCommentsAdded     int
+	SubmitAttempted         bool
 }
 
 type guardedTool struct {
@@ -94,7 +101,7 @@ func (t guardedTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes
 	if err != nil {
 		return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: err.Error(), IsError: true}
 	}
-	if err := t.validateAndMutate(args); err != nil {
+	if err := t.validateAndMutate(ctx, args); err != nil {
 		return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: err.Error(), IsError: true}
 	}
 	data, err := json.Marshal(args)
@@ -102,24 +109,20 @@ func (t guardedTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes
 		return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: fmt.Sprintf("marshal guarded tool args: %v", err), IsError: true}
 	}
 	call.Arguments = data
-	if t.state != nil && (t.remote == "pull_request_review_write" || t.remote == "add_comment_to_pending_review") {
-		t.state.WriteAttempted = true
-	}
+	t.recordWriteAttempt(args)
 	result := t.inner.Execute(ctx, call)
-	if t.remote == "pull_request_review_write" && isCommentSubmit(args) && !result.IsError && t.state != nil {
-		t.state.SubmittedComment = true
-	}
+	t.recordWriteResult(ctx, call, args, result)
 	return result
 }
 
-func (t guardedTool) validateAndMutate(args map[string]any) error {
+func (t guardedTool) validateAndMutate(ctx context.Context, args map[string]any) error {
 	switch t.remote {
 	case "pull_request_read":
 		return validatePullRequestReadArgs(args, t.pr)
 	case "get_file_contents":
 		return validateFileContentsArgs(args, t.pr)
 	case "pull_request_review_write":
-		return validateReviewWriteArgs(args, t.pr)
+		return validateReviewWriteArgs(ctx, args, t.pr)
 	case "add_comment_to_pending_review":
 		if err := validateBasePRArgs(args, t.pr); err != nil {
 			return err
@@ -128,6 +131,76 @@ func (t guardedTool) validateAndMutate(args map[string]any) error {
 	default:
 		return fmt.Errorf("github mcp tool %q is not allowed for automated PR review", t.remote)
 	}
+}
+
+func (t guardedTool) recordWriteAttempt(args map[string]any) {
+	if t.state == nil {
+		return
+	}
+	switch t.remote {
+	case "pull_request_review_write":
+		t.state.WriteAttempted = true
+		if isCommentSubmit(args) {
+			t.state.SubmitAttempted = true
+		}
+	case "add_comment_to_pending_review":
+		t.state.WriteAttempted = true
+		t.state.InlineCommentsAttempted++
+	}
+}
+
+func (t guardedTool) recordWriteResult(ctx context.Context, call tooltypes.Call, args map[string]any, result tooltypes.Result) {
+	switch t.remote {
+	case "pull_request_review_write":
+		t.recordReviewWriteResult(ctx, call, args, result)
+	case "add_comment_to_pending_review":
+		t.recordReviewCommentResult(ctx, call, args, result)
+	}
+}
+
+func (t guardedTool) recordReviewWriteResult(ctx context.Context, call tooltypes.Call, args map[string]any, result tooltypes.Result) {
+	method, _ := stringArg(args, "method")
+	body, _ := stringArg(args, "body")
+	bodyChars := reviewLogTextChars(body)
+	switch strings.TrimSpace(method) {
+	case "create":
+		if result.IsError {
+			githubLog.Warn(ctx, "github pending review create failed repo=%s number=%d head=%s call_id=%s error=%s", t.pr.Base.Repo.FullName(), t.pr.Number, shortSHA(t.pr.Head.SHA), call.ID, summarizeReviewLogText(result.Content, reviewLogTextLimit))
+			return
+		}
+		if t.state != nil {
+			t.state.PendingReviewCreated = true
+		}
+		githubLog.Debug(ctx, "github pending review created repo=%s number=%d head=%s call_id=%s", t.pr.Base.Repo.FullName(), t.pr.Number, shortSHA(t.pr.Head.SHA), call.ID)
+	case "submit_pending":
+		if result.IsError {
+			githubLog.Warn(ctx, "github pending review submit failed repo=%s number=%d head=%s call_id=%s body_chars=%d error=%s", t.pr.Base.Repo.FullName(), t.pr.Number, shortSHA(t.pr.Head.SHA), call.ID, bodyChars, summarizeReviewLogText(result.Content, reviewLogTextLimit))
+			return
+		}
+		if t.state != nil && isCommentSubmit(args) {
+			t.state.SubmittedComment = true
+		}
+		githubLog.Debug(ctx, "github pending review submitted repo=%s number=%d head=%s call_id=%s body_chars=%d", t.pr.Base.Repo.FullName(), t.pr.Number, shortSHA(t.pr.Head.SHA), call.ID, bodyChars)
+	}
+}
+
+func (t guardedTool) recordReviewCommentResult(ctx context.Context, call tooltypes.Call, args map[string]any, result tooltypes.Result) {
+	path, _ := stringArg(args, "path")
+	subjectType, _ := stringArg(args, "subjectType")
+	body, _ := stringArg(args, "body")
+	bodyChars := reviewLogTextChars(body)
+	line := reviewIntArgLogValue(args, "line")
+	startLine := reviewIntArgLogValue(args, "startLine")
+	side, _ := stringArg(args, "side")
+	startSide, _ := stringArg(args, "startSide")
+	if result.IsError {
+		githubLog.Warn(ctx, "github pending review comment failed repo=%s number=%d head=%s call_id=%s path=%s subject_type=%s start_line=%s line=%s start_side=%s side=%s body_chars=%d error=%s", t.pr.Base.Repo.FullName(), t.pr.Number, shortSHA(t.pr.Head.SHA), call.ID, path, subjectType, startLine, line, startSide, side, bodyChars, summarizeReviewLogText(result.Content, reviewLogTextLimit))
+		return
+	}
+	if t.state != nil {
+		t.state.InlineCommentsAdded++
+	}
+	githubLog.Debug(ctx, "github pending review comment added repo=%s number=%d head=%s call_id=%s path=%s subject_type=%s start_line=%s line=%s start_side=%s side=%s body_chars=%d", t.pr.Base.Repo.FullName(), t.pr.Number, shortSHA(t.pr.Head.SHA), call.ID, path, subjectType, startLine, line, startSide, side, bodyChars)
 }
 
 func parseToolArgs(raw json.RawMessage) (map[string]any, error) {
@@ -212,7 +285,7 @@ func validateFileContentsArgs(args map[string]any, pr PullRequest) error {
 	return nil
 }
 
-func validateReviewWriteArgs(args map[string]any, pr PullRequest) error {
+func validateReviewWriteArgs(ctx context.Context, args map[string]any, pr PullRequest) error {
 	if err := validateBasePRArgs(args, pr); err != nil {
 		return err
 	}
@@ -223,11 +296,25 @@ func validateReviewWriteArgs(args map[string]any, pr PullRequest) error {
 	method = strings.TrimSpace(method)
 	switch method {
 	case "create":
-		if event, ok := stringArg(args, "event"); ok && strings.TrimSpace(event) != "" {
-			return fmt.Errorf("pull_request_review_write create must create a pending review without event")
-		}
-		if commitID, ok := stringArg(args, "commitID"); ok && strings.TrimSpace(commitID) != strings.TrimSpace(pr.Head.SHA) {
+		_, hadEvent := args["event"]
+		body, _ := stringArg(args, "body")
+		_, hadRawBody := args["body"]
+		bodyChars := reviewLogTextChars(body)
+		delete(args, "event")
+		delete(args, "body")
+
+		expectedCommitID := strings.TrimSpace(pr.Head.SHA)
+		commitID, hasCommitID := stringArg(args, "commitID")
+		if hasCommitID && strings.TrimSpace(commitID) != expectedCommitID {
 			return fmt.Errorf("pull_request_review_write commitID must be current PR head SHA")
+		}
+		injectedCommitID := !hasCommitID
+		if injectedCommitID {
+			args["commitID"] = expectedCommitID
+		}
+		droppedExtraArgs := keepReviewCreateArgs(args)
+		if hadEvent || hadRawBody || injectedCommitID || droppedExtraArgs > 0 {
+			githubLog.Warn(ctx, "normalized create review repo=%s number=%d head=%s dropped_event=%t dropped_body=%t dropped_extra_args=%d injected_commit_id=%t body_chars=%d", pr.Base.Repo.FullName(), pr.Number, shortSHA(pr.Head.SHA), hadEvent, hadRawBody, droppedExtraArgs, injectedCommitID, bodyChars)
 		}
 		return nil
 	case "submit_pending":
@@ -299,6 +386,20 @@ func isCommentSubmit(args map[string]any) bool {
 	return strings.TrimSpace(method) == "submit_pending" && strings.TrimSpace(event) == "COMMENT"
 }
 
+func keepReviewCreateArgs(args map[string]any) int {
+	dropped := 0
+	for key := range args {
+		switch key {
+		case "owner", "repo", "pullNumber", "method", "commitID":
+			continue
+		default:
+			delete(args, key)
+			dropped++
+		}
+	}
+	return dropped
+}
+
 func allowedReviewSHA(value string, pr PullRequest) bool {
 	value = strings.TrimSpace(value)
 	return value != "" && (value == strings.TrimSpace(pr.Base.SHA) || value == strings.TrimSpace(pr.Head.SHA))
@@ -362,7 +463,7 @@ func restrictReviewWriteSchema(raw json.RawMessage) json.RawMessage {
 		},
 		"event": {
 			Enum:        []string{"COMMENT"},
-			Description: "Only COMMENT is allowed when submitting a pending review.",
+			Description: "Omit for method=create to create a pending review; set COMMENT only for method=submit_pending.",
 		},
 	})
 }
@@ -443,6 +544,31 @@ func intArg(args map[string]any, key string) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func reviewIntArgLogValue(args map[string]any, key string) string {
+	value, ok := intArg(args, key)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%d", value)
+}
+
+func summarizeReviewLogText(text string, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if limit <= 0 {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "..."
+}
+
+func reviewLogTextChars(text string) int {
+	text = strings.Join(strings.Fields(text), " ")
+	return len([]rune(text))
 }
 
 func sameRepo(left, right Repository) bool {

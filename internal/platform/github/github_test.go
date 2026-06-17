@@ -248,6 +248,10 @@ func TestBuildReviewPromptDocumentsDiffFallbackAndPendingReviewFlow(t *testing.T
 		"No actionable issues found.",
 		"submit_pending",
 		"event=COMMENT",
+		"immediately add confirmed actionable findings as inline comments",
+		"event omitted",
+		"Exact pending review create call shape",
+		"Do not include event or body on method=create",
 		"Do not approve",
 		"untrusted context",
 		"If tool failures or timeouts prevent meaningful inspection",
@@ -370,6 +374,7 @@ func TestMCPGuardAllowsCommentReviewAndRejectsUnsafeCalls(t *testing.T) {
 	spec := guarded[0].Spec()
 	assertSchemaEnum(t, spec.Parameters, "method", []string{"create", "submit_pending"})
 	assertSchemaEnum(t, spec.Parameters, "event", []string{"COMMENT"})
+	assertSchemaDescriptionContains(t, spec.Parameters, "event", "Omit for method=create")
 
 	result := guarded[0].Execute(context.Background(), tooltypes.Call{
 		ID:   "1",
@@ -379,11 +384,12 @@ func TestMCPGuardAllowsCommentReviewAndRejectsUnsafeCalls(t *testing.T) {
 			"method":"submit_pending","event":"COMMENT","body":"done"
 		}`),
 	})
-	if result.IsError || !state.SubmittedComment {
-		t.Fatalf("submit result = %#v submitted=%t", result, state.SubmittedComment)
+	if result.IsError || !state.SubmittedComment || !state.SubmitAttempted {
+		t.Fatalf("submit result = %#v submitted=%t submitAttempted=%t", result, state.SubmittedComment, state.SubmitAttempted)
 	}
 
 	state.SubmittedComment = false
+	state.SubmitAttempted = false
 	result = guarded[0].Execute(context.Background(), tooltypes.Call{
 		ID:   "2",
 		Name: "mcp_github_pull_request_review_write",
@@ -392,20 +398,49 @@ func TestMCPGuardAllowsCommentReviewAndRejectsUnsafeCalls(t *testing.T) {
 			"method":"submit_pending","event":"APPROVE","body":"done"
 		}`),
 	})
-	if !result.IsError || state.SubmittedComment {
-		t.Fatalf("approve result = %#v submitted=%t, want rejected", result, state.SubmittedComment)
+	if !result.IsError || state.SubmittedComment || state.SubmitAttempted {
+		t.Fatalf("approve result = %#v submitted=%t submitAttempted=%t, want rejected", result, state.SubmittedComment, state.SubmitAttempted)
 	}
 
+	state.PendingReviewCreated = false
 	result = guarded[0].Execute(context.Background(), tooltypes.Call{
 		ID:   "2b",
 		Name: "mcp_github_pull_request_review_write",
 		Arguments: json.RawMessage(`{
 			"owner":"base","repo":"repo","pullNumber":7,
-			"method":"create","event":"COMMENT","body":"done"
+			"method":"create","event":"COMMENT","body":"done","unexpected":"ignored"
+		}`),
+	})
+	if result.IsError || !state.PendingReviewCreated {
+		t.Fatalf("create with event result = %#v pendingCreated=%t, want normalized success", result, state.PendingReviewCreated)
+	}
+	if _, ok := submit.lastArgs["event"]; ok {
+		t.Fatalf("create args event = %#v, want omitted after normalization; args=%#v", submit.lastArgs["event"], submit.lastArgs)
+	}
+	if _, ok := submit.lastArgs["body"]; ok {
+		t.Fatalf("create args body = %#v, want omitted after normalization; args=%#v", submit.lastArgs["body"], submit.lastArgs)
+	}
+	if got := submit.lastArgs["commitID"]; got != pr.Head.SHA {
+		t.Fatalf("create args commitID = %#v, want current head SHA %q; args=%#v", got, pr.Head.SHA, submit.lastArgs)
+	}
+	if len(submit.lastArgs) != 5 {
+		t.Fatalf("create args = %#v, want exact pending review create shape", submit.lastArgs)
+	}
+
+	beforeCalls := submit.calls
+	result = guarded[0].Execute(context.Background(), tooltypes.Call{
+		ID:   "2c",
+		Name: "mcp_github_pull_request_review_write",
+		Arguments: json.RawMessage(`{
+			"owner":"base","repo":"repo","pullNumber":7,
+			"method":"create","commitID":"old-head"
 		}`),
 	})
 	if !result.IsError {
-		t.Fatalf("create with event result = %#v, want rejected", result)
+		t.Fatalf("create with wrong commitID result = %#v, want rejected", result)
+	}
+	if submit.calls != beforeCalls {
+		t.Fatalf("submit calls = %d, want unchanged %d after rejected create", submit.calls, beforeCalls)
 	}
 
 	read := &fakeTool{spec: tooltypes.Spec{Name: "mcp_github_get_file_contents"}}
@@ -565,6 +600,41 @@ func TestMCPGuardAddCommentToPendingReviewValidatesSubjectType(t *testing.T) {
 				t.Fatalf("result = %#v, want error=%t", result, tc.wantError)
 			}
 		})
+	}
+}
+
+func TestMCPGuardTracksReviewCommentCounters(t *testing.T) {
+	pr := testPullRequest()
+	state := &reviewGuardState{}
+	comment := &fakeTool{spec: tooltypes.Spec{Name: "mcp_github_add_comment_to_pending_review"}}
+	guarded := guardReviewTools(context.Background(), []tooltypes.Tool{comment}, pr, state)
+	result := guarded[0].Execute(context.Background(), tooltypes.Call{
+		ID:        "ok",
+		Name:      "mcp_github_add_comment_to_pending_review",
+		Arguments: json.RawMessage(`{"owner":"base","repo":"repo","pullNumber":7,"path":"README.md","body":"check this","subjectType":"LINE","line":42,"side":"RIGHT"}`),
+	})
+	if result.IsError {
+		t.Fatalf("comment result = %#v, want success", result)
+	}
+	if !state.WriteAttempted || state.InlineCommentsAttempted != 1 || state.InlineCommentsAdded != 1 {
+		t.Fatalf("state after success = %#v, want attempted=1 added=1", state)
+	}
+
+	failingComment := &fakeTool{
+		spec:   tooltypes.Spec{Name: "mcp_github_add_comment_to_pending_review"},
+		result: tooltypes.Result{Content: "line is not part of diff", IsError: true},
+	}
+	guarded = guardReviewTools(context.Background(), []tooltypes.Tool{failingComment}, pr, state)
+	result = guarded[0].Execute(context.Background(), tooltypes.Call{
+		ID:        "fail",
+		Name:      "mcp_github_add_comment_to_pending_review",
+		Arguments: json.RawMessage(`{"owner":"base","repo":"repo","pullNumber":7,"path":"README.md","body":"check this too","subjectType":"LINE","line":43,"side":"RIGHT"}`),
+	})
+	if !result.IsError {
+		t.Fatalf("comment result = %#v, want failure", result)
+	}
+	if state.InlineCommentsAttempted != 2 || state.InlineCommentsAdded != 1 {
+		t.Fatalf("state after failure = %#v, want attempted=2 added=1", state)
 	}
 }
 
@@ -764,14 +834,27 @@ func (ioDiscard) Write(p []byte) (int, error) { return len(p), nil }
 type fakeTool struct {
 	spec     tooltypes.Spec
 	lastArgs map[string]any
+	result   tooltypes.Result
+	calls    int
 }
 
 func (f *fakeTool) Spec() tooltypes.Spec { return f.spec }
 
 func (f *fakeTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes.Result {
+	f.calls++
 	f.lastArgs = nil
 	_ = json.Unmarshal(call.Arguments, &f.lastArgs)
-	return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: "ok"}
+	result := f.result
+	if result.Content == "" && !result.IsError {
+		result.Content = "ok"
+	}
+	if result.CallID == "" {
+		result.CallID = call.ID
+	}
+	if result.Name == "" {
+		result.Name = call.Name
+	}
+	return result
 }
 
 func assertSchemaEnum(t *testing.T, raw json.RawMessage, property string, want []string) {
@@ -792,6 +875,22 @@ func assertSchemaEnum(t *testing.T, raw json.RawMessage, property string, want [
 		if got[i] != want[i] {
 			t.Fatalf("%s enum = %#v, want %#v", property, got, want)
 		}
+	}
+}
+
+func assertSchemaDescriptionContains(t *testing.T, raw json.RawMessage, property, want string) {
+	t.Helper()
+	var schema struct {
+		Properties map[string]struct {
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+	got := schema.Properties[property].Description
+	if !strings.Contains(got, want) {
+		t.Fatalf("%s description = %q, want containing %q", property, got, want)
 	}
 }
 

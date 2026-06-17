@@ -462,8 +462,7 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, p
 			return llm.Response{}, traces, err
 		}
 
-		previous = resp.ToolState
-		results = results[:0]
+		previous = appendToolState(previous, resp.ToolState)
 		coreLog.Debug(ctx, "model requested tool calls count=%d total_before=%d", len(resp.ToolCalls), totalCalls)
 		for _, call := range resp.ToolCalls {
 			if err := ctx.Err(); err != nil {
@@ -473,6 +472,7 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, p
 			if _, ok := lookup[call.Name]; !ok {
 				coreLog.Warn(ctx, "model requested unavailable tool name=%s call_id=%s", call.Name, call.ID)
 			}
+			coreLog.Debug(ctx, "tool call start name=%s call_id=%s args=%s", call.Name, call.ID, summarizeToolArgumentsForLog(call.Arguments, defaultToolTraceTextLimit))
 			totalCalls++
 			result, trace, toolErr := runTool(ctx, lookup[call.Name], call, options.Timeout, options.ResultLimit)
 			if toolErr != nil {
@@ -503,6 +503,17 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, p
 			coreLog.Debug(ctx, "tool budget reminder queued severity=10%% remaining=%d max_calls=%d", remaining, maxCalls)
 		}
 	}
+}
+
+func appendToolState(previous, next llm.ToolState) llm.ToolState {
+	if next.IsEmpty() {
+		return previous
+	}
+	if previous.IsEmpty() || previous.Provider != next.Provider || previous.Endpoint != next.Endpoint {
+		return next
+	}
+	previous.Items = append(previous.Items, next.Items...)
+	return previous
 }
 
 func effectiveMaxToolCalls(maxCalls int) int {

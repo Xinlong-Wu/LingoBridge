@@ -122,21 +122,7 @@ func (c *openaiChatClient) ChatStreamWithTools(systemPrompt string, messages []s
 	if err != nil {
 		return ToolResponse{}, err
 	}
-	if previous.Provider == c.refProvider() && previous.Endpoint == openAIEndpointChat {
-		for _, raw := range previous.Items {
-			var msg openaiChatMessage
-			if len(raw) > 0 && json.Unmarshal(raw, &msg) == nil && msg.Role != "" {
-				chatMessages = append(chatMessages, msg)
-			}
-		}
-	}
-	for _, result := range results {
-		chatMessages = append(chatMessages, openaiChatMessage{
-			Role:       "tool",
-			Content:    toolResultOutput(result),
-			ToolCallID: result.CallID,
-		})
-	}
+	chatMessages = appendOpenAIChatToolTranscript(chatMessages, c.refProvider(), previous, results)
 	reqBody := openaiChatRequest{
 		Model:    c.cfg.Model,
 		Messages: chatMessages,
@@ -168,6 +154,46 @@ func convertToOpenAIChatMessages(messages []store.Message) ([]openaiChatMessage,
 		out = append(out, openaiChatMessage{Role: m.Role, Content: m.Content})
 	}
 	return out, nil
+}
+
+func appendOpenAIChatToolTranscript(messages []openaiChatMessage, provider string, previous ToolState, results []tooltypes.Result) []openaiChatMessage {
+	byCallID := toolResultsByCallID(results)
+	used := map[string]bool{}
+	if previous.Provider == provider && previous.Endpoint == openAIEndpointChat {
+		for _, raw := range previous.Items {
+			var msg openaiChatMessage
+			if len(raw) == 0 || json.Unmarshal(raw, &msg) != nil || msg.Role == "" {
+				continue
+			}
+			messages = append(messages, msg)
+			for _, toolCall := range msg.ToolCalls {
+				callID := strings.TrimSpace(toolCall.ID)
+				if result, ok := byCallID[callID]; ok {
+					messages = append(messages, openaiChatMessage{
+						Role:       "tool",
+						Content:    toolResultOutput(result),
+						ToolCallID: callID,
+					})
+					used[callID] = true
+				}
+			}
+		}
+	}
+	for _, result := range results {
+		callID := strings.TrimSpace(result.CallID)
+		if callID == "" {
+			callID = strings.TrimSpace(result.Name)
+		}
+		if callID == "" || used[callID] {
+			continue
+		}
+		messages = append(messages, openaiChatMessage{
+			Role:       "tool",
+			Content:    toolResultOutput(result),
+			ToolCallID: callID,
+		})
+	}
+	return messages
 }
 
 func openAIChatTools(tools []tooltypes.Spec) []openaiChatTool {
