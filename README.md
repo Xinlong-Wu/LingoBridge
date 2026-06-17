@@ -187,15 +187,16 @@ summary as another text message.
 ### Feishu
 
 Feishu support uses a self-built app long connection. In 1:1 chats, text and
-rich text messages are processed. In group chats, Feishu delivers messages that
-mention the bot. On startup, LingoBridge resolves the current Feishu bot
-`open_id`; if that lookup fails, the Feishu account does not start. Incoming
-group messages that mention all members are ignored. Other group messages
-remove only mention tokens that target that bot `open_id`, so mentions of other
-users or other bots are preserved. Other incoming mentions are shown to the LLM
-as readable `@Name` text. If the final LLM reply contains a unique `@Name` from
-the triggering message, LingoBridge converts it back to a Feishu mention;
-unmatched or ambiguous names stay as plain text. Incoming
+rich text messages are processed. In group chats, LingoBridge responds only to
+messages that explicitly mention the current bot. On startup, LingoBridge
+resolves the current Feishu bot `open_id`; if that lookup fails, the Feishu
+account does not start. Incoming group messages that mention all members are
+ignored. Other group messages remove only mention tokens that target that bot
+`open_id`, so mentions of other users or other bots are preserved. Other
+incoming mentions are shown to the LLM as readable `@Name` text. If the final
+LLM reply contains a unique `@Name` from the triggering message, LingoBridge
+converts it back to a Feishu mention; unmatched or ambiguous names stay as
+plain text. Incoming
 Feishu rich text (`post`) messages are converted to Markdown before they are
 sent to the LLM; embedded rich text images, media, files, and emoji are
 represented with text placeholders rather than downloaded.

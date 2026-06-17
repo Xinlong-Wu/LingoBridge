@@ -429,7 +429,7 @@ func TestNormalizeGroupMessageWithoutMentionMetadataUsesGroupKey(t *testing.T) {
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
-	if in.UserID != "feishu:group:oc_chat" || in.ReplyToMessageID != "om_message" || in.Text != "hi" {
+	if in.UserID != "feishu:group:oc_chat" || in.ReplyToMessageID != "om_message" || in.Text != "hi" || !in.IsGroup || in.MentionBot {
 		t.Fatalf("incoming = %#v", in)
 	}
 }
@@ -443,7 +443,7 @@ func TestNormalizeGroupMentionStripsMentionKey(t *testing.T) {
 	if !ok {
 		t.Fatal("normalizeEvent returned ok=false")
 	}
-	if in.UserID != "feishu:group:oc_chat" || in.Text != "hello @Alice" {
+	if in.UserID != "feishu:group:oc_chat" || in.Text != "hello @Alice" || !in.MentionBot {
 		t.Fatalf("incoming = %#v", in)
 	}
 	assertMentions(t, in.Mentions, feishuMention{Key: "@_user_1", Name: "Alice", OpenID: "ou_alice"})
@@ -456,6 +456,16 @@ func TestNormalizeTextAllMembersMentionWithoutMetadataMarksMentionAll(t *testing
 	}
 	if !in.MentionAll {
 		t.Fatalf("incoming = %#v, want MentionAll from raw text token", in)
+	}
+}
+
+func TestNormalizeTextAllMembersMentionInMiddleMarksMentionAll(t *testing.T) {
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"hello @_all now"}`, nil), testBotOpenID)
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if !in.MentionAll {
+		t.Fatalf("incoming = %#v, want MentionAll from raw text token in middle", in)
 	}
 }
 
@@ -619,7 +629,27 @@ func TestNormalizePostMessageHandlesMentions(t *testing.T) {
 	if in.UserID != "feishu:group:oc_chat" || in.Text != "hello @Alice" || in.Unsupported {
 		t.Fatalf("incoming = %#v", in)
 	}
+	if !in.MentionBot {
+		t.Fatalf("incoming = %#v, want MentionBot", in)
+	}
 	assertMentions(t, in.Mentions, feishuMention{Name: "Alice", OpenID: "ou_alice"})
+}
+
+func TestNormalizePostBotAtElementMarksMentionBot(t *testing.T) {
+	content := `{
+		"content":[[
+			{"tag":"at","user_name":"LingoBridge","open_id":"ou_bot"},
+			{"tag":"text","text":" hello"}
+		]]
+	}`
+
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "post", content, nil), testBotOpenID)
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if !in.MentionBot || in.Text != "hello" || in.Unsupported {
+		t.Fatalf("incoming = %#v, want bot mention removed and marked", in)
+	}
 }
 
 func TestNormalizePostMentionMetadataDeduplicatesEventAndElement(t *testing.T) {
@@ -763,7 +793,7 @@ func TestHandleAllMembersMentionWithoutMetadataSkipsMessage(t *testing.T) {
 	sender := &fakeSender{}
 	b := &bot{handler: processor, sender: sender, botOpenID: testBotOpenID}
 
-	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"@_all 现在呢"}`, nil)); err != nil {
+	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"前缀 @_all 现在呢"}`, nil)); err != nil {
 		t.Fatalf("handleMessage returned error: %v", err)
 	}
 
@@ -773,6 +803,24 @@ func TestHandleAllMembersMentionWithoutMetadataSkipsMessage(t *testing.T) {
 	snap := sender.snapshot()
 	if snap.called || len(snap.messages) != 0 || len(snap.replyCreates) != 0 || len(snap.reactionAdds) != 0 {
 		t.Fatalf("sender = %#v, want no response for all-members mention without metadata", snap)
+	}
+}
+
+func TestHandleGroupMessageWithoutBotMentionSkipsMessage(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender, botOpenID: testBotOpenID}
+
+	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"hi"}`, nil)); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+
+	if processor.snapshot().called {
+		t.Fatal("processor was called for group message without bot mention")
+	}
+	snap := sender.snapshot()
+	if snap.called || len(snap.messages) != 0 || len(snap.replyCreates) != 0 || len(snap.reactionAdds) != 0 {
+		t.Fatalf("sender = %#v, want no response for group message without bot mention", snap)
 	}
 }
 
@@ -799,9 +847,12 @@ func TestHandleUnsupportedMessageSendsNotice(t *testing.T) {
 func TestHandleGroupUnsupportedMessageRepliesToOriginal(t *testing.T) {
 	processor := &fakeProcessor{}
 	sender := &fakeSender{}
-	b := &bot{handler: processor, sender: sender}
+	b := &bot{handler: processor, sender: sender, botOpenID: testBotOpenID}
+	mentions := []*larkim.MentionEvent{
+		feishuMentionWithName("@_bot_1", "bot", testBotOpenID, "", "LingoBridge"),
+	}
 
-	if err := b.handleMessage(context.Background(), feishuEvent("group", "image", `{}`, nil)); err != nil {
+	if err := b.handleMessage(context.Background(), feishuEvent("group", "image", `{}`, mentions)); err != nil {
 		t.Fatalf("handleMessage returned error: %v", err)
 	}
 	senderSnap := waitForReplyCreates(t, sender, 1)
@@ -851,9 +902,12 @@ func TestHandleTextMessageUsesBridgeAndReplies(t *testing.T) {
 func TestHandleGroupTextMessageRepliesToOriginal(t *testing.T) {
 	processor := &fakeProcessor{}
 	sender := &fakeSender{}
-	b := &bot{handler: processor, sender: sender, tools: []tooltypes.Tool{fakeCoreTool{}}}
+	b := &bot{handler: processor, sender: sender, botOpenID: testBotOpenID, tools: []tooltypes.Tool{fakeCoreTool{}}}
+	mentions := []*larkim.MentionEvent{
+		feishuMentionWithName("@_bot_1", "bot", testBotOpenID, "", "LingoBridge"),
+	}
 
-	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"hi"}`, nil)); err != nil {
+	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"@_bot_1 hi"}`, mentions)); err != nil {
 		t.Fatalf("handleMessage returned error: %v", err)
 	}
 	processorSnap := waitForProcessorCalls(t, processor, 1)
@@ -1310,9 +1364,12 @@ func TestHandleHelpMessagePassesCommandToBridge(t *testing.T) {
 func TestHandleGroupHelpMessageRepliesToOriginal(t *testing.T) {
 	processor := &fakeProcessor{}
 	sender := &fakeSender{}
-	b := &bot{handler: processor, sender: sender}
+	b := &bot{handler: processor, sender: sender, botOpenID: testBotOpenID}
+	mentions := []*larkim.MentionEvent{
+		feishuMentionWithName("@_bot_1", "bot", testBotOpenID, "", "LingoBridge"),
+	}
 
-	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"/help"}`, nil)); err != nil {
+	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"@_bot_1 /help"}`, mentions)); err != nil {
 		t.Fatalf("handleMessage returned error: %v", err)
 	}
 	processorSnap := waitForProcessorCalls(t, processor, 1)
@@ -1328,6 +1385,23 @@ func TestHandleGroupHelpMessageRepliesToOriginal(t *testing.T) {
 	}
 	if len(senderSnap.messages) != 0 {
 		t.Fatalf("messages = %#v, want no plain sends", senderSnap.messages)
+	}
+}
+
+func TestHandleGroupHelpMessageWithoutBotMentionSkipsMessage(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender, botOpenID: testBotOpenID}
+
+	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"/help"}`, nil)); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+
+	if processor.snapshot().called {
+		t.Fatal("processor was called for group slash command without bot mention")
+	}
+	if snap := sender.snapshot(); snap.called || len(snap.messages) != 0 || len(snap.replyCreates) != 0 || len(snap.reactionAdds) != 0 {
+		t.Fatalf("sender = %#v, want no response for group slash command without bot mention", snap)
 	}
 }
 

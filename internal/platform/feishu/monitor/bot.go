@@ -116,6 +116,10 @@ func (b *bot) handleMessage(ctx context.Context, event *larkim.P2MessageReceiveV
 		feishuLog.Debug(ctx, "feishu message ignored because it mentions all members chat=%s message=%s event=%s", in.ChatID, in.MessageID, feishuEventID(event))
 		return nil
 	}
+	if in.IsGroup && !in.MentionBot {
+		feishuLog.Debug(ctx, "feishu group message ignored because it does not mention the bot chat=%s message=%s event=%s", in.ChatID, in.MessageID, feishuEventID(event))
+		return nil
+	}
 	dedupeKey := feishuDedupeKey(event)
 	if dedupeKey == "" {
 		feishuLog.Warn(ctx, "feishu message missing dedupe key; processing without dedupe")

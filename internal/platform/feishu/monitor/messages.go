@@ -48,6 +48,8 @@ type incomingMessage struct {
 	Text             string
 	Mentions         []feishuMention
 	MentionAll       bool
+	IsGroup          bool
+	MentionBot       bool
 	Unsupported      bool
 }
 
@@ -71,6 +73,7 @@ type mentionCatalog struct {
 	mentionsByKey       map[string]feishuMention
 	mentions            []feishuMention
 	mentionAll          bool
+	botMentioned        bool
 }
 
 func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1, botOpenID string) (incomingMessage, bool) {
@@ -94,10 +97,11 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1, botOp
 	}
 
 	chatType := deref(msg.ChatType)
+	isGroup := chatType != "p2p"
 
 	userKey := "feishu:" + senderID
 	replyToMessageID := ""
-	if chatType != "p2p" {
+	if isGroup {
 		userKey = "feishu:group:" + chatID
 		replyToMessageID = messageID
 	}
@@ -111,13 +115,13 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1, botOp
 	case "post":
 		text, err = extractPostMarkdown(deref(msg.Content), mentions, botOpenID)
 	default:
-		return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), MentionAll: mentions.mentionsAll(), Unsupported: true}, true
+		return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), MentionAll: mentions.mentionsAll(), IsGroup: isGroup, MentionBot: mentions.mentionsBot(), Unsupported: true}, true
 	}
 	if err != nil {
 		feishuLog.Warn(ctx, "parse %s message: %v", deref(msg.MessageType), err)
-		return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), MentionAll: mentions.mentionsAll(), Unsupported: true}, true
+		return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), MentionAll: mentions.mentionsAll(), IsGroup: isGroup, MentionBot: mentions.mentionsBot(), Unsupported: true}, true
 	}
-	return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Text: text, Mentions: mentions.list(), MentionAll: mentions.mentionsAll()}, true
+	return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Text: text, Mentions: mentions.list(), MentionAll: mentions.mentionsAll(), IsGroup: isGroup, MentionBot: mentions.mentionsBot()}, true
 }
 
 func extractText(raw string, mentions *mentionCatalog) (string, error) {
@@ -163,6 +167,7 @@ func newMentionCatalog(mentions []*larkim.MentionEvent, botOpenID string) *menti
 			continue
 		}
 		if botOpenID != "" && mentionBotOpenID(mention) == botOpenID {
+			c.markBotMentioned()
 			c.addBotKey(deref(mention.Key))
 			continue
 		}
@@ -201,6 +206,16 @@ func (c *mentionCatalog) markMentionAll() {
 
 func (c *mentionCatalog) mentionsAll() bool {
 	return c != nil && c.mentionAll
+}
+
+func (c *mentionCatalog) markBotMentioned() {
+	if c != nil {
+		c.botMentioned = true
+	}
+}
+
+func (c *mentionCatalog) mentionsBot() bool {
+	return c != nil && c.botMentioned
 }
 
 func (c *mentionCatalog) addMention(mention feishuMention) {
@@ -341,6 +356,7 @@ func renderPostElement(element postElement, mentions *mentionCatalog, botOpenID 
 			return ""
 		}
 		if isBotPostAt(element, mentions, botOpenID) {
+			mentions.markBotMentioned()
 			return ""
 		}
 		mention := postElementMention(element, mentions)
