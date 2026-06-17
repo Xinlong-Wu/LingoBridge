@@ -449,6 +449,16 @@ func TestNormalizeGroupMentionStripsMentionKey(t *testing.T) {
 	assertMentions(t, in.Mentions, feishuMention{Key: "@_user_1", Name: "Alice", OpenID: "ou_alice"})
 }
 
+func TestNormalizeTextAllMembersMentionWithoutMetadataMarksMentionAll(t *testing.T) {
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "text", `{"text":"@_all 现在呢"}`, nil), testBotOpenID)
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if !in.MentionAll {
+		t.Fatalf("incoming = %#v, want MentionAll from raw text token", in)
+	}
+}
+
 func TestNormalizeTextMentionMetadataDeduplicatesByOpenID(t *testing.T) {
 	mentions := []*larkim.MentionEvent{
 		feishuMentionWithName("@_user_1", "user", "ou_alice", "", "Alice"),
@@ -669,6 +679,26 @@ func TestNormalizePostMessageKeepsOtherBotMention(t *testing.T) {
 	}
 }
 
+func TestNormalizePostAllMembersMentionMarksMentionAll(t *testing.T) {
+	content := `{
+		"title":"测试富文本",
+		"content":[[
+			{"tag":"text","text":"富文本呢","style":["bold"]}
+		],[
+			{"tag":"at","user_id":"@_all","user_name":"所有人","style":[]},
+			{"tag":"text","text":"","style":[]}
+		]]
+	}`
+
+	in, ok := normalizeEvent(context.Background(), feishuEvent("group", "post", content, nil), testBotOpenID)
+	if !ok {
+		t.Fatal("normalizeEvent returned ok=false")
+	}
+	if !in.MentionAll || in.Text != "# 测试富文本\n\n**富文本呢**" || in.Unsupported {
+		t.Fatalf("incoming = %#v, want all-members mention marked and removed from text", in)
+	}
+}
+
 func TestNormalizeMalformedPostMarksUnsupported(t *testing.T) {
 	in, ok := normalizeEvent(context.Background(), feishuEvent("p2p", "post", `{`, nil), testBotOpenID)
 	if !ok {
@@ -703,6 +733,46 @@ func TestHandleMessageLogsReceivedMetadata(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("log output = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestHandleAllMembersMentionSkipsMessage(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender, botOpenID: testBotOpenID}
+	mentions := []*larkim.MentionEvent{
+		feishuMentionWithName("@_bot_1", "bot", testBotOpenID, "", "LingoBridge"),
+		feishuMentionWithName("@_all_1", "all", "", "", "所有人"),
+	}
+
+	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"@_bot_1 @_all_1 hello"}`, mentions)); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+
+	if processor.snapshot().called {
+		t.Fatal("processor was called for all-members mention")
+	}
+	snap := sender.snapshot()
+	if snap.called || len(snap.messages) != 0 || len(snap.replyCreates) != 0 || len(snap.reactionAdds) != 0 {
+		t.Fatalf("sender = %#v, want no response for all-members mention", snap)
+	}
+}
+
+func TestHandleAllMembersMentionWithoutMetadataSkipsMessage(t *testing.T) {
+	processor := &fakeProcessor{}
+	sender := &fakeSender{}
+	b := &bot{handler: processor, sender: sender, botOpenID: testBotOpenID}
+
+	if err := b.handleMessage(context.Background(), feishuEvent("group", "text", `{"text":"@_all 现在呢"}`, nil)); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+
+	if processor.snapshot().called {
+		t.Fatal("processor was called for all-members mention without metadata")
+	}
+	snap := sender.snapshot()
+	if snap.called || len(snap.messages) != 0 || len(snap.replyCreates) != 0 || len(snap.reactionAdds) != 0 {
+		t.Fatalf("sender = %#v, want no response for all-members mention without metadata", snap)
 	}
 }
 

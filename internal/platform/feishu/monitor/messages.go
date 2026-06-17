@@ -47,6 +47,7 @@ type incomingMessage struct {
 	ReplyToMessageID string
 	Text             string
 	Mentions         []feishuMention
+	MentionAll       bool
 	Unsupported      bool
 }
 
@@ -69,6 +70,7 @@ type mentionCatalog struct {
 	mentionReplacements map[string]string
 	mentionsByKey       map[string]feishuMention
 	mentions            []feishuMention
+	mentionAll          bool
 }
 
 func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1, botOpenID string) (incomingMessage, bool) {
@@ -109,19 +111,22 @@ func normalizeEvent(ctx context.Context, event *larkim.P2MessageReceiveV1, botOp
 	case "post":
 		text, err = extractPostMarkdown(deref(msg.Content), mentions, botOpenID)
 	default:
-		return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), Unsupported: true}, true
+		return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), MentionAll: mentions.mentionsAll(), Unsupported: true}, true
 	}
 	if err != nil {
 		feishuLog.Warn(ctx, "parse %s message: %v", deref(msg.MessageType), err)
-		return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), Unsupported: true}, true
+		return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Mentions: mentions.list(), MentionAll: mentions.mentionsAll(), Unsupported: true}, true
 	}
-	return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Text: text, Mentions: mentions.list()}, true
+	return incomingMessage{UserID: userKey, SenderOpenID: senderOpenID, SenderUserID: senderUserID, ChatID: chatID, MessageID: messageID, ReplyToMessageID: replyToMessageID, Text: text, Mentions: mentions.list(), MentionAll: mentions.mentionsAll()}, true
 }
 
 func extractText(raw string, mentions *mentionCatalog) (string, error) {
 	var content textContent
 	if err := json.Unmarshal([]byte(raw), &content); err != nil {
 		return "", err
+	}
+	if textContainsAllMembersMentionKey(content.Text) {
+		mentions.markMentionAll()
 	}
 	return strings.TrimSpace(mentions.replaceKeys(content.Text)), nil
 }
@@ -186,6 +191,16 @@ func (c *mentionCatalog) addBotKey(key string) {
 		}
 		c.botKeys[key] = true
 	}
+}
+
+func (c *mentionCatalog) markMentionAll() {
+	if c != nil {
+		c.mentionAll = true
+	}
+}
+
+func (c *mentionCatalog) mentionsAll() bool {
+	return c != nil && c.mentionAll
 }
 
 func (c *mentionCatalog) addMention(mention feishuMention) {
@@ -321,6 +336,10 @@ func renderPostElement(element postElement, mentions *mentionCatalog, botOpenID 
 		}
 		return applyPostStyles("["+text+"]("+href+")", element.Style)
 	case "at":
+		if isAllMembersPostAt(element) {
+			mentions.markMentionAll()
+			return ""
+		}
 		if isBotPostAt(element, mentions, botOpenID) {
 			return ""
 		}
@@ -351,6 +370,76 @@ func renderPostElement(element postElement, mentions *mentionCatalog, botOpenID 
 	default:
 		return "[富文本元素:" + tag + "]"
 	}
+}
+
+func isAllMembersPostAt(element postElement) bool {
+	if isAllMembersMentionType(element.MentionedType) {
+		return true
+	}
+	if isAllMembersTextKey(element.UserID) || isAllMembersTextKey(element.OpenID) {
+		return true
+	}
+	if element.OpenID != "" || element.UserID != "" {
+		return false
+	}
+	return isAllMembersPostToken(element.Key) ||
+		isAllMembersPostToken(element.Text) ||
+		isAllMembersPostToken(firstNonEmpty(element.Name, element.UserName))
+}
+
+func isAllMembersMentionType(value string) bool {
+	switch normalizeAllMembersMentionToken(value) {
+	case "all", "all_members", "at_all":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAllMembersTextKey(value string) bool {
+	value = normalizeAllMembersMentionToken(value)
+	return value == "_all" || strings.HasPrefix(value, "_all_")
+}
+
+func isAllMembersPostToken(value string) bool {
+	value = normalizeAllMembersMentionToken(value)
+	return value == "所有人" || value == "全体成员" || isAllMembersTextKey(value)
+}
+
+func textContainsAllMembersMentionKey(text string) bool {
+	for i := 0; i < len(text); {
+		r, size := utf8.DecodeRuneInString(text[i:])
+		if r != '@' {
+			i += size
+			continue
+		}
+		if !mentionStartBoundary(text, i) {
+			i += size
+			continue
+		}
+		end := i + size
+		for end < len(text) {
+			next, nextSize := utf8.DecodeRuneInString(text[end:])
+			if unicode.IsSpace(next) || ((unicode.IsPunct(next) || unicode.IsSymbol(next)) && next != '_') {
+				break
+			}
+			end += nextSize
+		}
+		if isAllMembersTextKey(text[i:end]) {
+			return true
+		}
+		i = end
+	}
+	return false
+}
+
+func normalizeAllMembersMentionToken(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.TrimPrefix(value, "@")
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, " ", "")
+	value = strings.ReplaceAll(value, "\u00a0", "")
+	return value
 }
 
 func isBotPostAt(element postElement, mentions *mentionCatalog, botOpenID string) bool {
