@@ -342,9 +342,9 @@ repositories for open pull requests. Draft PRs are skipped. A PR is reviewed
 when it first appears or when its `head.sha` changes; unchanged PRs are tracked
 through the platform `sync_cursors` buffer and are not reviewed again.
 
-Review instructions are read from `.github/review_instructions.md`: first from
-the base repository at the PR base SHA, then from the head repository at the PR
-head SHA only if the base file is missing. If both files are missing and
+Review instructions are read only from `.github/review_instructions.md` in the
+base repository at the PR base SHA. Instructions from the head branch are never
+trusted or used as fallback. If the base file is missing and
 `platforms.github.accounts.<name>.review.default_instructions` is configured,
 that default text is used for the review. If no default is configured, that PR
 SHA is marked `missing_instructions` and retried only after the head SHA
@@ -360,13 +360,38 @@ injects `GITHUB_HOST` from `web_url`.
 The GitHub platform wraps configured MCP tools with PR-review guards. Tool calls
 must target the current PR. File reads are limited to the current base/head
 repositories and current PR base/head SHA or branch refs, including
-`refs/pull/<number>/head` on the base repository. Full PR diff reads may be used
+`refs/pull/<number>/head` on the base repository, and callers must not pass both
+`sha` and `ref`. Pull request reads are limited to `get`, `get_diff`,
+`get_files`, `get_status`, and `get_check_runs`; comment, commit, historical
+review, and review-comment reads are rejected. Full PR diff reads may be used
 for small PRs; if GitHub reports the diff is too large, automated review should
-switch to paginated PR file reads. Review writes can only create a pending
-review without an event, add inline comments to that pending review, and submit
-that review once as `COMMENT`. Approvals, request-changes reviews, thread
-resolution, PR updates, branch updates, merges, and repository writes are
-rejected before reaching the MCP server.
+switch to paginated PR file reads starting with a small page size such as 30 or
+50. Review writes can only create a pending review without an event, add inline
+comments to that pending review, and submit that review once as `COMMENT`.
+Approvals, request-changes reviews, thread resolution, PR updates, branch
+updates, merges, and repository writes are rejected before reaching the MCP
+server.
+
+Automated GitHub reviews use a dedicated review system prompt. Trusted review
+instructions come only from the base-repo file above or from the configured
+default; PR metadata, title/body, diffs, changed files, and tool output are
+treated as untrusted context. PR title/body text is lightly sanitized before it
+is placed in the prompt: hidden HTML comments/attributes, invisible/control
+characters, markdown image alt text, markdown link titles, and GitHub token-like
+strings are removed or redacted.
+
+The review flow is deliberately high signal: gather PR context, triage changed
+files by risk, check correctness/regressions, security, performance/resource
+handling, test coverage, and documentation/config accuracy, then publish only
+actionable findings that are worth showing. If there are no actionable findings,
+the bot still submits a `COMMENT` review summary such as
+`No actionable issues found.` If tool failures or timeouts prevent meaningful
+diff inspection, the bot does not submit a GitHub review and does not mark the
+PR SHA as reviewed.
+
+Global MCP servers are not merged into automated GitHub reviews. Each review
+uses only the per-review GitHub MCP host from the account configuration and the
+guarded tools exposed for the current PR.
 
 ## Configuration
 
@@ -407,7 +432,7 @@ rejected before reaching the MCP server.
 | `platforms.github.accounts.<name>.review.max_tool_calls` | `30` | Tool-call limit for one automated PR review |
 | `platforms.github.accounts.<name>.review.tool_timeout` | `30s` | Per-tool timeout for one automated PR review |
 | `platforms.github.accounts.<name>.review.tool_result_limit` | `60000` | Maximum tool result characters returned to the LLM per call |
-| `platforms.github.accounts.<name>.review.default_instructions` | — | Optional default review instructions used only when `.github/review_instructions.md` is missing from both base and head |
+| `platforms.github.accounts.<name>.review.default_instructions` | — | Optional default review instructions used only when `.github/review_instructions.md` is missing from the base repository at the PR base SHA |
 | `platforms.github.accounts.<name>.mcp.command` | — | Required command used to start the per-review GitHub MCP server |
 | `platforms.github.accounts.<name>.mcp.args` | — | Required arguments for the per-review GitHub MCP server; include explicit `--tools=...` |
 | `platforms.github.accounts.<name>.mcp.env` | `{}` | Extra MCP server environment variables; GitHub tokens are injected automatically and should not be configured here |

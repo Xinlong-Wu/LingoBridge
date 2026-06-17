@@ -18,8 +18,19 @@ var allowedReviewRemoteTools = map[string]bool{
 	"add_comment_to_pending_review": true,
 }
 
+var allowedReviewReadMethods = map[string]bool{
+	"get":            true,
+	"get_diff":       true,
+	"get_files":      true,
+	"get_status":     true,
+	"get_check_runs": true,
+}
+
+var allowedReviewReadMethodList = []string{"get", "get_diff", "get_files", "get_status", "get_check_runs"}
+
 type reviewGuardState struct {
 	SubmittedComment bool
+	WriteAttempted   bool
 }
 
 type guardedTool struct {
@@ -68,6 +79,8 @@ func githubRemoteToolName(exposed string) (string, bool) {
 func (t guardedTool) Spec() tooltypes.Spec {
 	spec := t.inner.Spec()
 	switch t.remote {
+	case "pull_request_read":
+		spec.Parameters = restrictPullRequestReadSchema(spec.Parameters)
 	case "get_file_contents":
 		spec.Description = appendGetFileContentsGuardDescription(spec.Description, t.pr)
 	case "pull_request_review_write":
@@ -89,6 +102,9 @@ func (t guardedTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes
 		return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: fmt.Sprintf("marshal guarded tool args: %v", err), IsError: true}
 	}
 	call.Arguments = data
+	if t.state != nil && (t.remote == "pull_request_review_write" || t.remote == "add_comment_to_pending_review") {
+		t.state.WriteAttempted = true
+	}
 	result := t.inner.Execute(ctx, call)
 	if t.remote == "pull_request_review_write" && isCommentSubmit(args) && !result.IsError && t.state != nil {
 		t.state.SubmittedComment = true
@@ -99,7 +115,7 @@ func (t guardedTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes
 func (t guardedTool) validateAndMutate(args map[string]any) error {
 	switch t.remote {
 	case "pull_request_read":
-		return validateBasePRArgs(args, t.pr)
+		return validatePullRequestReadArgs(args, t.pr)
 	case "get_file_contents":
 		return validateFileContentsArgs(args, t.pr)
 	case "pull_request_review_write":
@@ -147,6 +163,21 @@ func validateBasePRArgs(args map[string]any, pr PullRequest) error {
 	return nil
 }
 
+func validatePullRequestReadArgs(args map[string]any, pr PullRequest) error {
+	if err := validateBasePRArgs(args, pr); err != nil {
+		return err
+	}
+	method, ok := stringArg(args, "method")
+	if !ok {
+		return fmt.Errorf("method is required")
+	}
+	method = strings.TrimSpace(method)
+	if !allowedReviewReadMethods[method] {
+		return fmt.Errorf("pull_request_read method %q is not allowed for automated PR review", method)
+	}
+	return nil
+}
+
 func validateFileContentsArgs(args map[string]any, pr PullRequest) error {
 	owner, ok := stringArg(args, "owner")
 	if !ok {
@@ -164,6 +195,8 @@ func validateFileContentsArgs(args map[string]any, pr PullRequest) error {
 	sha, hasSHA := stringArg(args, "sha")
 	ref, hasRef := stringArg(args, "ref")
 	switch {
+	case hasSHA && hasRef:
+		return fmt.Errorf("get_file_contents must not include both sha and ref")
 	case hasSHA:
 		if !allowedReviewSHA(sha, pr) {
 			return fmt.Errorf("get_file_contents sha must be current PR base or head SHA")
@@ -310,6 +343,15 @@ func appendGetFileContentsGuardDescription(description string, pr PullRequest) s
 		pr.Base.Ref, pr.Head.Ref, pr.Number)
 	b.WriteString("If neither sha nor ref is provided, the guard defaults to the current head SHA.")
 	return b.String()
+}
+
+func restrictPullRequestReadSchema(raw json.RawMessage) json.RawMessage {
+	return restrictSchema(raw, map[string]schemaPropertyPatch{
+		"method": {
+			Enum:        allowedReviewReadMethodList,
+			Description: "Pull request read operation allowed by LingoBridge automated review. Comments, commits, review comments, and historical reviews are not allowed.",
+		},
+	})
 }
 
 func restrictReviewWriteSchema(raw json.RawMessage) json.RawMessage {

@@ -96,6 +96,7 @@ type fakeLLM struct {
 	prepareErr      error
 	streamChunks    []string
 	streamErr       error
+	systemPrompts   []string
 }
 
 func (f *fakeLLM) PrepareUserMessage(content string, attachments []llm.InputAttachment) (store.Message, error) {
@@ -113,6 +114,7 @@ func (f *fakeLLM) Chat(systemPrompt string, messages []store.Message) (llm.Respo
 func (f *fakeLLM) ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (llm.Response, error) {
 	f.called = true
 	f.messages = messages
+	f.systemPrompts = append(f.systemPrompts, systemPrompt)
 	for _, chunk := range f.streamChunks {
 		if onChunk != nil {
 			if err := onChunk(chunk); err != nil {
@@ -476,6 +478,39 @@ func TestHandleTextRunsToolsAndSavesTrace(t *testing.T) {
 	}
 }
 
+func TestHandleTextSystemPromptSuffixReachesToolsAndMessages(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{finalText: "done"}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:            "u1",
+		LLMText:            "review",
+		SystemPromptSuffix: "GitHub review policy",
+		Tools:              []tooltypes.Tool{&fakeTool{}},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(llmClient.systemPrompts) != 1 {
+		t.Fatalf("system prompts = %d, want 1", len(llmClient.systemPrompts))
+	}
+	for _, want := range []string{"system", "GitHub review policy"} {
+		if !strings.Contains(llmClient.systemPrompts[0], want) {
+			t.Fatalf("tool system prompt = %q, want %q", llmClient.systemPrompts[0], want)
+		}
+	}
+	if len(llmClient.messages) == 0 || llmClient.messages[0].Role != "system" {
+		t.Fatalf("messages = %#v, want first system message", llmClient.messages)
+	}
+	for _, want := range []string{"system", "GitHub review policy"} {
+		if !strings.Contains(llmClient.messages[0].Content, want) {
+			t.Fatalf("message system prompt = %q, want %q", llmClient.messages[0].Content, want)
+		}
+	}
+}
+
 func TestHandleTextRunsToolProviderTools(t *testing.T) {
 	sessions := &fakeSessions{}
 	llmClient := &fakeToolLLM{
@@ -515,6 +550,55 @@ func TestHandleTextRunsToolProviderTools(t *testing.T) {
 	}
 	if len(provider.scopes) != 1 || provider.scopes[0].Platform != "feishu" || provider.scopes[0].AccountID != "feishu:cli_xxx" || provider.scopes[0].AccountName != "admin-bot" {
 		t.Fatalf("provider scopes = %#v, want feishu admin-bot scope", provider.scopes)
+	}
+}
+
+func TestHandleTextDisableProviderToolsUsesMessageToolsOnly(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		calls: []tooltypes.Call{{
+			ID:        "call_1",
+			Name:      "platform_tool",
+			Arguments: json.RawMessage(`{}`),
+		}},
+		finalText: "answer with platform tool",
+	}
+	platformTool := &fakeTool{
+		spec:   tooltypes.Spec{Name: "platform_tool", Description: "Platform tool"},
+		result: "ok",
+	}
+	providerTool := &fakeTool{
+		spec:   tooltypes.Spec{Name: "provider_tool", Description: "Provider tool"},
+		result: "provider",
+	}
+	provider := &fakeToolProvider{tools: []tooltypes.Tool{providerTool}}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+	bot.ToolProvider = provider
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		Platform:             "github",
+		AccountID:            "github:reviewer",
+		AccountName:          "reviewer",
+		UserKey:              "u1",
+		LLMText:              "review",
+		Tools:                []tooltypes.Tool{platformTool},
+		DisableProviderTools: true,
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(provider.scopes) != 0 {
+		t.Fatalf("provider scopes = %#v, want provider not resolved", provider.scopes)
+	}
+	if len(platformTool.calls) != 1 {
+		t.Fatalf("platform tool calls = %#v, want one call", platformTool.calls)
+	}
+	if len(providerTool.calls) != 0 {
+		t.Fatalf("provider tool calls = %#v, want none", providerTool.calls)
+	}
+	if len(llmClient.toolSpecs) != 1 || llmClient.toolSpecs[0].Name != "platform_tool" {
+		t.Fatalf("tool specs = %#v, want only platform_tool", llmClient.toolSpecs)
 	}
 }
 

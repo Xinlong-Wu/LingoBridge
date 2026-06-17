@@ -40,20 +40,22 @@ type TextStream interface {
 }
 
 type InboundMessage struct {
-	Platform           string
-	AccountID          string
-	AccountName        string
-	UserKey            string
-	CommandText        string
-	CommandPolicy      commands.Policy
-	LLMText            string
-	PrepareUserMessage PrepareUserMessageFunc
-	PrepareErrorNotice func(error) string
-	MutateResponse     ResponseMutator
-	ErrorNotice        func(error) string
-	Metadata           map[string]string
-	Tools              []tooltypes.Tool
-	ToolOptions        tooltypes.Options
+	Platform             string
+	AccountID            string
+	AccountName          string
+	UserKey              string
+	CommandText          string
+	CommandPolicy        commands.Policy
+	LLMText              string
+	SystemPromptSuffix   string
+	PrepareUserMessage   PrepareUserMessageFunc
+	PrepareErrorNotice   func(error) string
+	MutateResponse       ResponseMutator
+	ErrorNotice          func(error) string
+	Metadata             map[string]string
+	Tools                []tooltypes.Tool
+	ToolOptions          tooltypes.Options
+	DisableProviderTools bool
 }
 
 type OutboundMessage struct {
@@ -126,6 +128,10 @@ func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) err
 
 func (b *Bot) resolveToolsForMessage(ctx context.Context, msg InboundMessage) tooltypes.Selection {
 	var providerSelection tooltypes.Selection
+	if msg.DisableProviderTools {
+		coreLog.Debug(ctx, "provider tools disabled platform=%s account=%s platform_tools=%d", msg.Platform, msg.AccountName, len(msg.Tools))
+		return tooltypes.Selection{Tools: mergeTools(ctx, msg.Tools, nil), Options: msg.ToolOptions}
+	}
 	if b.ToolProvider != nil {
 		providerSelection = b.ToolProvider.Resolve(tooltypes.Scope{
 			Platform:    msg.Platform,
@@ -138,6 +144,18 @@ func (b *Bot) resolveToolsForMessage(ctx context.Context, msg InboundMessage) to
 		coreLog.Debug(ctx, "merged tools platform=%d provider=%d effective=%d", len(msg.Tools), len(providerSelection.Tools), len(tools))
 	}
 	return tooltypes.Selection{Tools: tools, Options: mergeToolOptions(providerSelection.Options, msg.ToolOptions)}
+}
+
+func effectiveSystemPrompt(base, suffix string) string {
+	suffix = strings.TrimSpace(suffix)
+	if suffix == "" {
+		return base
+	}
+	base = strings.TrimRight(base, "\n")
+	if strings.TrimSpace(base) == "" {
+		return suffix
+	}
+	return base + "\n\n" + suffix
 }
 
 func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, toolOptions tooltypes.Options) error {
@@ -155,6 +173,7 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 		return err
 	}
 	modelName, provider := model.Name, model.Provider
+	systemPrompt := effectiveSystemPrompt(b.LLMConfig.SystemPrompt, msg.SystemPromptSuffix)
 
 	userMsg, err := b.prepareUserMessage(ctx, msg, sess.ID, llmClient)
 	if err != nil {
@@ -186,7 +205,7 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 	compactAllowed := automaticCompactAllowed(compact)
 	if compactAllowed {
 		var compactErr error
-		historyForRequest, providerContext, preCompacted, compactErr = b.prepareNativeContext(b.LLMConfig.SystemPrompt, historyForRequest, userMsg, providerContext, compact, llmClient, func(compactedMessages, retainedMessages int) {
+		historyForRequest, providerContext, preCompacted, compactErr = b.prepareNativeContext(systemPrompt, historyForRequest, userMsg, providerContext, compact, llmClient, func(compactedMessages, retainedMessages int) {
 			preCompactNotice = CompactNotice{
 				ModelName:         modelName,
 				Manual:            false,
@@ -202,7 +221,7 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 		}
 	}
 
-	msgs := ToLLMMessagesWithUserMessage(b.LLMConfig.SystemPrompt, &store.Conversation{Messages: historyForRequest}, userMsg, b.LLMConfig.MaxHistory)
+	msgs := ToLLMMessagesWithUserMessage(systemPrompt, &store.Conversation{Messages: historyForRequest}, userMsg, b.LLMConfig.MaxHistory)
 
 	var textStream *replyTextStream
 	if b.EnableTextStreaming {
@@ -222,13 +241,13 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 	var toolTraces []store.ToolTrace
 	if len(msg.Tools) > 0 {
 		if toolClient, ok := llmClient.(llm.ToolCallingClient); ok {
-			llmResponse, toolTraces, err = b.chatWithTools(ctx, toolClient, b.LLMConfig.SystemPrompt, msgs, providerContext, compact, compactAllowed, msg.Tools, toolOptions, onChunk)
+			llmResponse, toolTraces, err = b.chatWithTools(ctx, toolClient, systemPrompt, msgs, providerContext, compact, compactAllowed, msg.Tools, toolOptions, onChunk)
 		} else {
 			coreLog.Warn(ctx, "model provider=%s model=%s does not support tool calling; continuing without tools", provider, modelName)
-			llmResponse, err = b.chatWithoutTools(llmClient, compactAllowed, providerContext, compact, msgs, onChunk)
+			llmResponse, err = b.chatWithoutTools(llmClient, systemPrompt, compactAllowed, providerContext, compact, msgs, onChunk)
 		}
 	} else {
-		llmResponse, err = b.chatWithoutTools(llmClient, compactAllowed, providerContext, compact, msgs, onChunk)
+		llmResponse, err = b.chatWithoutTools(llmClient, systemPrompt, compactAllowed, providerContext, compact, msgs, onChunk)
 	}
 	stopTyping()
 	if err != nil {
@@ -313,13 +332,13 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 	return nil
 }
 
-func (b *Bot) chatWithoutTools(client llm.Client, compactAllowed bool, providerContext store.ProviderContext, compact llm.CompactConfig, msgs []store.Message, onChunk func(string) error) (llm.Response, error) {
+func (b *Bot) chatWithoutTools(client llm.Client, systemPrompt string, compactAllowed bool, providerContext store.ProviderContext, compact llm.CompactConfig, msgs []store.Message, onChunk func(string) error) (llm.Response, error) {
 	if compactAllowed {
 		if contextClient, ok := client.(llm.ContextStreamingClient); ok {
-			return contextClient.ChatStreamWithContext(b.LLMConfig.SystemPrompt, msgs, providerContext, compact, onChunk)
+			return contextClient.ChatStreamWithContext(systemPrompt, msgs, providerContext, compact, onChunk)
 		}
 	}
-	return client.ChatStream(b.LLMConfig.SystemPrompt, msgs, onChunk)
+	return client.ChatStream(systemPrompt, msgs, onChunk)
 }
 
 func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, systemPrompt string, msgs []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, compactAllowed bool, tools []tooltypes.Tool, options tooltypes.Options, onChunk func(string) error) (llm.Response, []store.ToolTrace, error) {
@@ -330,7 +349,7 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 		if !ok {
 			return llm.Response{}, nil, fmt.Errorf("tool-capable client does not implement base chat")
 		}
-		resp, err := b.chatWithoutTools(baseClient, compactAllowed, providerContext, compact, msgs, onChunk)
+		resp, err := b.chatWithoutTools(baseClient, systemPrompt, compactAllowed, providerContext, compact, msgs, onChunk)
 		return resp, nil, err
 	}
 

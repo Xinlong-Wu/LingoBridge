@@ -84,12 +84,6 @@ func (c *githubClient) ReviewInstructions(ctx context.Context, pr PullRequest) (
 	} else if !errors.Is(err, ErrNotFound) {
 		return ReviewInstructions{}, false, err
 	}
-
-	if text, err := c.GetFileContents(ctx, pr.Head.Repo, reviewInstructionsPath, pr.Head.SHA); err == nil {
-		return ReviewInstructions{Text: text, Source: fmt.Sprintf("%s@%s:%s", pr.Head.Repo.FullName(), shortSHA(pr.Head.SHA), reviewInstructionsPath)}, true, nil
-	} else if !errors.Is(err, ErrNotFound) {
-		return ReviewInstructions{}, false, err
-	}
 	return ReviewInstructions{}, false, nil
 }
 
