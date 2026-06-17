@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -315,6 +316,10 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 	}
 	stopTyping()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			coreLog.Warn(ctx, "reply canceled provider=%s model=%s: %v", provider, modelName, err)
+			return err
+		}
 		coreLog.Error(ctx, "LLM error provider=%s model=%s: %v", provider, modelName, err)
 		notice := b.errorNotice(msg, err)
 		if textStream != nil && textStream.Started() {
@@ -436,6 +441,9 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, p
 	}
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return llm.Response{}, traces, err
+		}
 		turnSystemPrompt := toolBudgetSystemPrompt(systemPrompt, maxCalls, pendingBudgetReminder, pendingBudgetRemaining)
 		pendingBudgetReminder = toolBudgetReminderNone
 		resp, err := retryLLMTurn(ctx, provider, modelName, "tool_turn", onChunk, func(attemptOnChunk func(string) error) (llm.ToolResponse, error) {
@@ -458,12 +466,20 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, p
 		results = results[:0]
 		coreLog.Debug(ctx, "model requested tool calls count=%d total_before=%d", len(resp.ToolCalls), totalCalls)
 		for _, call := range resp.ToolCalls {
+			if err := ctx.Err(); err != nil {
+				return llm.Response{}, traces, err
+			}
 			call.Name = strings.TrimSpace(call.Name)
 			if _, ok := lookup[call.Name]; !ok {
 				coreLog.Warn(ctx, "model requested unavailable tool name=%s call_id=%s", call.Name, call.ID)
 			}
 			totalCalls++
-			result, trace := runTool(ctx, lookup[call.Name], call, options.Timeout, options.ResultLimit)
+			result, trace, toolErr := runTool(ctx, lookup[call.Name], call, options.Timeout, options.ResultLimit)
+			if toolErr != nil {
+				traces = append(traces, trace)
+				coreLog.Warn(ctx, "tool loop canceled name=%s call_id=%s duration_ms=%d error=%s", trace.Name, trace.CallID, trace.DurationMillis, truncateText(trace.Error, defaultToolTraceTextLimit))
+				return llm.Response{}, traces, toolErr
+			}
 			results = append(results, result)
 			traces = append(traces, trace)
 			if trace.Status == "error" {

@@ -177,7 +177,7 @@ func commandName(text string) string {
 	return parts[0]
 }
 
-func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, timeout time.Duration, resultLimit int) (tooltypes.Result, store.ToolTrace) {
+func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, timeout time.Duration, resultLimit int) (tooltypes.Result, store.ToolTrace, error) {
 	if timeout <= 0 {
 		timeout = defaultToolTimeout
 	}
@@ -193,6 +193,19 @@ func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, time
 		Arguments: summarizeJSON(call.Arguments, defaultToolTraceTextLimit),
 	}
 
+	if err := ctx.Err(); err != nil {
+		result := tooltypes.Result{
+			CallID:  call.ID,
+			Name:    call.Name,
+			Content: err.Error(),
+			IsError: true,
+		}
+		trace.Status = "error"
+		trace.Error = result.Content
+		trace.DurationMillis = time.Since(start).Milliseconds()
+		return result, trace, err
+	}
+
 	if tool == nil {
 		result := tooltypes.Result{
 			CallID:  call.ID,
@@ -203,7 +216,7 @@ func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, time
 		trace.Status = "error"
 		trace.Error = result.Content
 		trace.DurationMillis = time.Since(start).Milliseconds()
-		return result, trace
+		return result, trace, nil
 	}
 
 	toolCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -234,7 +247,31 @@ func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, time
 	var result tooltypes.Result
 	select {
 	case result = <-done:
+		if err := ctx.Err(); err != nil {
+			result = tooltypes.Result{
+				CallID:  call.ID,
+				Name:    call.Name,
+				Content: err.Error(),
+				IsError: true,
+			}
+			trace.Status = "error"
+			trace.Error = result.Content
+			trace.DurationMillis = time.Since(start).Milliseconds()
+			return result, trace, err
+		}
 	case <-toolCtx.Done():
+		if err := ctx.Err(); err != nil {
+			result = tooltypes.Result{
+				CallID:  call.ID,
+				Name:    call.Name,
+				Content: err.Error(),
+				IsError: true,
+			}
+			trace.Status = "error"
+			trace.Error = result.Content
+			trace.DurationMillis = time.Since(start).Milliseconds()
+			return result, trace, err
+		}
 		result = tooltypes.Result{
 			CallID:  call.ID,
 			Name:    call.Name,
@@ -251,7 +288,7 @@ func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, time
 		trace.Result = truncateText(result.Content, defaultToolTraceTextLimit)
 	}
 	trace.DurationMillis = time.Since(start).Milliseconds()
-	return result, trace
+	return result, trace, nil
 }
 
 func summarizeJSON(raw json.RawMessage, limit int) string {

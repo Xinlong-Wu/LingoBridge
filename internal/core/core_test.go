@@ -231,6 +231,24 @@ func (f *fakeTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes.R
 	return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: f.result}
 }
 
+type cancelingTool struct {
+	cancel func()
+	calls  []tooltypes.Call
+}
+
+func (t *cancelingTool) Spec() tooltypes.Spec {
+	return tooltypes.Spec{Name: "fake_tool"}
+}
+
+func (t *cancelingTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes.Result {
+	t.calls = append(t.calls, call)
+	if t.cancel != nil {
+		t.cancel()
+	}
+	<-ctx.Done()
+	return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: ctx.Err().Error(), IsError: true}
+}
+
 func makeToolCalls(count, offset int) []tooltypes.Call {
 	calls := make([]tooltypes.Call, 0, count)
 	for i := 0; i < count; i++ {
@@ -866,6 +884,47 @@ func TestHandleTextToolTimeoutIsReturnedToModel(t *testing.T) {
 	}
 	if len(llmClient.results) != 1 || !llmClient.results[0].IsError || !strings.Contains(llmClient.results[0].Content, "timed out") {
 		t.Fatalf("tool results = %#v, want timeout result returned to model", llmClient.results)
+	}
+}
+
+func TestHandleTextToolLoopStopsOnContextCancel(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		calls: []tooltypes.Call{{
+			ID:        "call_1",
+			Name:      "fake_tool",
+			Arguments: json.RawMessage(`{}`),
+		}},
+		finalText: "should not be reached",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	tool := &cancelingTool{cancel: cancel}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+	sender := &fakeSender{}
+
+	err := bot.Handle(ctx, InboundMessage{
+		UserKey: "u1",
+		LLMText: "try it",
+		Tools:   []tooltypes.Tool{tool},
+	}, sender)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Handle error = %v, want context.Canceled", err)
+	}
+	if len(tool.calls) != 1 {
+		t.Fatalf("tool calls = %#v, want one tool execution", tool.calls)
+	}
+	if len(llmClient.systemPrompts) != 1 {
+		t.Fatalf("system prompts = %d, want no next model turn after cancellation", len(llmClient.systemPrompts))
+	}
+	if len(llmClient.results) != 0 {
+		t.Fatalf("tool results = %#v, want cancellation not sent back to model", llmClient.results)
+	}
+	if sessions.saved != nil {
+		t.Fatalf("saved = %#v, want no history saved after cancellation", sessions.saved)
+	}
+	if len(sender.sent) != 0 {
+		t.Fatalf("sent = %#v, want no error notice on cancellation", sender.sent)
 	}
 }
 
