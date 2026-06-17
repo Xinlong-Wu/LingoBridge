@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -16,6 +17,10 @@ import (
 )
 
 var coreLog = logging.For("core")
+
+const llmTurnMaxAttempts = 3
+
+var llmTurnRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second}
 
 type Platform interface {
 	Run(ctx context.Context, handler Handler) error
@@ -40,19 +45,22 @@ type TextStream interface {
 }
 
 type InboundMessage struct {
-	Platform           string
-	AccountID          string
-	AccountName        string
-	UserKey            string
-	CommandText        string
-	CommandPolicy      commands.Policy
-	LLMText            string
-	PrepareUserMessage PrepareUserMessageFunc
-	PrepareErrorNotice func(error) string
-	MutateResponse     ResponseMutator
-	ErrorNotice        func(error) string
-	Metadata           map[string]string
-	Tools              []tooltypes.Tool
+	Platform             string
+	AccountID            string
+	AccountName          string
+	UserKey              string
+	CommandText          string
+	CommandPolicy        commands.Policy
+	LLMText              string
+	SystemPromptSuffix   string
+	PrepareUserMessage   PrepareUserMessageFunc
+	PrepareErrorNotice   func(error) string
+	MutateResponse       ResponseMutator
+	ErrorNotice          func(error) string
+	Metadata             map[string]string
+	Tools                []tooltypes.Tool
+	ToolOptions          tooltypes.Options
+	DisableProviderTools bool
 }
 
 type OutboundMessage struct {
@@ -125,6 +133,10 @@ func (b *Bot) Handle(ctx context.Context, msg InboundMessage, sender Sender) err
 
 func (b *Bot) resolveToolsForMessage(ctx context.Context, msg InboundMessage) tooltypes.Selection {
 	var providerSelection tooltypes.Selection
+	if msg.DisableProviderTools {
+		coreLog.Debug(ctx, "provider tools disabled platform=%s account=%s platform_tools=%d", msg.Platform, msg.AccountName, len(msg.Tools))
+		return tooltypes.Selection{Tools: mergeTools(ctx, msg.Tools, nil), Options: msg.ToolOptions}
+	}
 	if b.ToolProvider != nil {
 		providerSelection = b.ToolProvider.Resolve(tooltypes.Scope{
 			Platform:    msg.Platform,
@@ -136,7 +148,79 @@ func (b *Bot) resolveToolsForMessage(ctx context.Context, msg InboundMessage) to
 	if len(tools) != len(msg.Tools)+len(providerSelection.Tools) {
 		coreLog.Debug(ctx, "merged tools platform=%d provider=%d effective=%d", len(msg.Tools), len(providerSelection.Tools), len(tools))
 	}
-	return tooltypes.Selection{Tools: tools, Options: providerSelection.Options}
+	return tooltypes.Selection{Tools: tools, Options: mergeToolOptions(providerSelection.Options, msg.ToolOptions)}
+}
+
+func effectiveSystemPrompt(base, suffix string) string {
+	suffix = strings.TrimSpace(suffix)
+	if suffix == "" {
+		return base
+	}
+	base = strings.TrimRight(base, "\n")
+	if strings.TrimSpace(base) == "" {
+		return suffix
+	}
+	return base + "\n\n" + suffix
+}
+
+func retryLLMTurn[T any](ctx context.Context, provider, modelName, operation string, onChunk func(string) error, call func(func(string) error) (T, error)) (T, error) {
+	var zero T
+	var lastErr error
+	for attempt := 1; attempt <= llmTurnMaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return zero, err
+		}
+		chunkEmitted := false
+		attemptOnChunk := onChunk
+		if onChunk != nil {
+			attemptOnChunk = func(chunk string) error {
+				if chunk != "" {
+					chunkEmitted = true
+				}
+				return onChunk(chunk)
+			}
+		}
+		resp, err := call(attemptOnChunk)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if chunkEmitted || !llm.IsRetryableError(err) || attempt == llmTurnMaxAttempts {
+			return zero, err
+		}
+		delay := llmTurnRetryDelay(attempt)
+		coreLog.Warn(ctx, "retrying LLM turn provider=%s model=%s operation=%s attempt=%d max_attempts=%d delay=%s error=%s",
+			provider, modelName, operation, attempt+1, llmTurnMaxAttempts, delay, truncateText(err.Error(), defaultToolTraceTextLimit))
+		if !sleepLLMRetry(ctx, delay) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return zero, ctxErr
+			}
+			return zero, err
+		}
+	}
+	return zero, lastErr
+}
+
+func sleepLLMRetry(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func llmTurnRetryDelay(failedAttempt int) time.Duration {
+	index := failedAttempt - 1
+	if index < 0 || index >= len(llmTurnRetryDelays) {
+		return 0
+	}
+	return llmTurnRetryDelays[index]
 }
 
 func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, toolOptions tooltypes.Options) error {
@@ -154,6 +238,7 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 		return err
 	}
 	modelName, provider := model.Name, model.Provider
+	systemPrompt := effectiveSystemPrompt(b.LLMConfig.SystemPrompt, msg.SystemPromptSuffix)
 
 	userMsg, err := b.prepareUserMessage(ctx, msg, sess.ID, llmClient)
 	if err != nil {
@@ -185,7 +270,7 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 	compactAllowed := automaticCompactAllowed(compact)
 	if compactAllowed {
 		var compactErr error
-		historyForRequest, providerContext, preCompacted, compactErr = b.prepareNativeContext(b.LLMConfig.SystemPrompt, historyForRequest, userMsg, providerContext, compact, llmClient, func(compactedMessages, retainedMessages int) {
+		historyForRequest, providerContext, preCompacted, compactErr = b.prepareNativeContext(systemPrompt, historyForRequest, userMsg, providerContext, compact, llmClient, func(compactedMessages, retainedMessages int) {
 			preCompactNotice = CompactNotice{
 				ModelName:         modelName,
 				Manual:            false,
@@ -201,7 +286,7 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 		}
 	}
 
-	msgs := ToLLMMessagesWithUserMessage(b.LLMConfig.SystemPrompt, &store.Conversation{Messages: historyForRequest}, userMsg, b.LLMConfig.MaxHistory)
+	msgs := ToLLMMessagesWithUserMessage(systemPrompt, &store.Conversation{Messages: historyForRequest}, userMsg, b.LLMConfig.MaxHistory)
 
 	var textStream *replyTextStream
 	if b.EnableTextStreaming {
@@ -221,16 +306,20 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 	var toolTraces []store.ToolTrace
 	if len(msg.Tools) > 0 {
 		if toolClient, ok := llmClient.(llm.ToolCallingClient); ok {
-			llmResponse, toolTraces, err = b.chatWithTools(ctx, toolClient, b.LLMConfig.SystemPrompt, msgs, providerContext, compact, compactAllowed, msg.Tools, toolOptions, onChunk)
+			llmResponse, toolTraces, err = b.chatWithTools(ctx, toolClient, provider, modelName, systemPrompt, msgs, providerContext, compact, compactAllowed, msg.Tools, toolOptions, onChunk)
 		} else {
 			coreLog.Warn(ctx, "model provider=%s model=%s does not support tool calling; continuing without tools", provider, modelName)
-			llmResponse, err = b.chatWithoutTools(llmClient, compactAllowed, providerContext, compact, msgs, onChunk)
+			llmResponse, err = b.chatWithoutTools(ctx, llmClient, provider, modelName, systemPrompt, compactAllowed, providerContext, compact, msgs, onChunk)
 		}
 	} else {
-		llmResponse, err = b.chatWithoutTools(llmClient, compactAllowed, providerContext, compact, msgs, onChunk)
+		llmResponse, err = b.chatWithoutTools(ctx, llmClient, provider, modelName, systemPrompt, compactAllowed, providerContext, compact, msgs, onChunk)
 	}
 	stopTyping()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			coreLog.Warn(ctx, "reply canceled provider=%s model=%s: %v", provider, modelName, err)
+			return err
+		}
 		coreLog.Error(ctx, "LLM error provider=%s model=%s: %v", provider, modelName, err)
 		notice := b.errorNotice(msg, err)
 		if textStream != nil && textStream.Started() {
@@ -312,16 +401,18 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 	return nil
 }
 
-func (b *Bot) chatWithoutTools(client llm.Client, compactAllowed bool, providerContext store.ProviderContext, compact llm.CompactConfig, msgs []store.Message, onChunk func(string) error) (llm.Response, error) {
-	if compactAllowed {
-		if contextClient, ok := client.(llm.ContextStreamingClient); ok {
-			return contextClient.ChatStreamWithContext(b.LLMConfig.SystemPrompt, msgs, providerContext, compact, onChunk)
+func (b *Bot) chatWithoutTools(ctx context.Context, client llm.Client, provider, modelName, systemPrompt string, compactAllowed bool, providerContext store.ProviderContext, compact llm.CompactConfig, msgs []store.Message, onChunk func(string) error) (llm.Response, error) {
+	return retryLLMTurn(ctx, provider, modelName, "chat", onChunk, func(attemptOnChunk func(string) error) (llm.Response, error) {
+		if compactAllowed {
+			if contextClient, ok := client.(llm.ContextStreamingClient); ok {
+				return contextClient.ChatStreamWithContext(systemPrompt, msgs, providerContext, compact, attemptOnChunk)
+			}
 		}
-	}
-	return client.ChatStream(b.LLMConfig.SystemPrompt, msgs, onChunk)
+		return client.ChatStream(systemPrompt, msgs, attemptOnChunk)
+	})
 }
 
-func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, systemPrompt string, msgs []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, compactAllowed bool, tools []tooltypes.Tool, options tooltypes.Options, onChunk func(string) error) (llm.Response, []store.ToolTrace, error) {
+func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, provider, modelName, systemPrompt string, msgs []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, compactAllowed bool, tools []tooltypes.Tool, options tooltypes.Options, onChunk func(string) error) (llm.Response, []store.ToolTrace, error) {
 	specs := toolSpecs(tools)
 	if len(specs) == 0 {
 		coreLog.Warn(ctx, "tool calling requested with %d tool entries but no valid tool specs; falling back to plain chat", len(tools))
@@ -329,7 +420,7 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 		if !ok {
 			return llm.Response{}, nil, fmt.Errorf("tool-capable client does not implement base chat")
 		}
-		resp, err := b.chatWithoutTools(baseClient, compactAllowed, providerContext, compact, msgs, onChunk)
+		resp, err := b.chatWithoutTools(ctx, baseClient, provider, modelName, systemPrompt, compactAllowed, providerContext, compact, msgs, onChunk)
 		return resp, nil, err
 	}
 
@@ -340,13 +431,24 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 	var previous llm.ToolState
 	var results []tooltypes.Result
 	totalCalls := 0
+	pendingBudgetReminder := toolBudgetReminderNone
+	pendingBudgetRemaining := maxCalls
+	sentBudget10 := false
+	sentBudget5 := false
 	effectiveCompact := llm.CompactConfig{}
 	if compactAllowed {
 		effectiveCompact = compact
 	}
 
 	for {
-		resp, err := client.ChatStreamWithTools(systemPrompt, msgs, providerContext, effectiveCompact, specs, previous, results, onChunk)
+		if err := ctx.Err(); err != nil {
+			return llm.Response{}, traces, err
+		}
+		turnSystemPrompt := toolBudgetSystemPrompt(systemPrompt, maxCalls, pendingBudgetReminder, pendingBudgetRemaining)
+		pendingBudgetReminder = toolBudgetReminderNone
+		resp, err := retryLLMTurn(ctx, provider, modelName, "tool_turn", onChunk, func(attemptOnChunk func(string) error) (llm.ToolResponse, error) {
+			return client.ChatStreamWithTools(turnSystemPrompt, msgs, providerContext, effectiveCompact, specs, previous, results, attemptOnChunk)
+		})
 		if err != nil {
 			return llm.Response{}, traces, err
 		}
@@ -360,16 +462,24 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 			return llm.Response{}, traces, err
 		}
 
-		previous = resp.ToolState
-		results = results[:0]
+		previous = appendToolState(previous, resp.ToolState)
 		coreLog.Debug(ctx, "model requested tool calls count=%d total_before=%d", len(resp.ToolCalls), totalCalls)
 		for _, call := range resp.ToolCalls {
+			if err := ctx.Err(); err != nil {
+				return llm.Response{}, traces, err
+			}
 			call.Name = strings.TrimSpace(call.Name)
 			if _, ok := lookup[call.Name]; !ok {
 				coreLog.Warn(ctx, "model requested unavailable tool name=%s call_id=%s", call.Name, call.ID)
 			}
+			coreLog.Debug(ctx, "tool call start name=%s call_id=%s args=%s", call.Name, call.ID, summarizeToolArgumentsForLog(call.Arguments, defaultToolTraceTextLimit))
 			totalCalls++
-			result, trace := runTool(ctx, lookup[call.Name], call, options.Timeout, options.ResultLimit)
+			result, trace, toolErr := runTool(ctx, lookup[call.Name], call, options.Timeout, options.ResultLimit)
+			if toolErr != nil {
+				traces = append(traces, trace)
+				coreLog.Warn(ctx, "tool loop canceled name=%s call_id=%s duration_ms=%d error=%s", trace.Name, trace.CallID, trace.DurationMillis, truncateText(trace.Error, defaultToolTraceTextLimit))
+				return llm.Response{}, traces, toolErr
+			}
 			results = append(results, result)
 			traces = append(traces, trace)
 			if trace.Status == "error" {
@@ -378,7 +488,32 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 				coreLog.Debug(ctx, "tool call finished name=%s call_id=%s status=%s duration_ms=%d", trace.Name, trace.CallID, trace.Status, trace.DurationMillis)
 			}
 		}
+		remaining := maxCalls - totalCalls
+		switch nextToolBudgetReminder(maxCalls, remaining, sentBudget10, sentBudget5) {
+		case toolBudgetReminderFivePercent:
+			pendingBudgetReminder = toolBudgetReminderFivePercent
+			pendingBudgetRemaining = remaining
+			sentBudget5 = true
+			sentBudget10 = true
+			coreLog.Debug(ctx, "tool budget reminder queued severity=5%% remaining=%d max_calls=%d", remaining, maxCalls)
+		case toolBudgetReminderTenPercent:
+			pendingBudgetReminder = toolBudgetReminderTenPercent
+			pendingBudgetRemaining = remaining
+			sentBudget10 = true
+			coreLog.Debug(ctx, "tool budget reminder queued severity=10%% remaining=%d max_calls=%d", remaining, maxCalls)
+		}
 	}
+}
+
+func appendToolState(previous, next llm.ToolState) llm.ToolState {
+	if next.IsEmpty() {
+		return previous
+	}
+	if previous.IsEmpty() || previous.Provider != next.Provider || previous.Endpoint != next.Endpoint {
+		return next
+	}
+	previous.Items = append(previous.Items, next.Items...)
+	return previous
 }
 
 func effectiveMaxToolCalls(maxCalls int) int {

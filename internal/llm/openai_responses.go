@@ -210,24 +210,7 @@ func (c *openaiResponsesClient) ChatStreamWithTools(systemPrompt string, message
 	if err != nil {
 		return ToolResponse{}, err
 	}
-	if previous.Provider == c.refProvider() && previous.Endpoint == openAIEndpointResponses {
-		for _, item := range previous.Items {
-			if len(item) > 0 {
-				input = append(input, item)
-			}
-		}
-	}
-	for _, result := range results {
-		callID := strings.TrimSpace(result.CallID)
-		if callID == "" {
-			callID = strings.TrimSpace(result.Name)
-		}
-		input = append(input, responsesFunctionCallOutput{
-			Type:   "function_call_output",
-			CallID: callID,
-			Output: toolResultOutput(result),
-		})
-	}
+	input = appendResponsesToolTranscript(input, c.refProvider(), previous, results)
 
 	reqBody := responsesRequest{
 		Model:             c.cfg.Model,
@@ -333,6 +316,58 @@ func (c *openaiResponsesClient) chatResponses(systemPrompt string, messages []st
 
 func (c *openaiResponsesClient) convertToResponsesInput(messages []store.Message) ([]any, error) {
 	return c.convertToResponsesInputWithContext(messages, store.ProviderContext{})
+}
+
+func appendResponsesToolTranscript(input []any, provider string, previous ToolState, results []tooltypes.Result) []any {
+	byCallID := toolResultsByCallID(results)
+	used := map[string]bool{}
+	if previous.Provider == provider && previous.Endpoint == openAIEndpointResponses {
+		for _, item := range previous.Items {
+			if len(item) == 0 {
+				continue
+			}
+			input = append(input, item)
+			callID := responsesFunctionCallID(item)
+			if result, ok := byCallID[callID]; ok {
+				input = append(input, responsesFunctionCallOutput{
+					Type:   "function_call_output",
+					CallID: callID,
+					Output: toolResultOutput(result),
+				})
+				used[callID] = true
+			}
+		}
+	}
+	for _, result := range results {
+		callID := strings.TrimSpace(result.CallID)
+		if callID == "" {
+			callID = strings.TrimSpace(result.Name)
+		}
+		if callID == "" || used[callID] {
+			continue
+		}
+		input = append(input, responsesFunctionCallOutput{
+			Type:   "function_call_output",
+			CallID: callID,
+			Output: toolResultOutput(result),
+		})
+	}
+	return input
+}
+
+func responsesFunctionCallID(raw json.RawMessage) string {
+	var item struct {
+		CallID string `json:"call_id"`
+		ID     string `json:"id"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &item) != nil {
+		return ""
+	}
+	callID := strings.TrimSpace(item.CallID)
+	if callID == "" {
+		callID = strings.TrimSpace(item.ID)
+	}
+	return callID
 }
 
 func (c *openaiResponsesClient) convertToResponsesInputWithContext(messages []store.Message, providerContext store.ProviderContext) ([]any, error) {
@@ -459,7 +494,7 @@ func postResponsesStream(client *http.Client, reqURL string, headers http.Header
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return Response{}, fmt.Errorf("responses stream HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
+		return Response{}, newHTTPError("responses stream", resp.StatusCode, body)
 	}
 
 	return parseResponsesSSE(resp.Body, onChunk)
@@ -474,7 +509,7 @@ func postResponsesToolStream(client *http.Client, reqURL string, headers http.He
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return ToolResponse{}, fmt.Errorf("responses stream HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
+		return ToolResponse{}, newHTTPError("responses stream", resp.StatusCode, body)
 	}
 
 	return parseResponsesToolSSE(resp.Body, onChunk)

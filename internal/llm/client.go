@@ -193,7 +193,7 @@ func postJSON(client *http.Client, reqURL string, headers http.Header, reqBody a
 		return nil, fmt.Errorf("%s read response: %w", label, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s HTTP %d: %s", label, resp.StatusCode, truncateStr(string(body), 500))
+		return nil, newHTTPError(label, resp.StatusCode, body)
 	}
 	return body, nil
 }
@@ -207,7 +207,7 @@ func postStream(client *http.Client, reqURL string, headers http.Header, reqBody
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("%s stream HTTP %d: %s", label, resp.StatusCode, truncateStr(string(body), 500))
+		return "", newHTTPError(label+" stream", resp.StatusCode, body)
 	}
 
 	return parseSSE(resp.Body, parser, onChunk)

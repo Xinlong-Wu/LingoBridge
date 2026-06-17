@@ -20,6 +20,14 @@ const (
 	defaultToolTraceTextLimit = 1024
 )
 
+type toolBudgetReminder int
+
+const (
+	toolBudgetReminderNone toolBudgetReminder = iota
+	toolBudgetReminderTenPercent
+	toolBudgetReminderFivePercent
+)
+
 func mergeTools(ctx context.Context, platformTools, providerTools []tooltypes.Tool) []tooltypes.Tool {
 	if len(platformTools) == 0 && len(providerTools) == 0 {
 		return nil
@@ -90,6 +98,68 @@ func commandToolSummaries(tools []tooltypes.Tool) []commands.ToolSummary {
 	return summaries
 }
 
+func mergeToolOptions(base, override tooltypes.Options) tooltypes.Options {
+	if override.MaxCalls > 0 {
+		base.MaxCalls = override.MaxCalls
+	}
+	if override.Timeout > 0 {
+		base.Timeout = override.Timeout
+	}
+	if override.ResultLimit > 0 {
+		base.ResultLimit = override.ResultLimit
+	}
+	return base
+}
+
+func toolBudgetSystemPrompt(systemPrompt string, maxCalls int, reminder toolBudgetReminder, remaining int) string {
+	var sections []string
+	if base := strings.TrimSpace(systemPrompt); base != "" {
+		sections = append(sections, base)
+	}
+	sections = append(sections, fmt.Sprintf(`<tool_call_budget>
+You may call tools at most %d times in this tool loop. Plan before calling tools, prioritize high-value calls, and avoid repeating failed or low-value tool calls.
+</tool_call_budget>`, maxCalls))
+	switch reminder {
+	case toolBudgetReminderTenPercent:
+		sections = append(sections, fmt.Sprintf(`<tool_call_budget_reminder severity="10%%" remaining="%d" max_calls="%d">
+Only %d of %d tool calls remain. Stop exploratory tool calls, prioritize the minimum necessary reads/actions, and prepare to finish.
+</tool_call_budget_reminder>`, remaining, maxCalls, remaining, maxCalls))
+	case toolBudgetReminderFivePercent:
+		sections = append(sections, fmt.Sprintf(`<tool_call_budget_reminder severity="5%%" remaining="%d" max_calls="%d">
+Only %d of %d tool calls remain. Do not make non-essential tool calls; immediately complete the required final action or final answer.
+</tool_call_budget_reminder>`, remaining, maxCalls, remaining, maxCalls))
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func nextToolBudgetReminder(maxCalls, remaining int, sentTenPercent, sentFivePercent bool) toolBudgetReminder {
+	if remaining <= toolBudgetFivePercentThreshold(maxCalls) && !sentFivePercent {
+		return toolBudgetReminderFivePercent
+	}
+	if remaining <= toolBudgetTenPercentThreshold(maxCalls) && !sentTenPercent {
+		return toolBudgetReminderTenPercent
+	}
+	return toolBudgetReminderNone
+}
+
+func toolBudgetTenPercentThreshold(maxCalls int) int {
+	return ceilDiv(maxCalls, 10)
+}
+
+func toolBudgetFivePercentThreshold(maxCalls int) int {
+	return ceilDiv(maxCalls, 20)
+}
+
+func ceilDiv(n, d int) int {
+	if n <= 0 {
+		return 1
+	}
+	if d <= 0 {
+		return n
+	}
+	return (n + d - 1) / d
+}
+
 func toolSpec(tool tooltypes.Tool) tooltypes.Spec {
 	if tool == nil {
 		return tooltypes.Spec{}
@@ -107,7 +177,7 @@ func commandName(text string) string {
 	return parts[0]
 }
 
-func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, timeout time.Duration, resultLimit int) (tooltypes.Result, store.ToolTrace) {
+func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, timeout time.Duration, resultLimit int) (tooltypes.Result, store.ToolTrace, error) {
 	if timeout <= 0 {
 		timeout = defaultToolTimeout
 	}
@@ -123,6 +193,19 @@ func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, time
 		Arguments: summarizeJSON(call.Arguments, defaultToolTraceTextLimit),
 	}
 
+	if err := ctx.Err(); err != nil {
+		result := tooltypes.Result{
+			CallID:  call.ID,
+			Name:    call.Name,
+			Content: err.Error(),
+			IsError: true,
+		}
+		trace.Status = "error"
+		trace.Error = result.Content
+		trace.DurationMillis = time.Since(start).Milliseconds()
+		return result, trace, err
+	}
+
 	if tool == nil {
 		result := tooltypes.Result{
 			CallID:  call.ID,
@@ -133,7 +216,7 @@ func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, time
 		trace.Status = "error"
 		trace.Error = result.Content
 		trace.DurationMillis = time.Since(start).Milliseconds()
-		return result, trace
+		return result, trace, nil
 	}
 
 	toolCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -164,7 +247,31 @@ func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, time
 	var result tooltypes.Result
 	select {
 	case result = <-done:
+		if err := ctx.Err(); err != nil {
+			result = tooltypes.Result{
+				CallID:  call.ID,
+				Name:    call.Name,
+				Content: err.Error(),
+				IsError: true,
+			}
+			trace.Status = "error"
+			trace.Error = result.Content
+			trace.DurationMillis = time.Since(start).Milliseconds()
+			return result, trace, err
+		}
 	case <-toolCtx.Done():
+		if err := ctx.Err(); err != nil {
+			result = tooltypes.Result{
+				CallID:  call.ID,
+				Name:    call.Name,
+				Content: err.Error(),
+				IsError: true,
+			}
+			trace.Status = "error"
+			trace.Error = result.Content
+			trace.DurationMillis = time.Since(start).Milliseconds()
+			return result, trace, err
+		}
 		result = tooltypes.Result{
 			CallID:  call.ID,
 			Name:    call.Name,
@@ -181,7 +288,7 @@ func runTool(ctx context.Context, tool tooltypes.Tool, call tooltypes.Call, time
 		trace.Result = truncateText(result.Content, defaultToolTraceTextLimit)
 	}
 	trace.DurationMillis = time.Since(start).Milliseconds()
-	return result, trace
+	return result, trace, nil
 }
 
 func summarizeJSON(raw json.RawMessage, limit int) string {
@@ -195,6 +302,53 @@ func summarizeJSON(raw json.RawMessage, limit int) string {
 		}
 	}
 	return truncateText(string(raw), limit)
+}
+
+func summarizeToolArgumentsForLog(raw json.RawMessage, limit int) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err == nil {
+		v = redactToolLogValue(v)
+		if normalized, err := json.Marshal(v); err == nil {
+			return truncateText(string(normalized), limit)
+		}
+	}
+	return truncateText(string(raw), limit)
+}
+
+func redactToolLogValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, child := range v {
+			if sensitiveToolArgumentKey(key) {
+				out[key] = "[REDACTED]"
+				continue
+			}
+			out[key] = redactToolLogValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = redactToolLogValue(child)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func sensitiveToolArgumentKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, pattern := range []string{"token", "secret", "password", "api_key", "apikey", "authorization", "auth"} {
+		if strings.Contains(key, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func truncateText(text string, limit int) string {

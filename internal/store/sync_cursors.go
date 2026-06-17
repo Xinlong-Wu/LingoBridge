@@ -23,3 +23,11 @@ func (s *Store) SaveSyncBuf(accountID, buf string) error {
 	)
 	return err
 }
+
+// DeleteSyncBuf removes the sync cursor buffer for an account.
+func (s *Store) DeleteSyncBuf(accountID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM sync_cursors WHERE account_id=?`, accountID)
+	return err
+}

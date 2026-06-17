@@ -6,7 +6,9 @@ import (
 	"lingobridge/internal/config"
 	"lingobridge/internal/core"
 	"lingobridge/internal/platform"
-	"lingobridge/internal/platform/feishu"
+	feishuplatform "lingobridge/internal/platform/feishu"
+	githubplatform "lingobridge/internal/platform/github"
+	wechatplatform "lingobridge/internal/platform/wechat"
 	"lingobridge/internal/session"
 	"lingobridge/internal/store"
 )
@@ -23,6 +25,7 @@ func TestDefaultRegistryLookupAliases(t *testing.T) {
 		"微信":     store.PlatformWeChat,
 		"feishu": store.PlatformFeishu,
 		"飞书":     store.PlatformFeishu,
+		"github": store.PlatformGitHub,
 	}
 	for name, want := range tests {
 		def, ok := registry.Lookup(name)
@@ -56,28 +59,39 @@ func TestDefaultDefinitionsSetCoreRuntimeOptions(t *testing.T) {
 	if !ok {
 		t.Fatal("wechat definition not found")
 	}
-	if WeChatTextChunkLimit != 4000 {
-		t.Fatalf("WeChatTextChunkLimit = %d, want 4000", WeChatTextChunkLimit)
+	if wechatplatform.TextChunkLimit != 4000 {
+		t.Fatalf("wechat TextChunkLimit = %d, want 4000", wechatplatform.TextChunkLimit)
 	}
-	if wechat.TextChunkLimit != WeChatTextChunkLimit {
+	if wechat.TextChunkLimit != wechatplatform.TextChunkLimit {
 		t.Fatalf("wechat TextChunkLimit = %d, want 4000", wechat.TextChunkLimit)
 	}
 	if wechat.EnableTextStreaming {
 		t.Fatal("wechat EnableTextStreaming = true, want false")
 	}
 
-	feishu, ok := registry.LookupAccountPlatform(store.PlatformFeishu)
+	feishuDef, ok := registry.LookupAccountPlatform(store.PlatformFeishu)
 	if !ok {
 		t.Fatal("feishu definition not found")
 	}
-	if FeishuTextChunkLimit != 25*1024 {
-		t.Fatalf("FeishuTextChunkLimit = %d, want %d", FeishuTextChunkLimit, 25*1024)
+	if feishuplatform.TextChunkLimit != 25*1024 {
+		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishuplatform.TextChunkLimit, 25*1024)
 	}
-	if feishu.TextChunkLimit != FeishuTextChunkLimit {
-		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishu.TextChunkLimit, FeishuTextChunkLimit)
+	if feishuDef.TextChunkLimit != feishuplatform.TextChunkLimit {
+		t.Fatalf("feishu TextChunkLimit = %d, want %d", feishuDef.TextChunkLimit, feishuplatform.TextChunkLimit)
 	}
-	if !feishu.EnableTextStreaming {
+	if !feishuDef.EnableTextStreaming {
 		t.Fatal("feishu EnableTextStreaming = false, want true")
+	}
+
+	github, ok := registry.LookupAccountPlatform(store.PlatformGitHub)
+	if !ok {
+		t.Fatal("github definition not found")
+	}
+	if github.TextChunkLimit != 0 {
+		t.Fatalf("github TextChunkLimit = %d, want 0", github.TextChunkLimit)
+	}
+	if github.EnableTextStreaming {
+		t.Fatal("github EnableTextStreaming = true, want false")
 	}
 }
 
@@ -97,6 +111,11 @@ func TestDefaultDefinitionsCreateRuntimePlatforms(t *testing.T) {
 		t.Fatalf("Open feishu returned error: %v", err)
 	}
 	defer feishuStore.Close()
+	githubStore, err := store.Open(store.PlatformGitHub)
+	if err != nil {
+		t.Fatalf("Open github returned error: %v", err)
+	}
+	defer githubStore.Close()
 
 	cfg := config.DefaultConfig()
 	if err := config.AddModel(&cfg, "deepseek", config.LLMModelConfig{
@@ -111,8 +130,20 @@ func TestDefaultDefinitionsCreateRuntimePlatforms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPlatformContext feishu returned error: %v", err)
 	}
-	if err := feishu.UpsertAccountConfig(feishuCtx, "fsbot", feishu.AccountConfig{AppID: "cli_xxx", AppSecret: "secret"}); err != nil {
+	if err := feishuplatform.UpsertAccountConfig(feishuCtx, "fsbot", feishuplatform.AccountConfig{AppID: "cli_xxx", AppSecret: "secret"}); err != nil {
 		t.Fatalf("UpsertAccountConfig returned error: %v", err)
+	}
+	githubCtx, err := core.NewPlatformContext(store.PlatformGitHub, &cfg, githubStore, nil)
+	if err != nil {
+		t.Fatalf("NewPlatformContext github returned error: %v", err)
+	}
+	if err := githubplatform.UpsertAccountConfig(githubCtx, "ghbot", githubplatform.AccountConfig{
+		AppID:          "123",
+		InstallationID: "456",
+		PrivateKeyPath: "/tmp/github-app.pem",
+		Repositories:   []string{"owner/repo"},
+	}); err != nil {
+		t.Fatalf("UpsertAccountConfig github returned error: %v", err)
 	}
 
 	for _, tc := range []struct {
@@ -121,6 +152,7 @@ func TestDefaultDefinitionsCreateRuntimePlatforms(t *testing.T) {
 	}{
 		{account: store.Account{ID: "wechat:test", Name: "wxbot", Platform: store.PlatformWeChat}, st: wechatStore},
 		{account: store.Account{ID: "feishu:cli_xxx", Name: "fsbot", Platform: store.PlatformFeishu}, st: feishuStore},
+		{account: store.Account{ID: "github:456", Name: "ghbot", Platform: store.PlatformGitHub}, st: githubStore},
 	} {
 		account := tc.account
 		def, ok := registry.LookupAccountPlatform(account.Platform)

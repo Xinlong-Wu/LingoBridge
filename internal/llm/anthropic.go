@@ -187,27 +187,7 @@ func (c *anthropicClient) ChatStreamWithTools(systemPrompt string, messages []st
 	if err != nil {
 		return ToolResponse{}, err
 	}
-	if previous.Provider == anthropicRefProvider && previous.Endpoint == anthropicEndpointMessages && len(previous.Items) > 0 {
-		content := make([]any, 0, len(previous.Items))
-		for _, item := range previous.Items {
-			if len(item) > 0 {
-				content = append(content, item)
-			}
-		}
-		anthropicMsgs = append(anthropicMsgs, anthropicMessage{Role: "assistant", Content: content})
-	}
-	if len(results) > 0 {
-		content := make([]any, 0, len(results))
-		for _, result := range results {
-			content = append(content, anthropicToolResult{
-				Type:      "tool_result",
-				ToolUseID: result.CallID,
-				Content:   toolResultOutput(result),
-				IsError:   result.IsError,
-			})
-		}
-		anthropicMsgs = append(anthropicMsgs, anthropicMessage{Role: "user", Content: content})
-	}
+	anthropicMsgs = appendAnthropicToolTranscript(anthropicMsgs, previous, results)
 
 	reqBody := anthropicRequest{
 		Model:     c.cfg.Model,
@@ -343,6 +323,60 @@ func anthropicTools(tools []tooltypes.Spec) []anthropicTool {
 	return out
 }
 
+func appendAnthropicToolTranscript(messages []anthropicMessage, previous ToolState, results []tooltypes.Result) []anthropicMessage {
+	byCallID := toolResultsByCallID(results)
+	used := map[string]bool{}
+	if previous.Provider == anthropicRefProvider && previous.Endpoint == anthropicEndpointMessages {
+		for _, item := range previous.Items {
+			if len(item) == 0 {
+				continue
+			}
+			messages = append(messages, anthropicMessage{Role: "assistant", Content: []any{item}})
+			callID := anthropicToolUseID(item)
+			if result, ok := byCallID[callID]; ok {
+				messages = append(messages, anthropicMessage{
+					Role: "user",
+					Content: []any{anthropicToolResult{
+						Type:      "tool_result",
+						ToolUseID: callID,
+						Content:   toolResultOutput(result),
+						IsError:   result.IsError,
+					}},
+				})
+				used[callID] = true
+			}
+		}
+	}
+	var remaining []any
+	for _, result := range results {
+		callID := strings.TrimSpace(result.CallID)
+		if callID == "" {
+			callID = strings.TrimSpace(result.Name)
+		}
+		if callID == "" || used[callID] {
+			continue
+		}
+		remaining = append(remaining, anthropicToolResult{
+			Type:      "tool_result",
+			ToolUseID: callID,
+			Content:   toolResultOutput(result),
+			IsError:   result.IsError,
+		})
+	}
+	if len(remaining) > 0 {
+		messages = append(messages, anthropicMessage{Role: "user", Content: remaining})
+	}
+	return messages
+}
+
+func anthropicToolUseID(raw json.RawMessage) string {
+	var toolUse anthropicToolUse
+	if len(raw) == 0 || json.Unmarshal(raw, &toolUse) != nil {
+		return ""
+	}
+	return strings.TrimSpace(toolUse.ID)
+}
+
 func parseAnthropicResponse(body []byte) (Response, error) {
 	var chatResp anthropicResponse
 	if err := json.Unmarshal(body, &chatResp); err != nil {
@@ -440,7 +474,7 @@ func postAnthropicStream(client *http.Client, reqURL string, headers http.Header
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return Response{}, fmt.Errorf("anthropic stream HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
+		return Response{}, newHTTPError("anthropic stream", resp.StatusCode, body)
 	}
 
 	return parseAnthropicSSE(resp.Body, onChunk)

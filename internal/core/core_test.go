@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -94,7 +95,9 @@ type fakeLLM struct {
 	resp            llm.Response
 	prepareErr      error
 	streamChunks    []string
+	streamErrs      []error
 	streamErr       error
+	systemPrompts   []string
 }
 
 func (f *fakeLLM) PrepareUserMessage(content string, attachments []llm.InputAttachment) (store.Message, error) {
@@ -112,11 +115,19 @@ func (f *fakeLLM) Chat(systemPrompt string, messages []store.Message) (llm.Respo
 func (f *fakeLLM) ChatStream(systemPrompt string, messages []store.Message, onChunk func(chunk string) error) (llm.Response, error) {
 	f.called = true
 	f.messages = messages
+	f.systemPrompts = append(f.systemPrompts, systemPrompt)
 	for _, chunk := range f.streamChunks {
 		if onChunk != nil {
 			if err := onChunk(chunk); err != nil {
 				return llm.Response{}, err
 			}
+		}
+	}
+	if len(f.streamErrs) > 0 {
+		err := f.streamErrs[0]
+		f.streamErrs = f.streamErrs[1:]
+		if err != nil {
+			return llm.Response{}, err
 		}
 	}
 	if f.streamErr != nil {
@@ -142,12 +153,17 @@ type fakeNativeLLM struct {
 
 type fakeToolLLM struct {
 	fakeLLM
-	turns       int
-	calls       []tooltypes.Call
-	results     []tooltypes.Result
-	toolSpecs   []tooltypes.Spec
-	finalText   string
-	providerCtx store.ProviderContext
+	turns         int
+	calls         []tooltypes.Call
+	callTurns     [][]tooltypes.Call
+	results       []tooltypes.Result
+	toolSpecs     []tooltypes.Spec
+	finalText     string
+	providerCtx   store.ProviderContext
+	systemPrompts []string
+	turnErrs      map[int]error
+	previousTurns []llm.ToolState
+	resultTurns   [][]tooltypes.Result
 }
 
 func (f *fakeToolLLM) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, tools []tooltypes.Spec, previous llm.ToolState, results []tooltypes.Result, onChunk func(chunk string) error) (llm.ToolResponse, error) {
@@ -155,11 +171,29 @@ func (f *fakeToolLLM) ChatStreamWithTools(systemPrompt string, messages []store.
 	f.messages = messages
 	f.providerCtx = providerContext
 	f.toolSpecs = tools
+	f.systemPrompts = append(f.systemPrompts, systemPrompt)
 	f.results = append(f.results, results...)
-	if f.turns == 0 {
-		f.turns++
+	f.previousTurns = append(f.previousTurns, previous)
+	f.resultTurns = append(f.resultTurns, append([]tooltypes.Result(nil), results...))
+	turn := f.turns
+	f.turns++
+	if f.turnErrs != nil {
+		if err := f.turnErrs[turn]; err != nil {
+			return llm.ToolResponse{}, err
+		}
+	}
+	var calls []tooltypes.Call
+	switch {
+	case len(f.callTurns) > 0:
+		if turn < len(f.callTurns) {
+			calls = f.callTurns[turn]
+		}
+	case turn == 0:
+		calls = f.calls
+	}
+	if len(calls) > 0 {
 		return llm.ToolResponse{
-			ToolCalls: f.calls,
+			ToolCalls: calls,
 			ToolState: llm.ToolState{
 				Provider: "fake",
 				Endpoint: "tools",
@@ -199,6 +233,53 @@ func (f *fakeTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes.R
 		return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: f.err, IsError: true}
 	}
 	return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: f.result}
+}
+
+type cancelingTool struct {
+	cancel func()
+	calls  []tooltypes.Call
+}
+
+func (t *cancelingTool) Spec() tooltypes.Spec {
+	return tooltypes.Spec{Name: "fake_tool"}
+}
+
+func (t *cancelingTool) Execute(ctx context.Context, call tooltypes.Call) tooltypes.Result {
+	t.calls = append(t.calls, call)
+	if t.cancel != nil {
+		t.cancel()
+	}
+	<-ctx.Done()
+	return tooltypes.Result{CallID: call.ID, Name: call.Name, Content: ctx.Err().Error(), IsError: true}
+}
+
+func makeToolCalls(count, offset int) []tooltypes.Call {
+	calls := make([]tooltypes.Call, 0, count)
+	for i := 0; i < count; i++ {
+		calls = append(calls, tooltypes.Call{
+			ID:        "call_" + strconv.Itoa(offset+i+1),
+			Name:      "fake_tool",
+			Arguments: json.RawMessage(`{}`),
+		})
+	}
+	return calls
+}
+
+func TestSummarizeToolArgumentsForLogRedactsSensitiveKeys(t *testing.T) {
+	got := summarizeToolArgumentsForLog(json.RawMessage(`{
+		"query":"roadmap",
+		"token":"secret-token",
+		"nested":{"password":"secret-password","Authorization":"Bearer secret"},
+		"items":[{"api_key":"secret-api-key"}]
+	}`), 4096)
+	for _, secret := range []string{"secret-token", "secret-password", "Bearer secret", "secret-api-key"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("summary contains secret %q: %s", secret, got)
+		}
+	}
+	if !strings.Contains(got, `"query":"roadmap"`) || strings.Count(got, "[REDACTED]") != 4 {
+		t.Fatalf("summary = %s, want query plus redactions", got)
+	}
 }
 
 type fakeToolProvider struct {
@@ -405,6 +486,77 @@ func TestHandleTextSavesConversationAndSendsReply(t *testing.T) {
 	}
 }
 
+func TestHandleTextRetriesRetryableLLMTurn(t *testing.T) {
+	withImmediateLLMRetry(t)
+	sessions := &fakeSessions{}
+	client := &fakeLLM{
+		streamErrs: []error{
+			retryableLLMHTTPError(),
+			retryableLLMHTTPError(),
+			nil,
+		},
+		resp: llm.Response{Text: "eventual answer"},
+	}
+	b := testBot(sessions, client)
+	sender := &fakeSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(client.systemPrompts) != 3 {
+		t.Fatalf("system prompts = %d, want 3 attempts", len(client.systemPrompts))
+	}
+	if sessions.saved == nil || len(sessions.saved.Messages) != 2 {
+		t.Fatalf("saved = %#v, want one user and one assistant message", sessions.saved)
+	}
+	if len(sender.sent) != 1 || sender.sent[0].Text != "eventual answer" {
+		t.Fatalf("sent = %#v, want eventual answer", sender.sent)
+	}
+}
+
+func TestHandleTextDoesNotRetryNonRetryableLLMError(t *testing.T) {
+	withImmediateLLMRetry(t)
+	sessions := &fakeSessions{}
+	client := &fakeLLM{streamErrs: []error{errors.New("bad request")}}
+	b := testBot(sessions, client)
+
+	err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, &fakeSender{})
+	if err == nil || err.Error() != "bad request" {
+		t.Fatalf("Handle error = %v, want bad request", err)
+	}
+	if len(client.systemPrompts) != 1 {
+		t.Fatalf("system prompts = %d, want one attempt", len(client.systemPrompts))
+	}
+	if sessions.saved != nil {
+		t.Fatalf("saved = %#v, want no saved history on failed LLM turn", sessions.saved)
+	}
+}
+
+func TestHandleTextDoesNotRetryAfterStreamingChunk(t *testing.T) {
+	withImmediateLLMRetry(t)
+	sessions := &fakeSessions{}
+	client := &fakeLLM{
+		streamChunks: []string{"partial"},
+		streamErrs:   []error{retryableLLMHTTPError()},
+	}
+	b := testBot(sessions, client)
+	sender := &fakeStreamingSender{}
+
+	err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender)
+	if err == nil {
+		t.Fatal("Handle returned nil, want retryable error after streamed chunk")
+	}
+	if len(client.systemPrompts) != 1 {
+		t.Fatalf("system prompts = %d, want no retry after streamed chunk", len(client.systemPrompts))
+	}
+	if sender.stream == nil || len(sender.stream.updates) == 0 {
+		t.Fatalf("stream = %#v, want partial update before failure", sender.stream)
+	}
+	if sessions.saved != nil {
+		t.Fatalf("saved = %#v, want no saved history on failed streamed turn", sessions.saved)
+	}
+}
+
 func TestHandleTextRunsToolsAndSavesTrace(t *testing.T) {
 	sessions := &fakeSessions{}
 	llmClient := &fakeToolLLM{
@@ -450,6 +602,168 @@ func TestHandleTextRunsToolsAndSavesTrace(t *testing.T) {
 	}
 }
 
+func TestHandleTextRetriesToolTurnWithoutRepeatingToolCalls(t *testing.T) {
+	withImmediateLLMRetry(t)
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		callTurns: [][]tooltypes.Call{{
+			{
+				ID:        "call_1",
+				Name:      "fake_tool",
+				Arguments: json.RawMessage(`{"query":"roadmap"}`),
+			},
+		}},
+		turnErrs:  map[int]error{1: retryableLLMHTTPError()},
+		finalText: "answer after retry",
+	}
+	tool := &fakeTool{result: `{"ok":true}`}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:     "u1",
+		CommandText: "search roadmap",
+		LLMText:     "search roadmap",
+		Tools:       []tooltypes.Tool{tool},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(tool.calls) != 1 {
+		t.Fatalf("tool calls = %#v, want one execution despite LLM retry", tool.calls)
+	}
+	if len(llmClient.systemPrompts) != 3 {
+		t.Fatalf("system prompts = %d, want initial tool turn, failed final turn, retried final turn", len(llmClient.systemPrompts))
+	}
+	if len(llmClient.results) != 2 {
+		t.Fatalf("tool results sent to LLM = %d, want same result sent on failed turn and retry", len(llmClient.results))
+	}
+	if sessions.saved == nil || len(sessions.saved.Messages[1].ToolTraces) != 1 {
+		t.Fatalf("saved = %#v, want one tool trace", sessions.saved)
+	}
+}
+
+func TestHandleTextToolLoopAccumulatesToolContext(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		callTurns: [][]tooltypes.Call{
+			{{
+				ID:        "call_1",
+				Name:      "fake_tool",
+				Arguments: json.RawMessage(`{"query":"one"}`),
+			}},
+			{{
+				ID:        "call_2",
+				Name:      "fake_tool",
+				Arguments: json.RawMessage(`{"query":"two"}`),
+			}},
+		},
+		finalText: "done",
+	}
+	tool := &fakeTool{result: `{"ok":true}`}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey: "u1",
+		LLMText: "review",
+		Tools:   []tooltypes.Tool{tool},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(tool.calls) != 2 {
+		t.Fatalf("tool calls = %#v, want two executions", tool.calls)
+	}
+	if len(llmClient.previousTurns) != 3 || len(llmClient.resultTurns) != 3 {
+		t.Fatalf("turns previous=%d results=%d, want 3", len(llmClient.previousTurns), len(llmClient.resultTurns))
+	}
+	if got := len(llmClient.previousTurns[1].Items); got != 1 {
+		t.Fatalf("turn 2 previous items = %d, want first tool-call state", got)
+	}
+	if got := len(llmClient.resultTurns[1]); got != 1 {
+		t.Fatalf("turn 2 results = %d, want first tool result", got)
+	}
+	if got := len(llmClient.previousTurns[2].Items); got != 2 {
+		t.Fatalf("turn 3 previous items = %d, want cumulative tool-call states", got)
+	}
+	if got := len(llmClient.resultTurns[2]); got != 2 {
+		t.Fatalf("turn 3 results = %d, want cumulative tool results", got)
+	}
+}
+
+func TestHandleTextRetryExhaustedDoesNotSaveOrCallReviewTool(t *testing.T) {
+	withImmediateLLMRetry(t)
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		turnErrs: map[int]error{
+			0: retryableLLMHTTPError(),
+			1: retryableLLMHTTPError(),
+			2: retryableLLMHTTPError(),
+		},
+	}
+	reviewTool := &fakeTool{spec: tooltypes.Spec{Name: "mcp_github_pull_request_review_write"}}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		Platform:             "github",
+		UserKey:              "github:repo:pr:1",
+		LLMText:              "review",
+		Tools:                []tooltypes.Tool{reviewTool},
+		DisableProviderTools: true,
+	}, &fakeSender{})
+	if err == nil {
+		t.Fatal("Handle returned nil, want exhausted retry error")
+	}
+	var httpErr *llm.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != 504 {
+		t.Fatalf("Handle error = %v, want HTTP 504", err)
+	}
+	if len(llmClient.systemPrompts) != 3 {
+		t.Fatalf("system prompts = %d, want 3 attempts", len(llmClient.systemPrompts))
+	}
+	if len(reviewTool.calls) != 0 {
+		t.Fatalf("review tool calls = %#v, want no submit when LLM turn never succeeds", reviewTool.calls)
+	}
+	if sessions.saved != nil {
+		t.Fatalf("saved = %#v, want no saved history on exhausted retry", sessions.saved)
+	}
+}
+
+func TestHandleTextSystemPromptSuffixReachesToolsAndMessages(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{finalText: "done"}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:            "u1",
+		LLMText:            "review",
+		SystemPromptSuffix: "GitHub review policy",
+		Tools:              []tooltypes.Tool{&fakeTool{}},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(llmClient.systemPrompts) != 1 {
+		t.Fatalf("system prompts = %d, want 1", len(llmClient.systemPrompts))
+	}
+	for _, want := range []string{"system", "GitHub review policy"} {
+		if !strings.Contains(llmClient.systemPrompts[0], want) {
+			t.Fatalf("tool system prompt = %q, want %q", llmClient.systemPrompts[0], want)
+		}
+	}
+	if len(llmClient.messages) == 0 || llmClient.messages[0].Role != "system" {
+		t.Fatalf("messages = %#v, want first system message", llmClient.messages)
+	}
+	for _, want := range []string{"system", "GitHub review policy"} {
+		if !strings.Contains(llmClient.messages[0].Content, want) {
+			t.Fatalf("message system prompt = %q, want %q", llmClient.messages[0].Content, want)
+		}
+	}
+}
+
 func TestHandleTextRunsToolProviderTools(t *testing.T) {
 	sessions := &fakeSessions{}
 	llmClient := &fakeToolLLM{
@@ -489,6 +803,55 @@ func TestHandleTextRunsToolProviderTools(t *testing.T) {
 	}
 	if len(provider.scopes) != 1 || provider.scopes[0].Platform != "feishu" || provider.scopes[0].AccountID != "feishu:cli_xxx" || provider.scopes[0].AccountName != "admin-bot" {
 		t.Fatalf("provider scopes = %#v, want feishu admin-bot scope", provider.scopes)
+	}
+}
+
+func TestHandleTextDisableProviderToolsUsesMessageToolsOnly(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		calls: []tooltypes.Call{{
+			ID:        "call_1",
+			Name:      "platform_tool",
+			Arguments: json.RawMessage(`{}`),
+		}},
+		finalText: "answer with platform tool",
+	}
+	platformTool := &fakeTool{
+		spec:   tooltypes.Spec{Name: "platform_tool", Description: "Platform tool"},
+		result: "ok",
+	}
+	providerTool := &fakeTool{
+		spec:   tooltypes.Spec{Name: "provider_tool", Description: "Provider tool"},
+		result: "provider",
+	}
+	provider := &fakeToolProvider{tools: []tooltypes.Tool{providerTool}}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+	bot.ToolProvider = provider
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		Platform:             "github",
+		AccountID:            "github:reviewer",
+		AccountName:          "reviewer",
+		UserKey:              "u1",
+		LLMText:              "review",
+		Tools:                []tooltypes.Tool{platformTool},
+		DisableProviderTools: true,
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(provider.scopes) != 0 {
+		t.Fatalf("provider scopes = %#v, want provider not resolved", provider.scopes)
+	}
+	if len(platformTool.calls) != 1 {
+		t.Fatalf("platform tool calls = %#v, want one call", platformTool.calls)
+	}
+	if len(providerTool.calls) != 0 {
+		t.Fatalf("provider tool calls = %#v, want none", providerTool.calls)
+	}
+	if len(llmClient.toolSpecs) != 1 || llmClient.toolSpecs[0].Name != "platform_tool" {
+		t.Fatalf("tool specs = %#v, want only platform_tool", llmClient.toolSpecs)
 	}
 }
 
@@ -594,6 +957,47 @@ func TestHandleTextToolTimeoutIsReturnedToModel(t *testing.T) {
 	}
 }
 
+func TestHandleTextToolLoopStopsOnContextCancel(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		calls: []tooltypes.Call{{
+			ID:        "call_1",
+			Name:      "fake_tool",
+			Arguments: json.RawMessage(`{}`),
+		}},
+		finalText: "should not be reached",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	tool := &cancelingTool{cancel: cancel}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+	sender := &fakeSender{}
+
+	err := bot.Handle(ctx, InboundMessage{
+		UserKey: "u1",
+		LLMText: "try it",
+		Tools:   []tooltypes.Tool{tool},
+	}, sender)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Handle error = %v, want context.Canceled", err)
+	}
+	if len(tool.calls) != 1 {
+		t.Fatalf("tool calls = %#v, want one tool execution", tool.calls)
+	}
+	if len(llmClient.systemPrompts) != 1 {
+		t.Fatalf("system prompts = %d, want no next model turn after cancellation", len(llmClient.systemPrompts))
+	}
+	if len(llmClient.results) != 0 {
+		t.Fatalf("tool results = %#v, want cancellation not sent back to model", llmClient.results)
+	}
+	if sessions.saved != nil {
+		t.Fatalf("saved = %#v, want no history saved after cancellation", sessions.saved)
+	}
+	if len(sender.sent) != 0 {
+		t.Fatalf("sent = %#v, want no error notice on cancellation", sender.sent)
+	}
+}
+
 func TestHandleTextToolCallLimit(t *testing.T) {
 	sessions := &fakeSessions{}
 	llmClient := &fakeToolLLM{
@@ -616,6 +1020,138 @@ func TestHandleTextToolCallLimit(t *testing.T) {
 	}
 	if sessions.saved != nil {
 		t.Fatalf("saved = %#v, want no history saved when tool limit is exceeded", sessions.saved)
+	}
+}
+
+func TestHandleTextMessageToolOptionsOverrideProviderOptions(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		calls: []tooltypes.Call{
+			{ID: "call_1", Name: "fake_tool", Arguments: json.RawMessage(`{}`)},
+			{ID: "call_2", Name: "fake_tool", Arguments: json.RawMessage(`{}`)},
+		},
+		finalText: "handled",
+	}
+	tool := &fakeTool{result: "ok"}
+	bot := New(sessions, testLLMConfig())
+	bot.ToolProvider = &fakeToolProvider{options: tooltypes.Options{MaxCalls: 1}}
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:     "u1",
+		LLMText:     "try it",
+		Tools:       []tooltypes.Tool{tool},
+		ToolOptions: tooltypes.Options{MaxCalls: 2},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(tool.calls) != 2 {
+		t.Fatalf("tool calls = %d, want 2", len(tool.calls))
+	}
+}
+
+func TestHandleTextToolBudgetPromptIncludesMaxCalls(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{finalText: "done"}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:     "u1",
+		LLMText:     "try it",
+		Tools:       []tooltypes.Tool{&fakeTool{}},
+		ToolOptions: tooltypes.Options{MaxCalls: 50},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(llmClient.systemPrompts) != 1 {
+		t.Fatalf("system prompts = %d, want 1", len(llmClient.systemPrompts))
+	}
+	if !strings.Contains(llmClient.systemPrompts[0], "at most 50 times") {
+		t.Fatalf("system prompt = %q, want max call budget", llmClient.systemPrompts[0])
+	}
+	if len(llmClient.results) != 0 {
+		t.Fatalf("tool results = %#v, want no fake reminder result", llmClient.results)
+	}
+}
+
+func TestHandleTextToolBudgetReminderThresholds(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		callTurns: [][]tooltypes.Call{
+			makeToolCalls(18, 0),
+			makeToolCalls(1, 18),
+		},
+		finalText: "done",
+	}
+	tool := &fakeTool{}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:     "u1",
+		LLMText:     "try it",
+		Tools:       []tooltypes.Tool{tool},
+		ToolOptions: tooltypes.Options{MaxCalls: 20},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(llmClient.systemPrompts) != 3 {
+		t.Fatalf("system prompts = %d, want 3", len(llmClient.systemPrompts))
+	}
+	if strings.Contains(llmClient.systemPrompts[0], "tool_call_budget_reminder") {
+		t.Fatalf("initial prompt has reminder: %q", llmClient.systemPrompts[0])
+	}
+	if !strings.Contains(llmClient.systemPrompts[1], `severity="10%"`) || !strings.Contains(llmClient.systemPrompts[1], `remaining="2"`) {
+		t.Fatalf("second prompt = %q, want 10%% reminder with 2 remaining", llmClient.systemPrompts[1])
+	}
+	if !strings.Contains(llmClient.systemPrompts[2], `severity="5%"`) || !strings.Contains(llmClient.systemPrompts[2], `remaining="1"`) {
+		t.Fatalf("third prompt = %q, want 5%% reminder with 1 remaining", llmClient.systemPrompts[2])
+	}
+	allPrompts := strings.Join(llmClient.systemPrompts, "\n")
+	if strings.Count(allPrompts, `severity="10%"`) != 1 || strings.Count(allPrompts, `severity="5%"`) != 1 {
+		t.Fatalf("system prompts = %#v, want each reminder once", llmClient.systemPrompts)
+	}
+	if len(tool.calls) != 19 {
+		t.Fatalf("tool calls = %d, want 19 real tool executions", len(tool.calls))
+	}
+	lastResults := llmClient.resultTurns[len(llmClient.resultTurns)-1]
+	if len(lastResults) != 19 {
+		t.Fatalf("last turn tool results = %d, want only 19 real tool results", len(lastResults))
+	}
+}
+
+func TestHandleTextToolBudgetReminderUsesHighestSeverityWhenThresholdsCrossTogether(t *testing.T) {
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		callTurns: [][]tooltypes.Call{
+			makeToolCalls(48, 0),
+		},
+		finalText: "done",
+	}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:     "u1",
+		LLMText:     "try it",
+		Tools:       []tooltypes.Tool{&fakeTool{}},
+		ToolOptions: tooltypes.Options{MaxCalls: 50},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(llmClient.systemPrompts) != 2 {
+		t.Fatalf("system prompts = %d, want 2", len(llmClient.systemPrompts))
+	}
+	if !strings.Contains(llmClient.systemPrompts[1], `severity="5%"`) || !strings.Contains(llmClient.systemPrompts[1], `remaining="2"`) {
+		t.Fatalf("second prompt = %q, want 5%% reminder with 2 remaining", llmClient.systemPrompts[1])
+	}
+	if strings.Contains(llmClient.systemPrompts[1], `severity="10%"`) {
+		t.Fatalf("second prompt = %q, want highest severity only", llmClient.systemPrompts[1])
 	}
 }
 
@@ -1333,6 +1869,19 @@ func TestSplitTextChunksByRunesUsesCharacterLimit(t *testing.T) {
 	if got := strings.Join(chunks, ""); got != text {
 		t.Fatalf("joined chunks = %q, want %q", got, text)
 	}
+}
+
+func withImmediateLLMRetry(t *testing.T) {
+	t.Helper()
+	original := llmTurnRetryDelays
+	llmTurnRetryDelays = []time.Duration{0, 0}
+	t.Cleanup(func() {
+		llmTurnRetryDelays = original
+	})
+}
+
+func retryableLLMHTTPError() error {
+	return &llm.HTTPError{Label: "responses", StatusCode: 504, Body: "gateway timeout"}
 }
 
 func testBot(sessions *fakeSessions, client *fakeLLM) *Bot {

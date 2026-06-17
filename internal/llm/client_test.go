@@ -1,9 +1,11 @@
 package llm
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,12 @@ import (
 	"lingobridge/internal/store"
 	tooltypes "lingobridge/internal/tools"
 )
+
+type retryableNetError struct{}
+
+func (retryableNetError) Error() string   { return "temporary network timeout" }
+func (retryableNetError) Timeout() bool   { return true }
+func (retryableNetError) Temporary() bool { return false }
 
 func TestParseSSE(t *testing.T) {
 	tests := []struct {
@@ -77,6 +85,67 @@ func TestParseSSE(t *testing.T) {
 				t.Fatalf("parseSSE = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestOpenAIResponsesHTTPErrorIsRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusGatewayTimeout)
+		w.Write([]byte(`<html>gateway timeout</html>`))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{
+		openaiBase: openaiBase{
+			cfg: Config{
+				BaseURL: server.URL,
+				APIKey:  "key",
+				Model:   "gpt-test",
+			},
+			httpClient: server.Client(),
+		},
+	}
+	_, err := client.Chat("system", []store.Message{{Role: "user", Content: "hi"}})
+	if err == nil {
+		t.Fatal("Chat returned nil error, want HTTP 504")
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("error = %T %v, want HTTPError", err, err)
+	}
+	if httpErr.Label != "responses" || httpErr.StatusCode != http.StatusGatewayTimeout || !strings.Contains(httpErr.Body, "gateway timeout") {
+		t.Fatalf("HTTPError = %#v, want responses 504 body", httpErr)
+	}
+	if !IsRetryableError(err) {
+		t.Fatalf("IsRetryableError(%v) = false, want true", err)
+	}
+	if !strings.Contains(err.Error(), "responses HTTP 504") {
+		t.Fatalf("error string = %q, want responses HTTP 504", err.Error())
+	}
+}
+
+func TestIsRetryableErrorClassifiesHTTPAndNetworkErrors(t *testing.T) {
+	retryableStatuses := []int{408, 409, 425, 429, 500, 502, 503, 504}
+	for _, status := range retryableStatuses {
+		err := &HTTPError{Label: "responses", StatusCode: status, Body: "transient"}
+		if !IsRetryableError(err) {
+			t.Fatalf("status %d retryable = false, want true", status)
+		}
+	}
+	nonRetryableStatuses := []int{400, 401, 403, 404, 422}
+	for _, status := range nonRetryableStatuses {
+		err := &HTTPError{Label: "responses", StatusCode: status, Body: "bad request"}
+		if IsRetryableError(err) {
+			t.Fatalf("status %d retryable = true, want false", status)
+		}
+	}
+	if !IsRetryableError(fmt.Errorf("responses request: %w", retryableNetError{})) {
+		t.Fatal("network timeout retryable = false, want true")
+	}
+	for _, err := range []error{context.Canceled, context.DeadlineExceeded} {
+		if IsRetryableError(err) {
+			t.Fatalf("%v retryable = true, want false", err)
+		}
 	}
 }
 
@@ -648,6 +717,41 @@ func TestOpenAIResponsesStreamingToolStateOmitsMessageContent(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesToolTranscriptInterleavesCumulativeResults(t *testing.T) {
+	var reqBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}`))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{openaiBase: openaiBase{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "gpt-test"}, httpClient: server.Client()}}
+	previous := ToolState{
+		Provider: openAIRefProvider,
+		Endpoint: openAIEndpointResponses,
+		Items: []json.RawMessage{
+			json.RawMessage(`{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read","arguments":"{}"}`),
+			json.RawMessage(`{"type":"function_call","id":"fc_2","call_id":"call_2","name":"read","arguments":"{}"}`),
+		},
+	}
+	results := []tooltypes.Result{
+		{CallID: "call_1", Name: "read", Content: `{"page":1}`},
+		{CallID: "call_2", Name: "read", Content: `{"page":2}`},
+	}
+	if _, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, nil, previous, results, nil); err != nil {
+		t.Fatalf("ChatStreamWithTools returned error: %v", err)
+	}
+	input := reqBody["input"].([]any)
+	got := responseToolTranscriptOrder(input)
+	want := []string{"function_call:call_1", "function_call_output:call_1", "function_call:call_2", "function_call_output:call_2"}
+	if !stringSlicesEqual(got, want) {
+		t.Fatalf("tool transcript order = %#v, want %#v; input=%#v", got, want, input)
+	}
+}
+
 func TestOpenAIChatToolCallingRoundTrip(t *testing.T) {
 	var bodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -688,6 +792,41 @@ func TestOpenAIChatToolCallingRoundTrip(t *testing.T) {
 	last := messages[len(messages)-1].(map[string]any)
 	if last["role"] != "tool" || last["tool_call_id"] != "call_1" {
 		t.Fatalf("last message = %#v, want tool result", last)
+	}
+}
+
+func TestOpenAIChatToolTranscriptInterleavesCumulativeResults(t *testing.T) {
+	var reqBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`))
+	}))
+	defer server.Close()
+
+	client := &openaiChatClient{openaiBase: openaiBase{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "gpt-test"}, httpClient: server.Client()}}
+	previous := ToolState{
+		Provider: openAIRefProvider,
+		Endpoint: openAIEndpointChat,
+		Items: []json.RawMessage{
+			json.RawMessage(`{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]}`),
+			json.RawMessage(`{"role":"assistant","tool_calls":[{"id":"call_2","type":"function","function":{"name":"read","arguments":"{}"}}]}`),
+		},
+	}
+	results := []tooltypes.Result{
+		{CallID: "call_1", Name: "read", Content: `{"page":1}`},
+		{CallID: "call_2", Name: "read", Content: `{"page":2}`},
+	}
+	if _, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, nil, previous, results, nil); err != nil {
+		t.Fatalf("ChatStreamWithTools returned error: %v", err)
+	}
+	messages := reqBody["messages"].([]any)
+	got := chatToolTranscriptOrder(messages)
+	want := []string{"assistant:call_1", "tool:call_1", "assistant:call_2", "tool:call_2"}
+	if !stringSlicesEqual(got, want) {
+		t.Fatalf("tool transcript order = %#v, want %#v; messages=%#v", got, want, messages)
 	}
 }
 
@@ -733,6 +872,41 @@ func TestAnthropicToolCallingRoundTrip(t *testing.T) {
 	result := content[0].(map[string]any)
 	if result["type"] != "tool_result" || result["tool_use_id"] != "toolu_1" {
 		t.Fatalf("tool result = %#v, want anthropic tool_result", result)
+	}
+}
+
+func TestAnthropicToolTranscriptInterleavesCumulativeResults(t *testing.T) {
+	var reqBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"content":[{"type":"text","text":"done"}]}`))
+	}))
+	defer server.Close()
+
+	client := &anthropicClient{cfg: Config{BaseURL: server.URL, APIKey: "key", Model: "claude-test"}, httpClient: server.Client()}
+	previous := ToolState{
+		Provider: anthropicRefProvider,
+		Endpoint: anthropicEndpointMessages,
+		Items: []json.RawMessage{
+			json.RawMessage(`{"type":"tool_use","id":"toolu_1","name":"read","input":{}}`),
+			json.RawMessage(`{"type":"tool_use","id":"toolu_2","name":"read","input":{}}`),
+		},
+	}
+	results := []tooltypes.Result{
+		{CallID: "toolu_1", Name: "read", Content: `{"page":1}`},
+		{CallID: "toolu_2", Name: "read", Content: `{"page":2}`},
+	}
+	if _, err := client.ChatStreamWithTools("system", []store.Message{{Role: "user", Content: "hi"}}, store.ProviderContext{}, CompactConfig{}, nil, previous, results, nil); err != nil {
+		t.Fatalf("ChatStreamWithTools returned error: %v", err)
+	}
+	messages := reqBody["messages"].([]any)
+	got := anthropicToolTranscriptOrder(messages)
+	want := []string{"assistant:tool_use:toolu_1", "user:tool_result:toolu_1", "assistant:tool_use:toolu_2", "user:tool_result:toolu_2"}
+	if !stringSlicesEqual(got, want) {
+		t.Fatalf("tool transcript order = %#v, want %#v; messages=%#v", got, want, messages)
 	}
 }
 
@@ -1376,4 +1550,81 @@ func TestParseResponsesImageMalformedBase64(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "decode response image result") {
 		t.Fatalf("parseResponsesOutput error = %v, want decode response image result", err)
 	}
+}
+
+func responseToolTranscriptOrder(input []any) []string {
+	var out []string
+	for _, item := range input {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		typ, _ := m["type"].(string)
+		switch typ {
+		case "function_call", "function_call_output":
+			callID, _ := m["call_id"].(string)
+			out = append(out, typ+":"+callID)
+		}
+	}
+	return out
+}
+
+func chatToolTranscriptOrder(messages []any) []string {
+	var out []string
+	for _, item := range messages {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := m["role"].(string)
+		switch role {
+		case "assistant":
+			rawCalls, _ := m["tool_calls"].([]any)
+			for _, rawCall := range rawCalls {
+				call, _ := rawCall.(map[string]any)
+				id, _ := call["id"].(string)
+				out = append(out, "assistant:"+id)
+			}
+		case "tool":
+			callID, _ := m["tool_call_id"].(string)
+			out = append(out, "tool:"+callID)
+		}
+	}
+	return out
+}
+
+func anthropicToolTranscriptOrder(messages []any) []string {
+	var out []string
+	for _, item := range messages {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := m["role"].(string)
+		content, _ := m["content"].([]any)
+		for _, rawBlock := range content {
+			block, _ := rawBlock.(map[string]any)
+			switch block["type"] {
+			case "tool_use":
+				id, _ := block["id"].(string)
+				out = append(out, role+":tool_use:"+id)
+			case "tool_result":
+				id, _ := block["tool_use_id"].(string)
+				out = append(out, role+":tool_result:"+id)
+			}
+		}
+	}
+	return out
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }

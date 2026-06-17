@@ -30,6 +30,10 @@ type AccountNewContext struct {
 	Platform *core.PlatformContext
 }
 
+type AccountListContext struct {
+	Platform *core.PlatformContext
+}
+
 type AccountDeleteContext struct {
 	Platform *core.PlatformContext
 	Account  store.Account
@@ -50,6 +54,7 @@ type Definition struct {
 	Aliases               []string
 	AccountNewUsage       string
 	ParseAccountNewFlags  func(args []string, io AccountNewIO) (AccountNewOptions, error)
+	ListAccounts          func(ctx AccountListContext) ([]store.Account, error)
 	CreateOrUpdateAccount func(ctx AccountNewContext, opts AccountNewOptions) error
 	DeleteAccount         func(ctx AccountDeleteContext) error
 	NewRuntimePlatform    func(ctx RuntimeContext) (core.Platform, error)
@@ -105,8 +110,14 @@ func (r *Registry) Register(def Definition) error {
 	if def.ParseAccountNewFlags == nil {
 		return fmt.Errorf("platform %q missing account new parser", id)
 	}
+	if def.ListAccounts == nil {
+		return fmt.Errorf("platform %q missing account lister", id)
+	}
 	if def.CreateOrUpdateAccount == nil {
 		return fmt.Errorf("platform %q missing account creator", id)
+	}
+	if def.DeleteAccount == nil {
+		return fmt.Errorf("platform %q missing account deleter", id)
 	}
 	if def.NewRuntimePlatform == nil {
 		return fmt.Errorf("platform %q missing runtime factory", id)

@@ -75,6 +75,36 @@ mcp:
 
 platforms:
   # Each platform owns the schema under platforms.<platform>.
+  github:
+    accounts:
+      reviewer:
+        app_id: "123456"
+        installation_id: "987654"
+        private_key_path: "/etc/lingobridge/github-app.pem"
+        # Optional. Defaults shown below.
+        base_url: "https://api.github.com"
+        web_url: "https://github.com"
+        poll_interval: "2m"
+        repositories:
+          - "owner/repo"
+        review:
+          max_tool_calls: 30
+          tool_timeout: "30s"
+          tool_result_limit: 60000
+          # Optional default used only when neither base nor head contains
+          # .github/review_instructions.md.
+          default_instructions: |
+            Review this pull request for correctness, regressions, security issues,
+            and missing tests. Leave concise inline comments where useful.
+        # Required for GitHub review accounts. LingoBridge injects
+        # GITHUB_PERSONAL_ACCESS_TOKEN and GITHUB_HOST at runtime; do not put
+        # GitHub tokens here.
+        mcp:
+          command: "github-mcp-server"
+          args:
+            - "stdio"
+            - "--tools=pull_request_read,get_file_contents,pull_request_review_write,add_comment_to_pending_review"
+
   feishu:
     accounts:
       fsbot:
