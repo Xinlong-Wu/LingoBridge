@@ -1,9 +1,11 @@
 package llm
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,12 @@ import (
 	"lingobridge/internal/store"
 	tooltypes "lingobridge/internal/tools"
 )
+
+type retryableNetError struct{}
+
+func (retryableNetError) Error() string   { return "temporary network timeout" }
+func (retryableNetError) Timeout() bool   { return true }
+func (retryableNetError) Temporary() bool { return false }
 
 func TestParseSSE(t *testing.T) {
 	tests := []struct {
@@ -77,6 +85,67 @@ func TestParseSSE(t *testing.T) {
 				t.Fatalf("parseSSE = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestOpenAIResponsesHTTPErrorIsRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusGatewayTimeout)
+		w.Write([]byte(`<html>gateway timeout</html>`))
+	}))
+	defer server.Close()
+
+	client := &openaiResponsesClient{
+		openaiBase: openaiBase{
+			cfg: Config{
+				BaseURL: server.URL,
+				APIKey:  "key",
+				Model:   "gpt-test",
+			},
+			httpClient: server.Client(),
+		},
+	}
+	_, err := client.Chat("system", []store.Message{{Role: "user", Content: "hi"}})
+	if err == nil {
+		t.Fatal("Chat returned nil error, want HTTP 504")
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("error = %T %v, want HTTPError", err, err)
+	}
+	if httpErr.Label != "responses" || httpErr.StatusCode != http.StatusGatewayTimeout || !strings.Contains(httpErr.Body, "gateway timeout") {
+		t.Fatalf("HTTPError = %#v, want responses 504 body", httpErr)
+	}
+	if !IsRetryableError(err) {
+		t.Fatalf("IsRetryableError(%v) = false, want true", err)
+	}
+	if !strings.Contains(err.Error(), "responses HTTP 504") {
+		t.Fatalf("error string = %q, want responses HTTP 504", err.Error())
+	}
+}
+
+func TestIsRetryableErrorClassifiesHTTPAndNetworkErrors(t *testing.T) {
+	retryableStatuses := []int{408, 409, 425, 429, 500, 502, 503, 504}
+	for _, status := range retryableStatuses {
+		err := &HTTPError{Label: "responses", StatusCode: status, Body: "transient"}
+		if !IsRetryableError(err) {
+			t.Fatalf("status %d retryable = false, want true", status)
+		}
+	}
+	nonRetryableStatuses := []int{400, 401, 403, 404, 422}
+	for _, status := range nonRetryableStatuses {
+		err := &HTTPError{Label: "responses", StatusCode: status, Body: "bad request"}
+		if IsRetryableError(err) {
+			t.Fatalf("status %d retryable = true, want false", status)
+		}
+	}
+	if !IsRetryableError(fmt.Errorf("responses request: %w", retryableNetError{})) {
+		t.Fatal("network timeout retryable = false, want true")
+	}
+	for _, err := range []error{context.Canceled, context.DeadlineExceeded} {
+		if IsRetryableError(err) {
+			t.Fatalf("%v retryable = true, want false", err)
+		}
 	}
 }
 

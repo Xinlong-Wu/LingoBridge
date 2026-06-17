@@ -55,7 +55,7 @@ func uploadOpenAIVisionFile(client *http.Client, baseURL, apiKey, filename strin
 		return "", fmt.Errorf("openai file upload read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("openai file upload HTTP %d: %s", resp.StatusCode, truncateStr(string(respBody), 500))
+		return "", newHTTPError("openai file upload", resp.StatusCode, respBody)
 	}
 
 	var out struct {

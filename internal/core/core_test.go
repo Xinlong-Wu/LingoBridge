@@ -95,6 +95,7 @@ type fakeLLM struct {
 	resp            llm.Response
 	prepareErr      error
 	streamChunks    []string
+	streamErrs      []error
 	streamErr       error
 	systemPrompts   []string
 }
@@ -120,6 +121,13 @@ func (f *fakeLLM) ChatStream(systemPrompt string, messages []store.Message, onCh
 			if err := onChunk(chunk); err != nil {
 				return llm.Response{}, err
 			}
+		}
+	}
+	if len(f.streamErrs) > 0 {
+		err := f.streamErrs[0]
+		f.streamErrs = f.streamErrs[1:]
+		if err != nil {
+			return llm.Response{}, err
 		}
 	}
 	if f.streamErr != nil {
@@ -153,6 +161,7 @@ type fakeToolLLM struct {
 	finalText     string
 	providerCtx   store.ProviderContext
 	systemPrompts []string
+	turnErrs      map[int]error
 }
 
 func (f *fakeToolLLM) ChatStreamWithTools(systemPrompt string, messages []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, tools []tooltypes.Spec, previous llm.ToolState, results []tooltypes.Result, onChunk func(chunk string) error) (llm.ToolResponse, error) {
@@ -164,6 +173,11 @@ func (f *fakeToolLLM) ChatStreamWithTools(systemPrompt string, messages []store.
 	f.results = append(f.results, results...)
 	turn := f.turns
 	f.turns++
+	if f.turnErrs != nil {
+		if err := f.turnErrs[turn]; err != nil {
+			return llm.ToolResponse{}, err
+		}
+	}
 	var calls []tooltypes.Call
 	switch {
 	case len(f.callTurns) > 0:
@@ -433,6 +447,77 @@ func TestHandleTextSavesConversationAndSendsReply(t *testing.T) {
 	}
 }
 
+func TestHandleTextRetriesRetryableLLMTurn(t *testing.T) {
+	withImmediateLLMRetry(t)
+	sessions := &fakeSessions{}
+	client := &fakeLLM{
+		streamErrs: []error{
+			retryableLLMHTTPError(),
+			retryableLLMHTTPError(),
+			nil,
+		},
+		resp: llm.Response{Text: "eventual answer"},
+	}
+	b := testBot(sessions, client)
+	sender := &fakeSender{}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(client.systemPrompts) != 3 {
+		t.Fatalf("system prompts = %d, want 3 attempts", len(client.systemPrompts))
+	}
+	if sessions.saved == nil || len(sessions.saved.Messages) != 2 {
+		t.Fatalf("saved = %#v, want one user and one assistant message", sessions.saved)
+	}
+	if len(sender.sent) != 1 || sender.sent[0].Text != "eventual answer" {
+		t.Fatalf("sent = %#v, want eventual answer", sender.sent)
+	}
+}
+
+func TestHandleTextDoesNotRetryNonRetryableLLMError(t *testing.T) {
+	withImmediateLLMRetry(t)
+	sessions := &fakeSessions{}
+	client := &fakeLLM{streamErrs: []error{errors.New("bad request")}}
+	b := testBot(sessions, client)
+
+	err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, &fakeSender{})
+	if err == nil || err.Error() != "bad request" {
+		t.Fatalf("Handle error = %v, want bad request", err)
+	}
+	if len(client.systemPrompts) != 1 {
+		t.Fatalf("system prompts = %d, want one attempt", len(client.systemPrompts))
+	}
+	if sessions.saved != nil {
+		t.Fatalf("saved = %#v, want no saved history on failed LLM turn", sessions.saved)
+	}
+}
+
+func TestHandleTextDoesNotRetryAfterStreamingChunk(t *testing.T) {
+	withImmediateLLMRetry(t)
+	sessions := &fakeSessions{}
+	client := &fakeLLM{
+		streamChunks: []string{"partial"},
+		streamErrs:   []error{retryableLLMHTTPError()},
+	}
+	b := testBot(sessions, client)
+	sender := &fakeStreamingSender{}
+
+	err := b.Handle(context.Background(), InboundMessage{UserKey: "user", CommandText: "hi", LLMText: "hi"}, sender)
+	if err == nil {
+		t.Fatal("Handle returned nil, want retryable error after streamed chunk")
+	}
+	if len(client.systemPrompts) != 1 {
+		t.Fatalf("system prompts = %d, want no retry after streamed chunk", len(client.systemPrompts))
+	}
+	if sender.stream == nil || len(sender.stream.updates) == 0 {
+		t.Fatalf("stream = %#v, want partial update before failure", sender.stream)
+	}
+	if sessions.saved != nil {
+		t.Fatalf("saved = %#v, want no saved history on failed streamed turn", sessions.saved)
+	}
+}
+
 func TestHandleTextRunsToolsAndSavesTrace(t *testing.T) {
 	sessions := &fakeSessions{}
 	llmClient := &fakeToolLLM{
@@ -475,6 +560,86 @@ func TestHandleTextRunsToolsAndSavesTrace(t *testing.T) {
 	}
 	if traces[0].Name != "fake_tool" || traces[0].Status != "ok" || !strings.Contains(traces[0].Arguments, "roadmap") {
 		t.Fatalf("trace = %#v, want ok fake_tool trace", traces[0])
+	}
+}
+
+func TestHandleTextRetriesToolTurnWithoutRepeatingToolCalls(t *testing.T) {
+	withImmediateLLMRetry(t)
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		callTurns: [][]tooltypes.Call{{
+			{
+				ID:        "call_1",
+				Name:      "fake_tool",
+				Arguments: json.RawMessage(`{"query":"roadmap"}`),
+			},
+		}},
+		turnErrs:  map[int]error{1: retryableLLMHTTPError()},
+		finalText: "answer after retry",
+	}
+	tool := &fakeTool{result: `{"ok":true}`}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		UserKey:     "u1",
+		CommandText: "search roadmap",
+		LLMText:     "search roadmap",
+		Tools:       []tooltypes.Tool{tool},
+	}, &fakeSender{})
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(tool.calls) != 1 {
+		t.Fatalf("tool calls = %#v, want one execution despite LLM retry", tool.calls)
+	}
+	if len(llmClient.systemPrompts) != 3 {
+		t.Fatalf("system prompts = %d, want initial tool turn, failed final turn, retried final turn", len(llmClient.systemPrompts))
+	}
+	if len(llmClient.results) != 2 {
+		t.Fatalf("tool results sent to LLM = %d, want same result sent on failed turn and retry", len(llmClient.results))
+	}
+	if sessions.saved == nil || len(sessions.saved.Messages[1].ToolTraces) != 1 {
+		t.Fatalf("saved = %#v, want one tool trace", sessions.saved)
+	}
+}
+
+func TestHandleTextRetryExhaustedDoesNotSaveOrCallReviewTool(t *testing.T) {
+	withImmediateLLMRetry(t)
+	sessions := &fakeSessions{}
+	llmClient := &fakeToolLLM{
+		turnErrs: map[int]error{
+			0: retryableLLMHTTPError(),
+			1: retryableLLMHTTPError(),
+			2: retryableLLMHTTPError(),
+		},
+	}
+	reviewTool := &fakeTool{spec: tooltypes.Spec{Name: "mcp_github_pull_request_review_write"}}
+	bot := New(sessions, testLLMConfig())
+	bot.NewLLM = func(config.ResolvedModel) llm.Client { return llmClient }
+
+	err := bot.Handle(context.Background(), InboundMessage{
+		Platform:             "github",
+		UserKey:              "github:repo:pr:1",
+		LLMText:              "review",
+		Tools:                []tooltypes.Tool{reviewTool},
+		DisableProviderTools: true,
+	}, &fakeSender{})
+	if err == nil {
+		t.Fatal("Handle returned nil, want exhausted retry error")
+	}
+	var httpErr *llm.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != 504 {
+		t.Fatalf("Handle error = %v, want HTTP 504", err)
+	}
+	if len(llmClient.systemPrompts) != 3 {
+		t.Fatalf("system prompts = %d, want 3 attempts", len(llmClient.systemPrompts))
+	}
+	if len(reviewTool.calls) != 0 {
+		t.Fatalf("review tool calls = %#v, want no submit when LLM turn never succeeds", reviewTool.calls)
+	}
+	if sessions.saved != nil {
+		t.Fatalf("saved = %#v, want no saved history on exhausted retry", sessions.saved)
 	}
 }
 
@@ -1570,6 +1735,19 @@ func TestSplitTextChunksByRunesUsesCharacterLimit(t *testing.T) {
 	if got := strings.Join(chunks, ""); got != text {
 		t.Fatalf("joined chunks = %q, want %q", got, text)
 	}
+}
+
+func withImmediateLLMRetry(t *testing.T) {
+	t.Helper()
+	original := llmTurnRetryDelays
+	llmTurnRetryDelays = []time.Duration{0, 0}
+	t.Cleanup(func() {
+		llmTurnRetryDelays = original
+	})
+}
+
+func retryableLLMHTTPError() error {
+	return &llm.HTTPError{Label: "responses", StatusCode: 504, Body: "gateway timeout"}
 }
 
 func testBot(sessions *fakeSessions, client *fakeLLM) *Bot {

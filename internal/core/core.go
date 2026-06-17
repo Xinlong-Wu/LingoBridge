@@ -17,6 +17,10 @@ import (
 
 var coreLog = logging.For("core")
 
+const llmTurnMaxAttempts = 3
+
+var llmTurnRetryDelays = []time.Duration{2 * time.Second, 5 * time.Second}
+
 type Platform interface {
 	Run(ctx context.Context, handler Handler) error
 }
@@ -158,6 +162,66 @@ func effectiveSystemPrompt(base, suffix string) string {
 	return base + "\n\n" + suffix
 }
 
+func retryLLMTurn[T any](ctx context.Context, provider, modelName, operation string, onChunk func(string) error, call func(func(string) error) (T, error)) (T, error) {
+	var zero T
+	var lastErr error
+	for attempt := 1; attempt <= llmTurnMaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return zero, err
+		}
+		chunkEmitted := false
+		attemptOnChunk := onChunk
+		if onChunk != nil {
+			attemptOnChunk = func(chunk string) error {
+				if chunk != "" {
+					chunkEmitted = true
+				}
+				return onChunk(chunk)
+			}
+		}
+		resp, err := call(attemptOnChunk)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if chunkEmitted || !llm.IsRetryableError(err) || attempt == llmTurnMaxAttempts {
+			return zero, err
+		}
+		delay := llmTurnRetryDelay(attempt)
+		coreLog.Warn(ctx, "retrying LLM turn provider=%s model=%s operation=%s attempt=%d max_attempts=%d delay=%s error=%s",
+			provider, modelName, operation, attempt+1, llmTurnMaxAttempts, delay, truncateText(err.Error(), defaultToolTraceTextLimit))
+		if !sleepLLMRetry(ctx, delay) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return zero, ctxErr
+			}
+			return zero, err
+		}
+	}
+	return zero, lastErr
+}
+
+func sleepLLMRetry(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func llmTurnRetryDelay(failedAttempt int) time.Duration {
+	index := failedAttempt - 1
+	if index < 0 || index >= len(llmTurnRetryDelays) {
+		return 0
+	}
+	return llmTurnRetryDelays[index]
+}
+
 func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, toolOptions tooltypes.Options) error {
 	sess, err := b.Sessions.GetOrCreateCurrentSession(msg.UserKey)
 	if err != nil {
@@ -241,13 +305,13 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 	var toolTraces []store.ToolTrace
 	if len(msg.Tools) > 0 {
 		if toolClient, ok := llmClient.(llm.ToolCallingClient); ok {
-			llmResponse, toolTraces, err = b.chatWithTools(ctx, toolClient, systemPrompt, msgs, providerContext, compact, compactAllowed, msg.Tools, toolOptions, onChunk)
+			llmResponse, toolTraces, err = b.chatWithTools(ctx, toolClient, provider, modelName, systemPrompt, msgs, providerContext, compact, compactAllowed, msg.Tools, toolOptions, onChunk)
 		} else {
 			coreLog.Warn(ctx, "model provider=%s model=%s does not support tool calling; continuing without tools", provider, modelName)
-			llmResponse, err = b.chatWithoutTools(llmClient, systemPrompt, compactAllowed, providerContext, compact, msgs, onChunk)
+			llmResponse, err = b.chatWithoutTools(ctx, llmClient, provider, modelName, systemPrompt, compactAllowed, providerContext, compact, msgs, onChunk)
 		}
 	} else {
-		llmResponse, err = b.chatWithoutTools(llmClient, systemPrompt, compactAllowed, providerContext, compact, msgs, onChunk)
+		llmResponse, err = b.chatWithoutTools(ctx, llmClient, provider, modelName, systemPrompt, compactAllowed, providerContext, compact, msgs, onChunk)
 	}
 	stopTyping()
 	if err != nil {
@@ -332,16 +396,18 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 	return nil
 }
 
-func (b *Bot) chatWithoutTools(client llm.Client, systemPrompt string, compactAllowed bool, providerContext store.ProviderContext, compact llm.CompactConfig, msgs []store.Message, onChunk func(string) error) (llm.Response, error) {
-	if compactAllowed {
-		if contextClient, ok := client.(llm.ContextStreamingClient); ok {
-			return contextClient.ChatStreamWithContext(systemPrompt, msgs, providerContext, compact, onChunk)
+func (b *Bot) chatWithoutTools(ctx context.Context, client llm.Client, provider, modelName, systemPrompt string, compactAllowed bool, providerContext store.ProviderContext, compact llm.CompactConfig, msgs []store.Message, onChunk func(string) error) (llm.Response, error) {
+	return retryLLMTurn(ctx, provider, modelName, "chat", onChunk, func(attemptOnChunk func(string) error) (llm.Response, error) {
+		if compactAllowed {
+			if contextClient, ok := client.(llm.ContextStreamingClient); ok {
+				return contextClient.ChatStreamWithContext(systemPrompt, msgs, providerContext, compact, attemptOnChunk)
+			}
 		}
-	}
-	return client.ChatStream(systemPrompt, msgs, onChunk)
+		return client.ChatStream(systemPrompt, msgs, attemptOnChunk)
+	})
 }
 
-func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, systemPrompt string, msgs []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, compactAllowed bool, tools []tooltypes.Tool, options tooltypes.Options, onChunk func(string) error) (llm.Response, []store.ToolTrace, error) {
+func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, provider, modelName, systemPrompt string, msgs []store.Message, providerContext store.ProviderContext, compact llm.CompactConfig, compactAllowed bool, tools []tooltypes.Tool, options tooltypes.Options, onChunk func(string) error) (llm.Response, []store.ToolTrace, error) {
 	specs := toolSpecs(tools)
 	if len(specs) == 0 {
 		coreLog.Warn(ctx, "tool calling requested with %d tool entries but no valid tool specs; falling back to plain chat", len(tools))
@@ -349,7 +415,7 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 		if !ok {
 			return llm.Response{}, nil, fmt.Errorf("tool-capable client does not implement base chat")
 		}
-		resp, err := b.chatWithoutTools(baseClient, systemPrompt, compactAllowed, providerContext, compact, msgs, onChunk)
+		resp, err := b.chatWithoutTools(ctx, baseClient, provider, modelName, systemPrompt, compactAllowed, providerContext, compact, msgs, onChunk)
 		return resp, nil, err
 	}
 
@@ -372,7 +438,9 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, s
 	for {
 		turnSystemPrompt := toolBudgetSystemPrompt(systemPrompt, maxCalls, pendingBudgetReminder, pendingBudgetRemaining)
 		pendingBudgetReminder = toolBudgetReminderNone
-		resp, err := client.ChatStreamWithTools(turnSystemPrompt, msgs, providerContext, effectiveCompact, specs, previous, results, onChunk)
+		resp, err := retryLLMTurn(ctx, provider, modelName, "tool_turn", onChunk, func(attemptOnChunk func(string) error) (llm.ToolResponse, error) {
+			return client.ChatStreamWithTools(turnSystemPrompt, msgs, providerContext, effectiveCompact, specs, previous, results, attemptOnChunk)
+		})
 		if err != nil {
 			return llm.Response{}, traces, err
 		}

@@ -440,7 +440,7 @@ func postAnthropicStream(client *http.Client, reqURL string, headers http.Header
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return Response{}, fmt.Errorf("anthropic stream HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
+		return Response{}, newHTTPError("anthropic stream", resp.StatusCode, body)
 	}
 
 	return parseAnthropicSSE(resp.Body, onChunk)

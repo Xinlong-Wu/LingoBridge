@@ -459,7 +459,7 @@ func postResponsesStream(client *http.Client, reqURL string, headers http.Header
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return Response{}, fmt.Errorf("responses stream HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
+		return Response{}, newHTTPError("responses stream", resp.StatusCode, body)
 	}
 
 	return parseResponsesSSE(resp.Body, onChunk)
@@ -474,7 +474,7 @@ func postResponsesToolStream(client *http.Client, reqURL string, headers http.He
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return ToolResponse{}, fmt.Errorf("responses stream HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 500))
+		return ToolResponse{}, newHTTPError("responses stream", resp.StatusCode, body)
 	}
 
 	return parseResponsesToolSSE(resp.Body, onChunk)
