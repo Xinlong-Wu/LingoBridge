@@ -85,6 +85,10 @@ platforms:
         base_url: "https://api.github.com"
         web_url: "https://github.com"
         poll_interval: "2m"
+        # Optional. Model profile (a key under llm.models) used for this
+        # account's reviews. Omit to use llm.default_model. An unknown name
+        # logs a warning and falls back to llm.default_model.
+        model: "deepseek"
         repositories:
           - "owner/repo"
         review:

@@ -486,6 +486,63 @@ func TestHandleTextSavesConversationAndSendsReply(t *testing.T) {
 	}
 }
 
+func testMultiModelConfig() config.LLMConfig {
+	return config.LLMConfig{
+		DefaultModel: "deepseek",
+		Models: map[string]config.LLMModelConfig{
+			"deepseek": {Provider: "openai", BaseURL: "https://llm.test", APIKey: "key", ID: "model"},
+			"claude":   {Provider: "anthropic", BaseURL: "https://anthropic.test", APIKey: "key", ID: "claude-model"},
+		},
+		SystemPrompt: "system",
+	}
+}
+
+func TestHandleTextModelOverrideSelectsConfiguredModel(t *testing.T) {
+	sessions := &fakeSessions{}
+	client := &fakeLLM{}
+	var resolved []string
+	b := &Bot{
+		Sessions:   sessions,
+		LLMConfig:  testMultiModelConfig(),
+		LLMClients: map[string]llm.Client{},
+		NewLLM: func(m config.ResolvedModel) llm.Client {
+			resolved = append(resolved, m.Name)
+			return client
+		},
+		TextChunkLimit: testTextChunkLimit,
+	}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", Model: "claude", LLMText: "hi"}, &fakeSender{}); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(resolved) != 1 || resolved[0] != "claude" {
+		t.Fatalf("resolved models = %#v, want [claude]", resolved)
+	}
+}
+
+func TestHandleTextModelOverrideFallsBackWhenUnknown(t *testing.T) {
+	sessions := &fakeSessions{}
+	client := &fakeLLM{}
+	var resolved []string
+	b := &Bot{
+		Sessions:   sessions,
+		LLMConfig:  testMultiModelConfig(),
+		LLMClients: map[string]llm.Client{},
+		NewLLM: func(m config.ResolvedModel) llm.Client {
+			resolved = append(resolved, m.Name)
+			return client
+		},
+		TextChunkLimit: testTextChunkLimit,
+	}
+
+	if err := b.Handle(context.Background(), InboundMessage{UserKey: "user", Model: "missing", LLMText: "hi"}, &fakeSender{}); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if len(resolved) != 1 || resolved[0] != "deepseek" {
+		t.Fatalf("resolved models = %#v, want fallback [deepseek]", resolved)
+	}
+}
+
 func TestHandleTextRetriesRetryableLLMTurn(t *testing.T) {
 	withImmediateLLMRetry(t)
 	sessions := &fakeSessions{}

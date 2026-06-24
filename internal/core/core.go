@@ -49,6 +49,7 @@ type InboundMessage struct {
 	AccountID            string
 	AccountName          string
 	UserKey              string
+	Model                string
 	CommandText          string
 	CommandPolicy        commands.Policy
 	LLMText              string
@@ -231,7 +232,7 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 		return err
 	}
 
-	model, llmClient, err := b.llmForUser(msg.UserKey)
+	model, llmClient, err := b.llmForMessage(ctx, msg)
 	if err != nil {
 		coreLog.Error(ctx, "resolve LLM: %v", err)
 		_ = sender.Send(ctx, OutboundMessage{Text: "❌ 模型配置不可用，请检查配置。"})
