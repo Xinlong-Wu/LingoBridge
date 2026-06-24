@@ -54,7 +54,7 @@ func (m *Manager) LoadHistory(userID, sessionID string) (*store.Conversation, er
 
 // SaveHistory saves a conversation snapshot for a session.
 func (m *Manager) SaveHistory(userID, sessionID string, conv *store.Conversation) error {
-	return m.store.AppendConversation(userID, sessionID, conv)
+	return m.store.SaveConversation(userID, sessionID, conv)
 }
 
 // CreateSession creates a new session for a user and sets it as current.

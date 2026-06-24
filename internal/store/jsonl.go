@@ -95,8 +95,9 @@ func (s *Store) LoadConversation(userID, sessionID string) (*Conversation, error
 	return &Conversation{}, nil
 }
 
-// AppendConversation appends a conversation snapshot as a new JSONL line.
-func (s *Store) AppendConversation(userID, sessionID string, conv *Conversation) error {
+// SaveConversation writes a conversation snapshot as a single JSONL line,
+// atomically replacing any previous content via write-to-temp + rename.
+func (s *Store) SaveConversation(userID, sessionID string, conv *Conversation) error {
 	path := s.SessionPath(userID, sessionID)
 
 	dir := filepath.Dir(path)
@@ -109,14 +110,13 @@ func (s *Store) AppendConversation(userID, sessionID string, conv *Conversation)
 		return fmt.Errorf("marshal conversation: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		return fmt.Errorf("open session file: %w", err)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(line, '\n'), 0600); err != nil {
+		return fmt.Errorf("write session temp file: %w", err)
 	}
-	defer f.Close()
-
-	if _, err := f.Write(append(line, '\n')); err != nil {
-		return fmt.Errorf("write session file: %w", err)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename session file: %w", err)
 	}
 
 	return nil
