@@ -96,12 +96,24 @@ func (c *githubClient) ListOpenPullRequests(ctx context.Context, repo Repository
 }
 
 func (c *githubClient) ReviewInstructions(ctx context.Context, pr PullRequest) (ReviewInstructions, bool, error) {
+	// Try the exact base SHA first (pinned to the PR's merge base).
 	text, err := c.GetFileContents(ctx, pr.Base.Repo, reviewInstructionsPath, pr.Base.SHA)
 	if err == nil {
 		return ReviewInstructions{Text: text, Source: fmt.Sprintf("%s@%s:%s", pr.Base.Repo.FullName(), shortSHA(pr.Base.SHA), reviewInstructionsPath)}, true, nil
 	}
 	if !errors.Is(err, ErrNotFound) {
 		return ReviewInstructions{}, false, fmt.Errorf("fetch %s/%s@%s:%s: %w", pr.Base.Repo.Owner, pr.Base.Repo.Name, shortSHA(pr.Base.SHA), reviewInstructionsPath, err)
+	}
+	// The file may have been added after the PR's base commit. Fall back to
+	// the current tip of the base branch (e.g. main HEAD).
+	if pr.Base.Ref != "" {
+		text, err = c.GetFileContents(ctx, pr.Base.Repo, reviewInstructionsPath, pr.Base.Ref)
+		if err == nil {
+			return ReviewInstructions{Text: text, Source: fmt.Sprintf("%s@%s:%s", pr.Base.Repo.FullName(), pr.Base.Ref, reviewInstructionsPath)}, true, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return ReviewInstructions{}, false, fmt.Errorf("fetch %s/%s@%s:%s: %w", pr.Base.Repo.Owner, pr.Base.Repo.Name, pr.Base.Ref, reviewInstructionsPath, err)
+		}
 	}
 	return ReviewInstructions{}, false, nil
 }
@@ -151,7 +163,7 @@ func (c *githubClient) doJSON(ctx context.Context, method, apiPath string, query
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	githubLog.Debug(ctx, "github request %s", req)
+	// githubLog.Debug(ctx, "github request %s", req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
