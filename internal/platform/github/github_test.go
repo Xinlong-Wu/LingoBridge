@@ -193,10 +193,11 @@ func TestReviewInstructionsReadBaseOnly(t *testing.T) {
 	})
 	instructions, ok, err = client.ReviewInstructions(context.Background(), pr)
 	if err != nil || ok || instructions.Text != "" {
-		t.Fatalf("base missing = %#v ok=%t err=%v, want no head fallback", instructions, ok, err)
+		t.Fatalf("base missing = %#v ok=%t err=%v, want not found", instructions, ok, err)
 	}
-	if requests != 1 {
-		t.Fatalf("requests = %d, want one base request only", requests)
+	// Two requests: one for base SHA, one fallback for base ref (both 404).
+	if requests != 2 {
+		t.Fatalf("requests = %d, want base SHA + base ref fallback", requests)
 	}
 }
 
