@@ -96,14 +96,6 @@ func (c *githubClient) ListOpenPullRequests(ctx context.Context, repo Repository
 }
 
 func (c *githubClient) ReviewInstructions(ctx context.Context, pr PullRequest) (ReviewInstructions, bool, error) {
-	// Try the exact base SHA first (pinned to the PR's merge base).
-	text, err := c.GetFileContents(ctx, pr.Base.Repo, reviewInstructionsPath, pr.Base.SHA)
-	if err == nil {
-		return ReviewInstructions{Text: text, Source: fmt.Sprintf("%s@%s:%s", pr.Base.Repo.FullName(), shortSHA(pr.Base.SHA), reviewInstructionsPath)}, true, nil
-	}
-	if !errors.Is(err, ErrNotFound) {
-		return ReviewInstructions{}, false, fmt.Errorf("fetch %s/%s@%s:%s: %w", pr.Base.Repo.Owner, pr.Base.Repo.Name, shortSHA(pr.Base.SHA), reviewInstructionsPath, err)
-	}
 	// The file may have been added after the PR's base commit. Fall back to
 	// the current tip of the base branch (e.g. main HEAD).
 	if pr.Base.Ref != "" {
@@ -114,6 +106,15 @@ func (c *githubClient) ReviewInstructions(ctx context.Context, pr PullRequest) (
 		if !errors.Is(err, ErrNotFound) {
 			return ReviewInstructions{}, false, fmt.Errorf("fetch %s/%s@%s:%s: %w", pr.Base.Repo.Owner, pr.Base.Repo.Name, pr.Base.Ref, reviewInstructionsPath, err)
 		}
+	}
+	
+	// Try the exact base SHA then (pinned to the PR's merge base).
+	text, err := c.GetFileContents(ctx, pr.Base.Repo, reviewInstructionsPath, pr.Base.SHA)
+	if err == nil {
+		return ReviewInstructions{Text: text, Source: fmt.Sprintf("%s@%s:%s", pr.Base.Repo.FullName(), shortSHA(pr.Base.SHA), reviewInstructionsPath)}, true, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return ReviewInstructions{}, false, fmt.Errorf("fetch %s/%s@%s:%s: %w", pr.Base.Repo.Owner, pr.Base.Repo.Name, shortSHA(pr.Base.SHA), reviewInstructionsPath, err)
 	}
 	return ReviewInstructions{}, false, nil
 }
