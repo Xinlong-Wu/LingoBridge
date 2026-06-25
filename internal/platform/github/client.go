@@ -99,7 +99,7 @@ func (c *githubClient) ReviewInstructions(ctx context.Context, pr PullRequest) (
 	// The file may have been added after the PR's base commit. Fall back to
 	// the current tip of the base branch (e.g. main HEAD).
 	if pr.Base.Ref != "" {
-		text, err = c.GetFileContents(ctx, pr.Base.Repo, reviewInstructionsPath, pr.Base.Ref)
+		text, err := c.GetFileContents(ctx, pr.Base.Repo, reviewInstructionsPath, pr.Base.Ref)
 		if err == nil {
 			return ReviewInstructions{Text: text, Source: fmt.Sprintf("%s@%s:%s", pr.Base.Repo.FullName(), pr.Base.Ref, reviewInstructionsPath)}, true, nil
 		}

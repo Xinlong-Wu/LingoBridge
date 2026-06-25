@@ -28,6 +28,10 @@ type Platform struct {
 	newTokenSource func(AccountConfig) (tokenSource, error)
 	newAPIClient   func(AccountConfig, tokenSource) apiClient
 	newMCPHost     func() mcpHost
+
+	// skippedPRs tracks "repo#number@head" keys that have already been logged
+	// as skipped, so the debug line is emitted only once per unchanged PR.
+	skippedPRs map[string]struct{}
 }
 
 type mcpHost interface {
@@ -131,11 +135,25 @@ func (p *Platform) pollOnce(ctx context.Context, handler core.Handler, accountCf
 				return nil
 			}
 			if pr.Draft {
-				githubLog.Debug(ctx, "skipping draft github pr repo=%s number=%d head=%s", pr.Base.Repo.FullName(), pr.Number, shortSHA(pr.Head.SHA))
+				skipKey := fmt.Sprintf("%s#%d@%s:draft", pr.Base.Repo.FullName(), pr.Number, shortSHA(pr.Head.SHA))
+				if _, seen := p.skippedPRs[skipKey]; !seen {
+					githubLog.Debug(ctx, "skipping draft github pr repo=%s number=%d head=%s", pr.Base.Repo.FullName(), pr.Number, shortSHA(pr.Head.SHA))
+					if p.skippedPRs == nil {
+						p.skippedPRs = make(map[string]struct{})
+					}
+					p.skippedPRs[skipKey] = struct{}{}
+				}
 				continue
 			}
 			if !shouldProcessCursor(state, pr) {
-				githubLog.Debug(ctx, "skipping unchanged github pr repo=%s number=%d head=%s", pr.Base.Repo.FullName(), pr.Number, shortSHA(pr.Head.SHA))
+				skipKey := fmt.Sprintf("%s#%d@%s", pr.Base.Repo.FullName(), pr.Number, shortSHA(pr.Head.SHA))
+				if _, seen := p.skippedPRs[skipKey]; !seen {
+					githubLog.Debug(ctx, "skipping unchanged github pr repo=%s number=%d head=%s", pr.Base.Repo.FullName(), pr.Number, shortSHA(pr.Head.SHA))
+					if p.skippedPRs == nil {
+						p.skippedPRs = make(map[string]struct{})
+					}
+					p.skippedPRs[skipKey] = struct{}{}
+				}
 				continue
 			}
 			instructions, ok, err := p.reviewInstructions(ctx, accountCfg, client, pr)
