@@ -49,6 +49,7 @@ type InboundMessage struct {
 	AccountID            string
 	AccountName          string
 	UserKey              string
+	Model                string
 	CommandText          string
 	CommandPolicy        commands.Policy
 	LLMText              string
@@ -231,7 +232,7 @@ func (b *Bot) reply(ctx context.Context, msg InboundMessage, sender Sender, tool
 		return err
 	}
 
-	model, llmClient, err := b.llmForUser(msg.UserKey)
+	model, llmClient, err := b.llmForMessage(ctx, msg)
 	if err != nil {
 		coreLog.Error(ctx, "resolve LLM: %v", err)
 		_ = sender.Send(ctx, OutboundMessage{Text: "❌ 模型配置不可用，请检查配置。"})
@@ -430,6 +431,7 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, p
 	var traces []store.ToolTrace
 	var previous llm.ToolState
 	var results []tooltypes.Result
+	compacted := false
 	totalCalls := 0
 	pendingBudgetReminder := toolBudgetReminderNone
 	pendingBudgetRemaining := maxCalls
@@ -454,7 +456,14 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, p
 		}
 		if len(resp.ToolCalls) == 0 {
 			coreLog.Debug(ctx, "tool loop finish calls=%d traces=%d text_len=%d images=%d", totalCalls, len(traces), len(resp.Text), len(resp.Images))
-			return resp.Response, traces, nil
+			finalResp := resp.Response
+			if compacted {
+				finalResp.Compacted = true
+			}
+			if !providerContext.IsEmpty() && finalResp.ProviderContext.IsEmpty() {
+				finalResp.ProviderContext = providerContext
+			}
+			return finalResp, traces, nil
 		}
 		if totalCalls+len(resp.ToolCalls) > maxCalls {
 			err := fmt.Errorf("tool call limit exceeded: %d > %d", totalCalls+len(resp.ToolCalls), maxCalls)
@@ -463,6 +472,12 @@ func (b *Bot) chatWithTools(ctx context.Context, client llm.ToolCallingClient, p
 		}
 
 		previous = appendToolState(previous, resp.ToolState)
+		if !resp.Response.ProviderContext.IsEmpty() {
+			providerContext = resp.Response.ProviderContext
+		}
+		if resp.Response.Compacted {
+			compacted = true
+		}
 		coreLog.Debug(ctx, "model requested tool calls count=%d total_before=%d", len(resp.ToolCalls), totalCalls)
 		for _, call := range resp.ToolCalls {
 			if err := ctx.Err(); err != nil {

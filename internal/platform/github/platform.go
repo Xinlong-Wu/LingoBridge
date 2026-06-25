@@ -175,11 +175,13 @@ func (p *Platform) reviewInstructions(ctx context.Context, accountCfg AccountCon
 	if err != nil || ok {
 		return instructions, ok, err
 	}
+	githubLog.Warn(ctx, "remote review instructions file not found or not accessible repo=%s ref=%s path=%s — if the file exists, check that the GitHub App has 'contents:read' permission on this repository",
+		pr.Base.Repo.FullName(), shortSHA(pr.Base.SHA), reviewInstructionsPath)
 	defaultInstructions := strings.TrimSpace(accountCfg.Review.DefaultInstructions)
 	if defaultInstructions == "" {
 		return ReviewInstructions{}, false, nil
 	}
-	githubLog.Warn(ctx, "using default github review instructions account=%s repo=%s number=%d head=%s", p.account.Name, pr.Base.Repo.FullName(), pr.Number, shortSHA(pr.Head.SHA))
+	githubLog.Warn(ctx, "falling back to config default_instructions account=%s repo=%s number=%d head=%s", p.account.Name, pr.Base.Repo.FullName(), pr.Number, shortSHA(pr.Head.SHA))
 	return ReviewInstructions{
 		Text:   defaultInstructions,
 		Source: fmt.Sprintf("config:platforms.github.accounts.%s.review.default_instructions", p.account.Name),
@@ -231,6 +233,7 @@ func (p *Platform) reviewPullRequest(ctx context.Context, handler core.Handler, 
 		AccountID:          p.account.ID,
 		AccountName:        p.account.Name,
 		UserKey:            reviewUserKey(pr),
+		Model:              accountCfg.Model,
 		CommandText:        "",
 		LLMText:            buildReviewUserPrompt(pr),
 		SystemPromptSuffix: buildReviewSystemPrompt(pr, instructions),

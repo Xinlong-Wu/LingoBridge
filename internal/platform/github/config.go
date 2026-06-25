@@ -33,6 +33,7 @@ type AccountConfig struct {
 	WebURL         string       `yaml:"web_url,omitempty"`
 	PollInterval   Duration     `yaml:"poll_interval,omitempty"`
 	Repositories   []string     `yaml:"repositories,omitempty"`
+	Model          string       `yaml:"model,omitempty"`
 	Review         ReviewConfig `yaml:"review,omitempty"`
 	MCP            MCPConfig    `yaml:"mcp,omitempty"`
 }
@@ -180,6 +181,7 @@ func normalizeAccountConfig(account AccountConfig) AccountConfig {
 	if account.WebURL == "" {
 		account.WebURL = DefaultWebURL
 	}
+	account.Model = strings.TrimSpace(account.Model)
 	if account.PollInterval.Duration <= 0 {
 		account.PollInterval = NewDuration(DefaultPollInterval)
 	}

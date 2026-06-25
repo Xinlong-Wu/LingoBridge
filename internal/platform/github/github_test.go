@@ -757,6 +757,45 @@ func TestPollOnceMarksMissingInstructionsAndSkipsDraft(t *testing.T) {
 	}
 }
 
+func TestReviewPullRequestPassesAccountModel(t *testing.T) {
+	pr := testPullRequest()
+	reviewWriteTool := &fakeTool{spec: tooltypes.Spec{Name: "mcp_github_pull_request_review_write"}}
+	p := &Platform{
+		account:    store.Account{ID: "github:456", Name: "reviewer", Platform: store.PlatformGitHub},
+		newMCPHost: func() mcpHost { return &fakeMCPHost{tools: []tooltypes.Tool{reviewWriteTool}} },
+	}
+	instructions := ReviewInstructions{Text: "review carefully", Source: "base"}
+
+	t.Run("configured model is forwarded", func(t *testing.T) {
+		handler := &recordingHandler{}
+		accountCfg := normalizeAccountConfig(AccountConfig{
+			Repositories: []string{"base/repo"},
+			Model:        "claude",
+			MCP:          MCPConfig{Command: "github-mcp-server"},
+		})
+		if _, err := p.reviewPullRequest(context.Background(), handler, accountCfg, staticTokenSource{}, pr, instructions); err != nil {
+			t.Fatalf("reviewPullRequest returned error: %v", err)
+		}
+		if handler.model != "claude" {
+			t.Fatalf("msg.Model = %q, want claude", handler.model)
+		}
+	})
+
+	t.Run("empty model stays empty", func(t *testing.T) {
+		handler := &recordingHandler{}
+		accountCfg := normalizeAccountConfig(AccountConfig{
+			Repositories: []string{"base/repo"},
+			MCP:          MCPConfig{Command: "github-mcp-server"},
+		})
+		if _, err := p.reviewPullRequest(context.Background(), handler, accountCfg, staticTokenSource{}, pr, instructions); err != nil {
+			t.Fatalf("reviewPullRequest returned error: %v", err)
+		}
+		if handler.model != "" {
+			t.Fatalf("msg.Model = %q, want empty", handler.model)
+		}
+	})
+}
+
 func TestPollOnceMarksReviewedOnlyAfterCommentSubmission(t *testing.T) {
 	pr := testPullRequest()
 	accountCfg := AccountConfig{
@@ -913,6 +952,15 @@ func (f *fakeAPIClient) ReviewInstructions(ctx context.Context, pr PullRequest) 
 type fakeHandler struct{}
 
 func (fakeHandler) Handle(ctx context.Context, msg core.InboundMessage, sender core.Sender) error {
+	return nil
+}
+
+type recordingHandler struct {
+	model string
+}
+
+func (h *recordingHandler) Handle(ctx context.Context, msg core.InboundMessage, sender core.Sender) error {
+	h.model = msg.Model
 	return nil
 }
 

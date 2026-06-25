@@ -265,15 +265,6 @@ func TestCmdAccountDeletePlatformSelectorDeletesMatchingAccountAndFeishuConfig(t
 		CredentialsJSON: "{}",
 		Enabled:         true,
 	})
-	saveTestAccount(t, store.Account{
-		ID:              "feishu:cli_xxx",
-		Name:            "default",
-		Platform:        store.PlatformFeishu,
-		BaseURL:         feishu.DefaultBaseURL,
-		UserID:          "cli_xxx",
-		CredentialsJSON: "{}",
-		Enabled:         true,
-	})
 	upsertTestFeishuAccountConfig(t, "default", "cli_xxx")
 	saveTestSyncCursor(t, store.PlatformFeishu, "feishu:cli_xxx", `{"old":true}`)
 
@@ -285,9 +276,6 @@ func TestCmdAccountDeletePlatformSelectorDeletesMatchingAccountAndFeishuConfig(t
 	}
 	if !strings.Contains(out, "Deleted account: feishu/default") {
 		t.Fatalf("output = %q, want feishu/default delete", out)
-	}
-	if accounts := listTestAccounts(t, store.PlatformFeishu); len(accounts) != 0 {
-		t.Fatalf("feishu accounts = %#v, want empty after delete", accounts)
 	}
 	if got := loadTestSyncCursor(t, store.PlatformFeishu, "feishu:cli_xxx"); got != "" {
 		t.Fatalf("feishu sync cursor = %q, want deleted", got)
@@ -378,19 +366,10 @@ func TestCmdRunStartsConfigGitHubAccountAndReportsMissingMCP(t *testing.T) {
 	}
 }
 
-func TestCmdAccountDeleteGitHubDeletesConfigCursorAndLegacyAccount(t *testing.T) {
+func TestCmdAccountDeleteGitHubDeletesConfigAndCursor(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	writeTestConfig(t)
 	upsertTestGitHubAccountConfig(t, "reviewer", "987654")
-	saveTestAccount(t, store.Account{
-		ID:              "github:987654",
-		Name:            "reviewer",
-		Platform:        store.PlatformGitHub,
-		BaseURL:         githubplatform.DefaultBaseURL,
-		UserID:          "987654",
-		CredentialsJSON: "{}",
-		Enabled:         true,
-	})
 	saveTestSyncCursor(t, store.PlatformGitHub, "github:987654", `{"old":true}`)
 
 	out, err := captureStdout(t, func() error {
@@ -401,9 +380,6 @@ func TestCmdAccountDeleteGitHubDeletesConfigCursorAndLegacyAccount(t *testing.T)
 	}
 	if !strings.Contains(out, "Deleted account: github/reviewer") {
 		t.Fatalf("output = %q, want github/reviewer delete", out)
-	}
-	if accounts := listTestAccounts(t, store.PlatformGitHub); len(accounts) != 0 {
-		t.Fatalf("github legacy accounts = %#v, want empty after delete", accounts)
 	}
 	if got := loadTestSyncCursor(t, store.PlatformGitHub, "github:987654"); got != "" {
 		t.Fatalf("github sync cursor = %q, want deleted", got)

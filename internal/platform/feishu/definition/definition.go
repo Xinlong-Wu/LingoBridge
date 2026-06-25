@@ -81,9 +81,6 @@ func Definition() platform.Definition {
 			if err := st.DeleteSyncBuf(ctx.Account.ID); err != nil {
 				return fmt.Errorf("delete sync cursor: %w", err)
 			}
-			if err := st.DeleteAccount(ctx.Account.ID); err != nil {
-				return fmt.Errorf("delete legacy account: %w", err)
-			}
 			return nil
 		},
 		NewRuntimePlatform: func(ctx platform.RuntimeContext) (core.Platform, error) {

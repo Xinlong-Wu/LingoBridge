@@ -1,6 +1,9 @@
 package core
 
 import (
+	"context"
+	"strings"
+
 	"lingobridge/internal/config"
 	"lingobridge/internal/llm"
 )
@@ -26,6 +29,23 @@ func (b *Bot) llmForUser(userID string) (config.ResolvedModel, llm.Client, error
 	if err != nil {
 		return config.ResolvedModel{}, nil, err
 	}
+	return b.clientForModelName(modelName)
+}
+
+// llmForMessage resolves the LLM client for a message, preferring an explicit
+// model override when it names a defined profile, otherwise falling back to the
+// user's stored preference or the default model.
+func (b *Bot) llmForMessage(ctx context.Context, msg InboundMessage) (config.ResolvedModel, llm.Client, error) {
+	if name := strings.TrimSpace(msg.Model); name != "" {
+		if b.LLMConfig.HasModel(name) {
+			return b.clientForModelName(name)
+		}
+		coreLog.Warn(ctx, "requested model %q is not defined; falling back to user/default model", name)
+	}
+	return b.llmForUser(msg.UserKey)
+}
+
+func (b *Bot) clientForModelName(modelName string) (config.ResolvedModel, llm.Client, error) {
 	model, err := b.LLMConfig.ResolveModel(modelName)
 	if err != nil {
 		model, err = b.LLMConfig.ResolveModel(b.LLMConfig.DefaultModel)

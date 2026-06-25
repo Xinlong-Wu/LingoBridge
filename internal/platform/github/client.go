@@ -13,7 +13,24 @@ import (
 	"strings"
 )
 
+// ErrNotFound is returned when the GitHub API responds with 404.
+// Use NotFoundError to access the response body for diagnostics.
 var ErrNotFound = errors.New("github resource not found")
+
+// NotFoundError wraps ErrNotFound with the response body from GitHub.
+type NotFoundError struct {
+	APIPath string
+	Body    string
+}
+
+func (e *NotFoundError) Error() string {
+	if e.Body != "" {
+		return fmt.Sprintf("github resource not found: %s body=%s", e.APIPath, e.Body)
+	}
+	return fmt.Sprintf("github resource not found: %s", e.APIPath)
+}
+
+func (e *NotFoundError) Unwrap() error { return ErrNotFound }
 
 type apiClient interface {
 	ListOpenPullRequests(ctx context.Context, repo Repository) ([]PullRequest, error)
@@ -79,10 +96,12 @@ func (c *githubClient) ListOpenPullRequests(ctx context.Context, repo Repository
 }
 
 func (c *githubClient) ReviewInstructions(ctx context.Context, pr PullRequest) (ReviewInstructions, bool, error) {
-	if text, err := c.GetFileContents(ctx, pr.Base.Repo, reviewInstructionsPath, pr.Base.SHA); err == nil {
+	text, err := c.GetFileContents(ctx, pr.Base.Repo, reviewInstructionsPath, pr.Base.SHA)
+	if err == nil {
 		return ReviewInstructions{Text: text, Source: fmt.Sprintf("%s@%s:%s", pr.Base.Repo.FullName(), shortSHA(pr.Base.SHA), reviewInstructionsPath)}, true, nil
-	} else if !errors.Is(err, ErrNotFound) {
-		return ReviewInstructions{}, false, err
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return ReviewInstructions{}, false, fmt.Errorf("fetch %s/%s@%s:%s: %w", pr.Base.Repo.Owner, pr.Base.Repo.Name, shortSHA(pr.Base.SHA), reviewInstructionsPath, err)
 	}
 	return ReviewInstructions{}, false, nil
 }
@@ -132,6 +151,8 @@ func (c *githubClient) doJSON(ctx context.Context, method, apiPath string, query
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
+	githubLog.Debug(ctx, "github request %s", req)
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("github api %s %s: %w", method, apiPath, err)
@@ -142,7 +163,7 @@ func (c *githubClient) doJSON(ctx context.Context, method, apiPath string, query
 		return fmt.Errorf("read github api response: %w", err)
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		return ErrNotFound
+		return &NotFoundError{APIPath: apiPath, Body: truncateForError(string(data))}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("github api %s %s: status=%d body=%s", method, apiPath, resp.StatusCode, truncateForError(string(data)))
